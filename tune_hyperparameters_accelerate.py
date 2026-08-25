@@ -332,7 +332,8 @@ if __name__ == "__main__":
 
     # Create dataloaders using the optimized tensorized format with text-balanced sampling
     dataloader_list = prepare_dataloaders(
-        fold_dir,
+        DATA_DIR,
+        fold_name,
         BATCH_SIZE,
         num_workers=num_workers,
         pin_memory=torch.cuda.is_available(),

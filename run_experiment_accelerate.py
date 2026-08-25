@@ -288,7 +288,8 @@ if __name__ == "__main__":
         fold_dir = os.path.join(DATA_DIR, fold_name)
         # Create the list of dataloaders for the training, validation (optional), and test sets
         dataloader_list = prepare_dataloaders(
-            fold_dir,
+            DATA_DIR,
+            fold_name,
             BATCH_SIZE,
             num_workers=num_workers,
             pin_memory=torch.cuda.is_available(),

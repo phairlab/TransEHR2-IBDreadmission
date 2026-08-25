@@ -164,7 +164,8 @@ def get_phenotype_names(fold_dir: str) -> Optional[List[str]]:
 
 
 def create_inference_loader(
-    fold_dir: str,
+    data_dir: str,
+    fold_name: str,
     split: str,
     batch_size: int,
     num_workers: int,
@@ -178,8 +179,13 @@ def create_inference_loader(
     rank 1 gets the second, etc.  After ``accelerator.gather()``, the
     concatenated predictions are in original dataset order.
 
+    A split is a set of row indices into the cohort-wide arrays of
+    blueprint section 4.4, not a directory of its own, so the shard is
+    taken over those rows.
+
     Args:
-        fold_dir: Path to the fold directory containing split subdirs.
+        data_dir: DATA_DIR, holding extracted/ and fold{i}/.
+        fold_name: Which fold, e.g. 'fold0'.
         split: One of 'train', 'val', or 'test'.
         batch_size: Number of samples per batch.
         num_workers: Number of DataLoader worker processes.
@@ -189,28 +195,33 @@ def create_inference_loader(
 
     Returns:
         Tuple of (DataLoader or None, total_dataset_size).  The loader
-        is None only when split is 'val' and the directory is missing.
+        is None only when split is 'val' and its row array is missing.
 
     Raises:
-        FileNotFoundError: If a required split directory ('train' or
+        FileNotFoundError: If a required split's row array ('train' or
             'test') is not found.
     """
-    dataset_path = os.path.join(fold_dir, split)
-    if not os.path.exists(dataset_path):
+    rows_path = os.path.join(
+        data_dir, fold_name, f'{fold_name}_{split}_rows.npy'
+    )
+    if not os.path.exists(rows_path):
         if split == 'val':
             return None, 0
-        raise FileNotFoundError(f"'{split}/' not found in {fold_dir}")
+        raise FileNotFoundError(f"{rows_path} not found")
 
-    dataset = load_dataset(dataset_path)
-    total = len(dataset)
+    dataset = load_dataset(
+        os.path.join(data_dir, 'extracted'), fold=fold_name
+    )
+    rows = np.load(rows_path).tolist()
+    total = len(rows)
 
     # Shard sequentially across ranks
     per_rank = math.ceil(total / world_size)
     start_idx = rank * per_rank
     end_idx = min(start_idx + per_rank, total)
-    indices = list(range(start_idx, end_idx))
+    indices = rows[start_idx:end_idx]
 
-    subset = Subset(dataset, indices) if world_size > 1 else dataset
+    subset = Subset(dataset, indices)
 
     collate_fn = collate_tensorized
     loader = DataLoader(
@@ -672,7 +683,7 @@ if __name__ == '__main__':
         dataset_sizes: Dict[str, int] = {}
         for split in ['train', 'val', 'test']:
             loader, total = create_inference_loader(
-                fold_dir, split, BATCH_SIZE,
+                DATA_DIR, fold_name, split, BATCH_SIZE,
                 args.num_workers, pin_memory,
                 world_size=accelerator.num_processes,
                 rank=accelerator.process_index

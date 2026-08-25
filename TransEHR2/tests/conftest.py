@@ -97,6 +97,23 @@ class MiniRoot:
             write_csv(self.root / str(patid) / 'drugs.csv', rows,
                       DRUGS_COLUMNS)
 
+    def add_fold(self, fold_name, train, val=None, test=None):
+        """Write section 3's row-index arrays for one fold.
+
+        A fold is ``int64`` positions in ``labels.csv``, not a directory
+        of its own arrays, so this is all a fold is on disk. Extraction
+        finds ``{fold}_train_rows.npy`` and writes that fold's
+        standardization statistics; the loaders find all three.
+        """
+        fold_dir = self.data_dir / fold_name
+        fold_dir.mkdir(parents=True, exist_ok=True)
+        for partition, rows in (('train', train), ('val', val),
+                                ('test', test)):
+            if rows is None:
+                continue
+            np.save(fold_dir / f'{fold_name}_{partition}_rows.npy',
+                    np.asarray(rows, dtype=np.int64))
+
     def finish(self) -> Path:
         """Write labels.csv, the YAMLs and ClinVec; return the config."""
         write_csv(self.data_dir / 'labels.csv', self.labels_rows,

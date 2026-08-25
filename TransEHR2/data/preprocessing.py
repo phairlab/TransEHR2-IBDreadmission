@@ -52,6 +52,28 @@ Readings this module commits to
   ``TOKENIZER_PAD_TOKEN`` and ``MAX_TOKEN_LENGTH`` from ``constants.py``;
   the *resolved* ``pad_token_id`` section 4.4 also asks for is added by C4,
   where the tokenizer is actually loaded and the fact established.
+* **A fold is a set of row indices, so the loaders wrap one cohort
+  dataset in a ``Subset`` per partition** (C2, from section 2's decision
+  to extract once). ``prepare_dataloaders`` therefore takes
+  ``(data_dir, fold_name)`` rather than a fold directory: the arrays are
+  in ``extracted/`` and only the row indices are in ``fold{i}/``. One set
+  of mappings serves all three partitions, ``MixedDataset`` stays
+  cohort-wide and fold-agnostic, and ``item['idx']`` stays a row of
+  ``labels.csv``. Nothing in section 5.1's distributed subsection is
+  affected -- ``TextBalancedDistributedSampler`` reads only
+  ``len(dataset)``, so per-rank sample counts are what they were.
+* **The dataset is handed paths, not open memmaps** (C2). A
+  ``np.memmap`` pickles by value, and these loaders start their workers
+  with ``spawn``; ``datasets.py``'s module docstring records the
+  measurement, the reasoning and the alternatives.
+* **The lookup family's batch keys are keyed by presence** (C2), the way
+  ``episode_id`` already was, so ``TEXT_FEATS: []`` or ``DRUG_FEATS: []``
+  simply omits them. Drug slots are collated *unpooled* into
+  ``val_data['drug']`` and read by nothing until C3: section 4.3 puts the
+  dose-weighted mean in the forward pass, where a gradient still reaches
+  an individual slot. The stacked ``(B, T, n_feats, D)`` text tensor is
+  left exactly as it is -- replacing it with a per-feature list is
+  section 5.1's, and C3's first commit.
 * **Invariant 12 runs before any patient data is read.** Section 6 asks
   for it as the first step of ``extract_data.py``. The category_map clause
   used to be checked inside the per-timestep loop, so a bad map raised
@@ -73,7 +95,7 @@ import yaml
 
 from collections import Counter
 from functools import partial
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader, Sampler, Subset
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from typing import Dict, Iterator, List, Optional, Tuple, Union
@@ -81,7 +103,7 @@ from typing import Dict, Iterator, List, Optional, Tuple, Union
 from TransEHR2.constants import HF_API_TOKEN, LLM_NAME, MAX_TOKEN_LENGTH, TOKENIZER_PAD_TOKEN
 from TransEHR2.data.custom_types import EpisodeData, MixedTensorDataset, TensorDimensions
 from TransEHR2.data.datareaders import EHRDataReader
-from TransEHR2.data.datasets import MixedDataset
+from TransEHR2.data.datasets import LazyArray, MixedDataset
 
 
 # Global variables for multi-process data extraction
@@ -854,8 +876,13 @@ def get_text_counts_from_dataset(dataset) -> np.ndarray:
     """
     Compute total text entry count per episode from MixedDataset sparse storage.
 
+    Counted over the text members of the lookup family (section 4.3):
+    balancing exists to keep one rank from receiving every text-heavy
+    episode, and it is the LLM-width embeddings that make an episode
+    heavy, not the 128-wide drug ones.
+
     Args:
-        dataset: MixedDataset instance with sparse text storage
+        dataset: MixedDataset instance with sparse lookup storage
 
     Returns:
         Array of shape (n_episodes,) with total text entries per episode
@@ -863,9 +890,10 @@ def get_text_counts_from_dataset(dataset) -> np.ndarray:
     n_episodes = dataset.n_episodes
     text_counts = np.zeros(n_episodes, dtype=np.int32)
 
-    # Sum across all text features
-    for f in range(dataset.n_text_feats):
-        offsets = dataset.val_text_offsets[f]
+    for f, feat_type in enumerate(dataset.lookup_feat_types):
+        if feat_type != 'text':
+            continue
+        offsets = dataset.lookup_csr[f]['offsets']
         # offsets[i+1] - offsets[i] gives count for episode i
         for i in range(n_episodes):
             text_counts[i] += int(offsets[i + 1]) - int(offsets[i])
@@ -1314,6 +1342,19 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     Section 4.2 removes the history region, so the history-masking
     arguments this took are gone with it.
 
+    Everything a member of the lookup family contributes is keyed by
+    presence rather than by a feature count, the way ``episode_id``
+    already is: with ``TEXT_FEATS: []`` or ``DRUG_FEATS: []`` the
+    corresponding keys are simply absent from the item, which is what
+    keeps section 5.1's regression gate -- run with ``DRUG_FEATS: []`` --
+    unaffected by the drug branch existing.
+
+    **Drug slots are passed through unpooled** (section 4.3). Nothing
+    reads ``val_data['drug']`` yet: the dose-weighted mean is part of the
+    forward pass, so that a gradient survives to an individual slot, and
+    wiring it is C3's. Collating it here rather than dropping it is what
+    makes the shapes assertable end to end.
+
     Args:
         batch: List of episode dicts from MixedDataset.__getitem__.
     """
@@ -1323,20 +1364,17 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     val_masks = torch.stack([b['val_masks'] for b in batch], dim=0)
     event_times = torch.stack([b['event_times'] for b in batch], dim=0)
     event_masks = torch.stack([b['event_masks'] for b in batch], dim=0)
-    static_data = torch.stack([b['static_data'] for b in batch], dim=0)
 
     # Stack indicator tensors
     val_numeric_ind = torch.stack([b['val_numeric_indicators'] for b in batch], dim=0)
     val_categorical_ind = torch.stack([b['val_categorical_indicators'] for b in batch], dim=0)
     val_ordinal_ind = torch.stack([b['val_ordinal_indicators'] for b in batch], dim=0)
-    val_text_ind = torch.stack([b['val_text_indicators'] for b in batch], dim=0)
     event_ind = torch.stack([b['event_indicators'] for b in batch], dim=0)
 
     # Stack per-feature value tensors
     n_numeric_feats = len(batch[0]['val_numeric_values'])
     n_categorical_feats = len(batch[0]['val_categorical_values'])
     n_ordinal_feats = len(batch[0]['val_ordinal_values'])
-    n_text_feats = len(batch[0]['val_text_embeddings'])
 
     val_numeric_values = [
         torch.stack([b['val_numeric_values'][f] for b in batch], dim=0)
@@ -1355,7 +1393,9 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     # Each b['val_text_embeddings'][f] has shape [max_ts_len, embed_dim]
     # First stack features: [max_ts_len, n_text_feats, embed_dim] per episode
     # Then stack episodes: [batch_size, max_ts_len, n_text_feats, embed_dim]
-    if n_text_feats > 0:
+    # Section 5.1 replaces this stack with a per-feature list; that is
+    # C3's first commit, together with the model sites that read it.
+    if 'val_text_embeddings' in batch[0]:
         val_text_embeddings = torch.stack([
             torch.stack(b['val_text_embeddings'], dim=1)  # [max_ts, n_feats, embed_dim]
             for b in batch
@@ -1392,17 +1432,48 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
             'times': event_times,
             'masks': event_masks,
         },
-        'static_data': static_data,
         'targets': {
             'time_to_event': time_to_event,
             'event_type': event_type,
         },
     }
 
+    # Absent under section A.3's empty STATIC_FEATS. models.py:339 and
+    # :521 both read it defensively, so omitting the key is the case they
+    # already handle; a (batch, 0) tensor is not.
+    if 'static_data' in batch[0]:
+        result['static_data'] = torch.stack(
+            [b['static_data'] for b in batch], dim=0
+        )
+
     if val_text_embeddings is not None:
         result['val_data']['text'] = {
-            'indicators': val_text_ind,
+            'indicators': torch.stack(
+                [b['val_text_indicators'] for b in batch], dim=0
+            ),
             'embedded_values': val_text_embeddings,
+        }
+
+    # Slots, doses and masks, unpooled (section 4.3). Read by nobody
+    # until C3 puts the dose-weighted mean at the encoder input.
+    if 'val_drug_slots' in batch[0]:
+        n_drug_feats = len(batch[0]['val_drug_slots'])
+        result['val_data']['drug'] = {
+            'indicators': torch.stack(
+                [b['val_drug_indicators'] for b in batch], dim=0
+            ),
+            'slot_values': [
+                torch.stack([b['val_drug_slots'][f] for b in batch], dim=0)
+                for f in range(n_drug_feats)
+            ],
+            'doses': [
+                torch.stack([b['val_drug_doses'][f] for b in batch], dim=0)
+                for f in range(n_drug_feats)
+            ],
+            'masks': [
+                torch.stack([b['val_drug_masks'][f] for b in batch], dim=0)
+                for f in range(n_drug_feats)
+            ],
         }
 
     # Identifiers for mapping model outputs (e.g. XAI scores) back to the
@@ -1498,70 +1569,193 @@ def save_extracted(
     print(f"Saved extracted dataset to {base_path}/")
 
 
-def load_dataset(base_path: str) -> MixedDataset:
-    """
-    Load tensorized dataset with memory-mapped arrays.
+def _load_lookup_family(
+    base_path: str,
+    metadata: dict
+) -> Tuple[Dict[str, LazyArray], List[Dict[str, LazyArray]], List[LazyArray]]:
+    """Open section 4.4's lookup arrays and the global tables they index.
 
-    NOTE: this still reads the pre-C1 per-episode text layout and the
-    mortality / length-of-stay / phenotype targets. It is C2's to bring on
-    to section 4.4's contract, together with ``MixedDataset.__getitem__``,
-    which is the only consumer of what it returns.
-    """
-    def load_mmap(name: str) -> np.ndarray:
-        return np.load(os.path.join(base_path, f'{name}.npy'), mmap_mode='r')
+    The CSR filenames carry the feature's *type* and its index within
+    that type, which is how ``save_extracted`` writes them and how the
+    webapp finds drugs; the embedding table is per type, since section
+    4.4 names two files rather than one per feature.
 
+    A missing table is refused rather than worked around. Both tables are
+    C4's, so this is the state of a tree in which C4 has not run -- but a
+    text feature has no declared width until C4 fills
+    ``lookup_table_dims``, so there is no shape to fall back to, and a
+    lookup feature silently dropped from the batch would train a
+    ``USE_TEXT`` model on no text at all. The row-count checks catch the
+    other half of the same problem: extraction re-interns the strings on
+    every run, so a table left over from an earlier extraction indexes a
+    vocabulary that no longer exists.
+
+    Returns:
+        ``(indicators_by_type, csr_per_feature, table_per_feature)``.
+    """
+    feat_types = metadata['lookup_feat_types']
+    slot_dims = metadata['lookup_slot_dims']
+    pad_indices = metadata['lookup_pad_indices']
+    table_dims = metadata['lookup_table_dims']
+
+    def path(name: str) -> str:
+        return os.path.join(base_path, f'{name}.npy')
+
+    indicators = {}
+    for feat_type in dict.fromkeys(feat_types):
+        indicators[feat_type] = LazyArray(path(f'val_{feat_type}_indicators'))
+
+    tables = {}
+    for feat_type in dict.fromkeys(feat_types):
+        table_path = path(f'{feat_type}_embeddings')
+        if not os.path.exists(table_path):
+            raise FileNotFoundError(
+                f"{table_path} not found. The global {feat_type} lookup "
+                f"table is built by C4 (embed_text.py for text, ClinVec "
+                f"for drugs); section 4.4's int32 values are row indices "
+                f"into it, so the feature cannot be gathered without it."
+            )
+        tables[feat_type] = LazyArray(table_path)
+
+    if 'text' in tables:
+        with open(os.path.join(base_path, 'text_strings.pkl'), 'rb') as f:
+            n_strings = len(pickle.load(f))
+        rows = tables['text'].shape[0]
+        if rows != n_strings:
+            raise ValueError(
+                f"text_embeddings.npy has {rows} row(s) but "
+                f"text_strings.pkl has {n_strings} string(s). The table "
+                f"predates this extraction, which reassigned the string "
+                f"indices (section 4.4); rebuild it with embed_text.py."
+            )
+
+    csr = []
+    per_type: Counter = Counter()
+    for f, feat_type in enumerate(feat_types):
+        j = per_type[feat_type]
+        per_type[feat_type] += 1
+        entry = {
+            key: LazyArray(path(f'{feat_type}_{key}_{j}'))
+            for key in ('offsets', 'timesteps', 'values')
+        }
+        if slot_dims[f] > 1:
+            # A single-slot feature has no dose or mask array by
+            # definition (section 4.3), so neither is looked for.
+            entry['doses'] = LazyArray(path(f'{feat_type}_doses_{j}'))
+            entry['masks'] = LazyArray(path(f'{feat_type}_masks_{j}'))
+        csr.append(entry)
+
+        table = tables[feat_type]
+        if pad_indices[f] is not None and table.shape[0] != pad_indices[f] + 1:
+            raise ValueError(
+                f"{feat_type}_embeddings.npy has {table.shape[0]} row(s) "
+                f"but '{metadata['lookup_feats'][f]}' pads unused slots "
+                f"with index {pad_indices[f]}, so the table must have "
+                f"{pad_indices[f] + 1} rows -- the vocabulary's, plus the "
+                f"all-zero pad row (section 4.4)."
+            )
+        if table_dims[f] is not None and table.shape[1] != table_dims[f]:
+            raise ValueError(
+                f"{feat_type}_embeddings.npy is {table.shape[1]} wide but "
+                f"extraction recorded {table_dims[f]} for "
+                f"'{metadata['lookup_feats'][f]}'."
+            )
+
+    return indicators, csr, [tables[t] for t in feat_types]
+
+
+def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:
+    """Open ``extracted/`` as one cohort-wide, fold-standardized dataset.
+
+    Every array is a ``LazyArray`` -- a path this process maps read-only
+    on first touch -- rather than an open memmap, because a ``np.memmap``
+    pickles by value and ``prepare_dataloaders`` starts its workers with
+    ``spawn``. ``datasets.py``'s module docstring records the measurement
+    and the alternatives.
+
+    Args:
+        base_path: ``{DATA_DIR}/extracted``, section 4.4's directory.
+        fold: The fold whose training statistics standardize the numeric
+            values, e.g. ``'fold0'``; its
+            ``summary_statistics_{fold}.npz`` must be in ``base_path``.
+            ``None`` returns the values unscaled, which is for inspection
+            and for tests -- passing it for training would evaluate a
+            model on inputs from a different distribution than it saw.
+
+    Returns:
+        A ``MixedDataset`` over every row of ``labels.csv``. Section 3's
+        folds are row indices into it, applied by a ``Subset``.
+    """
     with open(os.path.join(base_path, 'metadata.pkl'), 'rb') as f:
         metadata = pickle.load(f)
 
-    # Row idx -> patient episode ID (sibling of the dataset dir). Absent for
-    # datasets built before IDs were threaded through; None keeps it optional.
+    def load_mmap(name: str) -> LazyArray:
+        return LazyArray(os.path.join(base_path, f'{name}.npy'))
+
+    # Row -> (PATID, STAY_INDEX), written beside the arrays by
+    # extract_data.py. Optional, since nothing but XAI needs it.
     episode_ids = None
-    ids_path = f'{base_path}_ids.pkl'
+    ids_path = os.path.join(base_path, 'episode_ids.pkl')
     if os.path.exists(ids_path):
         with open(ids_path, 'rb') as f:
             episode_ids = pickle.load(f)
 
+    numeric_stats = None
+    if fold is not None:
+        stats_path = os.path.join(
+            base_path, f'summary_statistics_{fold}.npz'
+        )
+        if not os.path.exists(stats_path):
+            raise FileNotFoundError(
+                f"{stats_path} not found. Standardization statistics are "
+                f"written per fold by extract_data.py, over that fold's "
+                f"training rows alone (section 5); re-run extraction with "
+                f"{fold}/{fold}_train_rows.npy in place."
+            )
+        numeric_stats = dict(np.load(stats_path))
+
     n_num = metadata['n_numeric_feats']
     n_cat = metadata['n_categorical_feats']
-    n_ord = metadata.get('n_ordinal_feats', 0)
-    n_txt = metadata['n_text_feats']
-    text_embed_dim = metadata.get('text_embed_dim', 0)
+    n_ord = metadata['n_ordinal_feats']
+    lookup_indicators, lookup_csr, lookup_tables = _load_lookup_family(
+        base_path, metadata
+    )
 
-    # Load pre-computed embeddings if available (backward-compatible)
-    val_text_embeddings = []
-    if text_embed_dim > 0:
-        for i in range(n_txt):
-            embed_path = os.path.join(base_path, f'val_text_embeddings_{i}.npy')
-            if os.path.exists(embed_path):
-                val_text_embeddings.append(
-                    np.load(embed_path, mmap_mode='r')
-                )
+    # Absent by design when STATIC_FEATS is empty (section 4.4).
+    static_data = None
+    if os.path.exists(os.path.join(base_path, 'static_data.npy')):
+        static_data = load_mmap('static_data')
 
     return MixedDataset(
-        val_numeric_indicators=load_mmap('val_numeric_indicators'),
-        val_numeric_values=[load_mmap(f'val_numeric_values_{i}') for i in range(n_num)],
-        val_categorical_indicators=load_mmap('val_categorical_indicators'),
-        val_categorical_values=[load_mmap(f'val_categorical_values_{i}') for i in range(n_cat)],
-        val_ordinal_indicators=load_mmap('val_ordinal_indicators') if n_ord > 0 else np.empty((0, 0, 0), dtype=np.float32),
-        val_ordinal_values=[load_mmap(f'val_ordinal_values_{i}') for i in range(n_ord)],
-        val_text_indicators=load_mmap('val_text_indicators'),
         val_times=load_mmap('val_times'),
         val_masks=load_mmap('val_masks'),
-        val_text_offsets=[load_mmap(f'val_text_offsets_{i}') for i in range(n_txt)],
-        val_text_values=[load_mmap(f'val_text_values_{i}') for i in range(n_txt)],
-        val_text_masks=[load_mmap(f'val_text_masks_{i}') for i in range(n_txt)],
-        val_text_timesteps=[load_mmap(f'val_text_timesteps_{i}') for i in range(n_txt)],
-        val_text_embeddings=val_text_embeddings,
-        text_embed_dim=text_embed_dim,
+        val_numeric_indicators=load_mmap('val_numeric_indicators'),
+        val_numeric_values=[
+            load_mmap(f'val_numeric_values_{i}') for i in range(n_num)
+        ],
+        val_categorical_indicators=load_mmap('val_categorical_indicators'),
+        val_categorical_values=[
+            load_mmap(f'val_categorical_values_{i}') for i in range(n_cat)
+        ],
+        val_ordinal_indicators=load_mmap('val_ordinal_indicators'),
+        val_ordinal_values=[
+            load_mmap(f'val_ordinal_values_{i}') for i in range(n_ord)
+        ],
+        categorical_feat_dims=metadata['categorical_feat_dims'],
+        ordinal_feat_dims=metadata['ordinal_feat_dims'],
+        lookup_indicators=lookup_indicators,
+        lookup_csr=lookup_csr,
+        lookup_tables=lookup_tables,
+        lookup_slot_dims=metadata['lookup_slot_dims'],
+        lookup_feat_types=metadata['lookup_feat_types'],
         event_indicators=load_mmap('event_indicators'),
         event_times=load_mmap('event_times'),
         event_masks=load_mmap('event_masks'),
-        static_data=load_mmap('static_data'),
-        mortality=load_mmap('mortality'),
-        length_of_stay=load_mmap('length_of_stay'),
-        phenotype=load_mmap('phenotype'),
+        time_to_event=load_mmap('time_to_event'),
+        event_type=load_mmap('event_type'),
         max_ts_len=metadata['max_ts_len'],
-        text_token_len=metadata['text_token_len'],
+        numeric_stats=numeric_stats,
+        static_data=static_data,
         episode_ids=episode_ids,
     )
 
@@ -1622,7 +1816,7 @@ def get_text_counts_from_dataset_vectorized(dataset) -> np.ndarray:
     Compute total text entry count per episode (vectorized version).
 
     Args:
-        dataset: MixedDataset instance with sparse text storage
+        dataset: MixedDataset instance with sparse lookup storage
 
     Returns:
         Array of shape (n_episodes,) with total text entries per episode
@@ -1630,9 +1824,13 @@ def get_text_counts_from_dataset_vectorized(dataset) -> np.ndarray:
     n_episodes = dataset.n_episodes
     text_counts = np.zeros(n_episodes, dtype=np.int32)
 
-    for f in range(dataset.n_text_feats):
-        offsets = np.asarray(dataset.val_text_offsets[f])
-        text_counts += (offsets[1:] - offsets[:-1]).astype(np.int32)
+    for f, feat_type in enumerate(dataset.lookup_feat_types):
+        if feat_type != 'text':
+            continue
+        offsets = dataset.lookup_csr[f]['offsets']
+        text_counts += (
+            offsets[1:] - offsets[:-1]
+        ).astype(np.int32)
 
     return text_counts
 
@@ -1961,6 +2159,7 @@ def _report_extraction(
 
 def prepare_dataloaders(
     data_dir: str,
+    fold_name: str,
     batch_size: int,
     num_workers: int = 4,
     pin_memory: bool = True,
@@ -1969,57 +2168,97 @@ def prepare_dataloaders(
     world_size: Optional[int] = None,
     rank: Optional[int] = None
 ) -> List[DataLoader]:
-    """Prepare training, (validation), and test DataLoaders for MixedDataset.
+    """Prepare training, (validation) and test DataLoaders for one fold.
 
-    This function creates PyTorch DataLoader instances for `MixedDataset` objects prepared by
-    `extract_data()`. The dataset uses memory-mapped numpy arrays for efficient multi-worker
-    access with minimal memory overhead. Workers share read-only memory-mapped arrays rather
-    than duplicating data in each worker process' memory space.
+    Section 2's second decision -- extract once for the whole cohort --
+    makes a fold a set of *row indices* rather than a directory of its own
+    arrays, so this opens ``{data_dir}/extracted`` once and wraps it in one
+    ``torch.utils.data.Subset`` per partition. One set of mappings serves
+    all three partitions and every worker, which is the point of the
+    memory mapping; ``MixedDataset`` itself stays cohort-wide and knows
+    nothing about folds.
 
-    NOTE: like ``load_dataset``, this still assumes the pre-C1 layout of
-    one directory per fold partition. C2 brings it on to the cohort-wide
-    arrays and the fold row indices of section 3.
+    ``Subset`` also leaves ``item['idx']`` a row of ``labels.csv`` rather
+    than a partition-local position, so ``episode_ids`` and any XAI score
+    resolve against the canonical order without a second mapping.
 
     Args:
-        data_dir (str): Directory containing 'train/', 'val/', and 'test/' subdirectories. Each
-            subdirectory should be the output of `extract_data()`.
-        batch_size (int): Number of samples per batch (per GPU in distributed settings).
-        num_workers (int, optional): Number of worker processes for data loading. Defaults to 4.
-        pin_memory (bool, optional): Whether to pin memory in DataLoader for faster GPU transfers.
-            Defaults to True. Only effective if num_workers > 0.
-        prefetch_factor (int, optional): Number of batches to prefetch per worker. Defaults to 2.
-            Higher values increase memory usage but can improve throughput if batch processing by
-            the model is slower than data loading. Only effective if num_workers > 0.
-        balance_text (bool, optional): If True and running distributed (world_size > 1), use
-            TextBalancedDistributedSampler to balance text density across ranks for all partitions.
-            Defaults to False.
-        world_size (int, optional): Number of distributed processes. Required if balance_text=True.
-        rank (int, optional): Current process rank. Required if balance_text=True.
+        data_dir (str): ``DATA_DIR``, holding ``extracted/`` (section 4.4)
+            and ``fold{i}/`` (section 3).
+        fold_name (str): Which fold, e.g. ``'fold0'``. Selects both the
+            row-index arrays and the standardization statistics.
+        batch_size (int): Number of samples per batch (per GPU in distributed
+            settings).
+        num_workers (int, optional): Number of worker processes for data
+            loading. Defaults to 4.
+        pin_memory (bool, optional): Whether to pin memory in DataLoader
+            for faster GPU transfers. Defaults to True. Only effective if
+            num_workers > 0.
+        prefetch_factor (int, optional): Number of batches to prefetch per
+            worker. Defaults to 2. Higher values increase memory usage but
+            can improve throughput if batch processing by the model is
+            slower than data loading. Only effective if num_workers > 0.
+        balance_text (bool, optional): If True and running distributed
+            (world_size > 1), use TextBalancedDistributedSampler to balance
+            text density across ranks for all partitions. Defaults to
+            False.
+        world_size (int, optional): Number of distributed processes.
+            Required if balance_text=True.
+        rank (int, optional): Current process rank. Required if
+            balance_text=True.
 
     Returns:
-        List[DataLoader]: List of DataLoaders in order: [train_loader, val_loader (if available),
-            test_loader]. If validation data are not found, only [train_loader, test_loader] is
-            returned.
+        List[DataLoader]: DataLoaders in order: [train_loader, val_loader
+            (if available), test_loader]. If the fold has no validation
+            rows, only [train_loader, test_loader] is returned.
 
     Raises:
-        FileNotFoundError: If 'train/' or 'test/' directories are not found in `data_dir`.
-        ValueError: If balance_text=True but world_size or rank is not provided.
+        FileNotFoundError: If the fold's train or test row array is not
+            found, or the fold has no standardization statistics.
+        ValueError: If balance_text=True but world_size or rank is not
+            given, or if a row array indexes past the extracted cohort.
     """
     if balance_text and (world_size is None or rank is None):
-        raise ValueError("world_size and rank are required when balance_text=True")
+        raise ValueError(
+            "world_size and rank are required when balance_text=True"
+        )
 
+    dataset = load_dataset(
+        os.path.join(data_dir, 'extracted'), fold=fold_name
+    )
+    # Counted once over the cohort, then indexed per partition.
+    cohort_text_counts = (
+        get_text_counts_from_dataset_vectorized(dataset)
+        if balance_text else None
+    )
+
+    fold_dir = os.path.join(data_dir, fold_name)
     dataloaders = []
 
     for partition in ['train', 'val', 'test']:
-        dataset_path = os.path.join(data_dir, partition)
+        rows_path = os.path.join(
+            fold_dir, f'{fold_name}_{partition}_rows.npy'
+        )
 
-        if not os.path.exists(dataset_path):
+        if not os.path.exists(rows_path):
             if partition == 'val':
                 continue
             else:
-                raise FileNotFoundError(f'{partition}/ not found in {data_dir}')
+                raise FileNotFoundError(
+                    f'{rows_path} not found. Section 3 writes '
+                    f'{fold_name}_{{train,val,test}}_rows.npy into '
+                    f"{fold_dir}; run IBDdataprep's split.py."
+                )
 
-        dataset = load_dataset(dataset_path)
+        rows = np.load(rows_path)
+        if rows.size and (rows.min() < 0 or rows.max() >= len(dataset)):
+            raise ValueError(
+                f"{rows_path} indexes rows [{rows.min()}, {rows.max()}] "
+                f"but the extracted cohort has {len(dataset)} episode(s). "
+                f"Fold rows are positions in labels.csv; rebuild the folds "
+                f"against the current labels.csv, or re-extract."
+            )
+        subset = Subset(dataset, rows.tolist())
 
         # Determine sampler and shuffle behavior
         sampler = None
@@ -2027,10 +2266,9 @@ def prepare_dataloaders(
 
         # Only add balanced sampler if explicitly requested AND distributed
         if balance_text and world_size is not None and world_size > 1:
-            text_counts = get_text_counts_from_dataset_vectorized(dataset)
             sampler = TextBalancedDistributedSampler(
-                dataset=dataset,
-                text_counts=text_counts,
+                dataset=subset,
+                text_counts=cohort_text_counts[rows],
                 batch_size=batch_size,
                 num_replicas=world_size,
                 rank=rank,
@@ -2040,7 +2278,7 @@ def prepare_dataloaders(
             shuffle = False  # Sampler handles shuffling
 
         loader = DataLoader(
-            dataset,
+            subset,
             batch_size=batch_size,
             shuffle=shuffle if sampler is None else False,
             sampler=sampler,

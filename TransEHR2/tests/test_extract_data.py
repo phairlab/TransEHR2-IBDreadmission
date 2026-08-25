@@ -21,6 +21,10 @@ import yaml
 
 from pathlib import Path
 
+from TransEHR2.data.preprocessing import (
+    collate_tensorized, load_dataset, prepare_dataloaders
+)
+
 from extract_data import main as extract_main
 
 # .../TransEHR2-IBDreadmission/TransEHR2/TransEHR2/tests/this_file.py
@@ -68,6 +72,18 @@ def extracted(tmp_path_factory):
     config['MAX_EPISODE_LEN_STEPS'] = MAX_EPISODE_LEN_STEPS
     config_path = tmp_path / 'dataset.yaml'
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    # One fold, so extraction writes the standardization statistics C2
+    # loads. The partitions are a hand-made split rather than split.py's
+    # -- nothing here tests the draw, only that a fold is row indices.
+    n = len(pd.read_csv(data_dir / 'labels.csv'))
+    assert n >= 3, "the fold needs three partitions"
+    rows = np.arange(n, dtype=np.int64)
+    fold_dir = data_dir / 'fold0'
+    fold_dir.mkdir()
+    for partition, selected in (('train', rows[:-2]), ('val', rows[-2:-1]),
+                                ('test', rows[-1:])):
+        np.save(fold_dir / f'fold0_{partition}_rows.npy', selected)
 
     assert extract_main([str(config_path)]) == 0
     return data_dir
@@ -264,3 +280,113 @@ def test_targets_and_ids_follow_labels_csv(extracted):
                        labels.TIME_TO_EVENT.to_numpy(np.float32))
     assert (load(extracted, 'event_type') ==
             labels.EVENT_TYPE.to_numpy()).all()
+
+
+# --- C2 over the same cohort and the same pair of config files -------
+
+# Small enough to keep the test cheap; the real width is the LLM's and
+# is per-feature under section 5.1, so nothing may assume it.
+FIXTURE_TEXT_DIM = 8
+
+
+@pytest.fixture(scope='module')
+def loaded(extracted):
+    """The extracted fixture cohort, with C4's tables stood in for.
+
+    Section 4.4's global tables are C4's, so a C2 test has to supply
+    them. Row *r* is filled with *r*, which makes a gathered vector name
+    the row it came from; the drug table's final row is the all-zero pad.
+    """
+    directory = extracted / 'extracted'
+    with open(directory / 'metadata.pkl', 'rb') as f:
+        metadata = pickle.load(f)
+    with open(directory / 'text_strings.pkl', 'rb') as f:
+        n_strings = len(pickle.load(f))
+
+    text = np.repeat(
+        np.arange(n_strings, dtype=np.float32)[:, None],
+        FIXTURE_TEXT_DIM, axis=1
+    )
+    np.save(directory / 'text_embeddings.npy', text)
+
+    pad, width = (metadata['lookup_pad_indices'][1],
+                  metadata['lookup_table_dims'][1])
+    drug = np.repeat(
+        np.arange(pad + 1, dtype=np.float32)[:, None], width, axis=1
+    )
+    drug[pad] = 0.0
+    np.save(directory / 'drug_embeddings.npy', drug)
+    return extracted
+
+
+def test_one_hot_widths_equal_the_declared_category_sizes(loaded):
+    """C2's headline claim, against the live pair of config files rather
+    than a fixture's: an int16 index expands to exactly as many columns
+    as ``variable_properties.yaml`` declares levels."""
+    props = yaml.safe_load(VARIABLE_PROPERTIES.read_text())
+    with open(loaded / 'extracted' / 'metadata.pkl', 'rb') as f:
+        metadata = pickle.load(f)
+
+    dataset = load_dataset(str(loaded / 'extracted'), fold='fold0')
+    item = dataset[0]
+    for family in ('categorical', 'ordinal'):
+        widths = [v.shape[-1] for v in item[f'val_{family}_values']]
+        declared = [props[f]['size'] for f in metadata[f'{family}_feats']]
+        assert widths == declared, family
+        # ``size`` and the map agree -- invariant 12 -- so either is the
+        # width; asserting both is what makes this not a tautology.
+        assert widths == [
+            len(props[f]['category_map']) for f in metadata[f'{family}_feats']
+        ], family
+
+
+def test_every_index_expands_to_at_most_one_hot(loaded):
+    """Over every episode, feature and timestep of the fixture cohort: a
+    one-hot row sums to 1 where the index was in domain and to 0 where
+    it was the -1 sentinel, and never to anything else."""
+    dataset = load_dataset(str(loaded / 'extracted'), fold='fold0')
+    for row in range(len(dataset)):
+        item = dataset[row]
+        for family in ('categorical', 'ordinal'):
+            for f, values in enumerate(item[f'val_{family}_values']):
+                sums = values.sum(dim=-1)
+                assert ((sums == 0) | (sums == 1)).all(), (row, family, f)
+                stored = np.asarray(
+                    getattr(dataset, f'val_{family}_values')[f][row]
+                )
+                assert (sums.numpy() == (stored >= 0)).all(), (row, family, f)
+
+
+def test_a_fixture_batch_collates_at_the_live_widths(loaded, widths):
+    """Section 4.4's 94 / 37 / 16, through __getitem__ and collate."""
+    dataset = load_dataset(str(loaded / 'extracted'), fold='fold0')
+    batch = collate_tensorized([dataset[0], dataset[1]])
+    val = batch['val_data']
+    T = MAX_EPISODE_LEN_STEPS
+
+    assert val['numeric']['indicators'].shape == (2, T, widths['numeric'])
+    assert len(val['numeric']['values']) == widths['numeric']
+    assert val['categorical']['indicators'].shape == (
+        2, T, widths['categorical']
+    )
+    assert val['ordinal']['indicators'].shape == (2, T, widths['ordinal'])
+    assert val['text']['embedded_values'].shape == (
+        2, T, 1, FIXTURE_TEXT_DIM
+    )
+    assert val['drug']['slot_values'][0].shape == (2, T, 30, 128)
+    assert val['drug']['doses'][0].shape == (2, T, 30)
+    assert 'static_data' not in batch
+
+
+def test_the_loaders_partition_the_fixture_cohort(loaded):
+    """The whole path, over the layout section 3 and section 4.4
+    actually produce: one extracted/ and one fold{i}/ of row indices."""
+    train, val, test = prepare_dataloaders(
+        str(loaded), 'fold0', batch_size=2, num_workers=0
+    )
+    n = n_episodes(loaded)
+    assert [len(loader.dataset) for loader in (train, val, test)] == [
+        n - 2, 1, 1
+    ]
+    batch = next(iter(test))
+    assert batch['idx'].tolist() == [n - 1]

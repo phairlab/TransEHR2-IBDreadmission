@@ -148,14 +148,15 @@ def main(argv=None) -> int:
             print(f"  {failure}")
         return 1
 
-    numeric_feats, categorical_feats, ordinal_feats, _ = (
+    numeric_feats, categorical_feats, ordinal_feats, multilabel_feats, _ = (
         _bucket_valued_feats(
             VALUED_FEATS, TEXT_FEATS + DRUG_FEATS, var_properties
         )
     )
     print(f"Feature contract holds: {len(numeric_feats)} numeric, "
           f"{len(categorical_feats)} categorical, "
-          f"{len(ordinal_feats)} ordinal.")
+          f"{len(ordinal_feats)} ordinal, "
+          f"{len(multilabel_feats)} multilabel.")
 
     # Every categorical, ordinal and text column is read as a string.
     # category_map is keyed on the YAML's values and BLDUA's levels are

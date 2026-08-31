@@ -168,6 +168,10 @@ class MixedDataset(Dataset):
             ``-1`` where the value was not in ``category_map``.
         val_ordinal_indicators: (n, T, n_ordinal).
         val_ordinal_values: Per-feature (n, T) int16 level index.
+        val_multilabel_indicators: (n, T, n_multilabel).
+        val_multilabel_values: Per-feature (n, T, n_classes) multi-hot
+            rows. Stored dense, not as an index: a multi-hot cannot be
+            expressed as one, so there is no __getitem__ expansion.
         categorical_feat_dims: Per-feature number of categories, i.e. the
             one-hot width ``__getitem__`` expands to.
         ordinal_feat_dims: Per-feature number of levels, likewise.
@@ -209,6 +213,8 @@ class MixedDataset(Dataset):
         val_categorical_values: List,
         val_ordinal_indicators,
         val_ordinal_values: List,
+        val_multilabel_indicators,
+        val_multilabel_values: List,
         categorical_feat_dims: List[int],
         ordinal_feat_dims: List[int],
         lookup_indicators: Dict[str, object],
@@ -237,6 +243,8 @@ class MixedDataset(Dataset):
         self.val_categorical_values = val_categorical_values
         self.val_ordinal_indicators = val_ordinal_indicators
         self.val_ordinal_values = val_ordinal_values
+        self.val_multilabel_indicators = val_multilabel_indicators
+        self.val_multilabel_values = val_multilabel_values
         self.categorical_feat_dims = categorical_feat_dims
         self.ordinal_feat_dims = ordinal_feat_dims
 
@@ -385,6 +393,15 @@ class MixedDataset(Dataset):
             self._one_hot(np.asarray(values[idx]), width)
             for values, width in zip(self.val_ordinal_values,
                                      self.ordinal_feat_dims)
+        ]
+
+        item['val_multilabel_indicators'] = torch.from_numpy(
+            np.array(self.val_multilabel_indicators[idx], dtype=np.float32)
+        )
+        # Multi-hot rows are stored dense, so they pass through unexpanded.
+        item['val_multilabel_values'] = [
+            torch.from_numpy(np.array(values[idx], dtype=np.float32))
+            for values in self.val_multilabel_values
         ]
 
         for feat_type, indicators in self.lookup_indicators.items():

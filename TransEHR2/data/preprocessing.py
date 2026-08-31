@@ -124,8 +124,8 @@ def _bucket_valued_feats(
     valued_feats: List[str],
     lookup_feats: List[str],
     var_properties: dict
-) -> Tuple[List[str], List[str], List[str], List[str]]:
-    """Split features into numeric, categorical, ordinal, and lookup.
+) -> Tuple[List[str], List[str], List[str], List[str], List[str]]:
+    """Split features into numeric, categorical, ordinal, multilabel, lookup.
 
     Each feature is assigned to a bucket by its 'type' in
     variable_properties.yaml. Relative order within each bucket follows
@@ -144,11 +144,12 @@ def _bucket_valued_feats(
         var_properties: Parsed variable_properties.yaml.
 
     Returns:
-        Tuple of (numeric, categorical, ordinal, lookup) feature names.
+        Tuple of (numeric, categorical, ordinal, multilabel, lookup) names.
     """
     numeric_feats = []
     categorical_feats = []
     ordinal_feats = []
+    multilabel_feats = []
     lookup = []
     for feat in valued_feats:
         feat_type = var_properties[feat]['type']
@@ -158,10 +159,13 @@ def _bucket_valued_feats(
             categorical_feats.append(feat)
         elif feat_type == 'ordinal':
             ordinal_feats.append(feat)
+        elif feat_type == 'multilabel':
+            multilabel_feats.append(feat)
     for feat in lookup_feats:
         if var_properties[feat]['type'] in LOOKUP_TYPES:
             lookup.append(feat)
-    return numeric_feats, categorical_feats, ordinal_feats, lookup
+    return (numeric_feats, categorical_feats, ordinal_feats,
+            multilabel_feats, lookup)
 
 
 def _is_index(key) -> bool:
@@ -360,6 +364,7 @@ class DataProcessor:
         (self.numeric_feats,
          self.categorical_feats,
          self.ordinal_feats,
+         self.multilabel_feats,
          self.lookup_feats) = _bucket_valued_feats(
             valued_feats, lookup_feats, self.var_properties
         )
@@ -378,13 +383,15 @@ class DataProcessor:
                 for k, v in (self.var_properties[feat].get('category_map')
                              or {}).items()
             }
-            for feat in self.categorical_feats + self.ordinal_feats
+            for feat in (self.categorical_feats + self.ordinal_feats
+                         + self.multilabel_feats)
         }
 
     def process_valued_data(
         self, data: pd.DataFrame
     ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray, List[np.ndarray],
-               np.ndarray, np.ndarray, List[np.ndarray], np.ndarray]:
+               np.ndarray, np.ndarray, List[np.ndarray], np.ndarray,
+               np.ndarray, List[np.ndarray]]:
         """
         Process one patient's value-associated data.
 
@@ -402,6 +409,8 @@ class DataProcessor:
             - ordinal_indicators: (n_ts, n_ord_feats) float32
             - ordinal_values: List of (n_ts,) int16 indices
             - ordinal_misses: (n_ord_feats,) int64
+            - multilabel_indicators: (n_ts, n_multilabel_feats) float32
+            - multilabel_values: List of (n_ts, n_classes) multi-hot rows
         """
         n_ts = len(data)
 
@@ -434,11 +443,53 @@ class DataProcessor:
          ordinal_misses) = self._process_indexed(
             data, self.ordinal_feats, self.dims.n_ordinal_feats
         )
+        multilabel_indicators, multilabel_values = self._process_multilabel(
+            data, self.multilabel_feats, self.dims.n_multilabel_feats
+        )
 
         return (numeric_indicators, numeric_values,
                 categorical_indicators, categorical_values,
                 categorical_misses,
-                ordinal_indicators, ordinal_values, ordinal_misses)
+                ordinal_indicators, ordinal_values, ordinal_misses,
+                multilabel_indicators, multilabel_values)
+
+    def _process_multilabel(
+        self, data: pd.DataFrame, feats: List[str], n_feats: int
+    ) -> Tuple[np.ndarray, List[np.ndarray]]:
+        """Expand semicolon-separated labels into multi-hot rows.
+
+        A multi-hot cannot be expressed as a single index, so unlike
+        categorical and ordinal (section 4.3) the value array is stored
+        dense and ``__getitem__`` performs no expansion. An unobserved
+        timestep is an all-zero row with indicator 0; an observed cell
+        naming no declared label is an all-zero row with indicator 1 --
+        the same "observed, out of domain" state the -1 sentinel encodes
+        for the indexed types.
+        """
+        n_ts = len(data)
+        indicators = np.zeros((n_ts, n_feats), dtype=np.float32)
+        values = [
+            np.zeros((n_ts, dim), dtype=np.float32)
+            for dim in self.dims.multilabel_feat_dims
+        ]
+
+        for f, feat in enumerate(feats):
+            if feat not in data.columns:
+                continue
+            column = data[feat]
+            observed = column.notna().to_numpy()
+            indicators[:, f] = observed
+            index_map = self.index_maps[feat]
+            width = self.dims.multilabel_feat_dims[f]
+            for t, cell in enumerate(column):
+                if not observed[t]:
+                    continue
+                for label in str(cell).split(';'):
+                    idx = index_map.get(label.strip())
+                    if idx is not None and 0 <= idx < width:
+                        values[f][t, idx] = 1.0
+
+        return indicators, values
 
     def _process_indexed(
         self, data: pd.DataFrame, feats: List[str], n_feats: int
@@ -1003,7 +1054,7 @@ def _process_single_patient(
         timestamps = val_data.index
 
         (num_ind, num_vals, cat_ind, cat_vals, cat_misses,
-         ord_ind, ord_vals, ord_misses) = (
+         ord_ind, ord_vals, ord_misses, ml_ind, ml_vals) = (
             _tensorized_processor.process_valued_data(val_data)
         )
         lookup_ind, lookup_sparse = (
@@ -1042,6 +1093,8 @@ def _process_single_patient(
                 val_categorical_values=[v[start:stop] for v in cat_vals],
                 val_ordinal_indicators=ord_ind[start:stop],
                 val_ordinal_values=[v[start:stop] for v in ord_vals],
+                val_multilabel_indicators=ml_ind[start:stop],
+                val_multilabel_values=[v[start:stop] for v in ml_vals],
                 val_lookup_indicators=lookup_ind[start:stop],
                 val_categorical_misses=cat_misses,
                 val_ordinal_misses=ord_misses,
@@ -1145,7 +1198,8 @@ def _get_tensor_dimensions(
     with open(var_properties_path, 'r') as f:
         var_properties = yaml.safe_load(f)
 
-    numeric_feats, categorical_feats, ordinal_feats, lookup = (
+    (numeric_feats, categorical_feats, ordinal_feats, multilabel_feats,
+     lookup) = (
         _bucket_valued_feats(valued_feats, lookup_feats, var_properties)
     )
 
@@ -1154,6 +1208,9 @@ def _get_tensor_dimensions(
         var_properties[f]['size'] for f in categorical_feats
     ]
     ordinal_feat_dims = [var_properties[f]['size'] for f in ordinal_feats]
+    multilabel_feat_dims = [
+        var_properties[f]['size'] for f in multilabel_feats
+    ]
 
     # ``size`` is the per-timestep dimension for every type (section 4.3);
     # for a lookup feature that is its slot count.
@@ -1185,11 +1242,13 @@ def _get_tensor_dimensions(
         n_numeric_feats=len(numeric_feats),
         n_categorical_feats=len(categorical_feats),
         n_ordinal_feats=len(ordinal_feats),
+        n_multilabel_feats=len(multilabel_feats),
         n_lookup_feats=len(lookup),
         n_event_feats=len(event_feats),
         numeric_feat_dims=numeric_feat_dims,
         categorical_feat_dims=categorical_feat_dims,
         ordinal_feat_dims=ordinal_feat_dims,
+        multilabel_feat_dims=multilabel_feat_dims,
         lookup_slot_dims=lookup_slot_dims,
         lookup_table_dims=lookup_table_dims,
         lookup_pad_indices=lookup_pad_indices,
@@ -1248,6 +1307,16 @@ def _allocate_output_arrays(dims: TensorDimensions) -> Dict[str, np.ndarray]:
     arrays['val_ordinal_values'] = [
         np.full((n, ts), OUT_OF_DOMAIN, dtype=np.int16)
         for _ in range(dims.n_ordinal_feats)
+    ]
+
+    # Multi-hot rows are stored dense: unlike categorical/ordinal, a
+    # multi-hot cannot be expressed as a single index (section 4.3).
+    arrays['val_multilabel_indicators'] = np.zeros(
+        (n, ts, dims.n_multilabel_feats), dtype=np.float32
+    )
+    arrays['val_multilabel_values'] = [
+        np.zeros((n, ts, dim), dtype=np.float32)
+        for dim in dims.multilabel_feat_dims
     ]
 
     arrays['val_lookup_indicators'] = np.zeros(
@@ -1394,12 +1463,14 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     val_numeric_ind = torch.stack([b['val_numeric_indicators'] for b in batch], dim=0)
     val_categorical_ind = torch.stack([b['val_categorical_indicators'] for b in batch], dim=0)
     val_ordinal_ind = torch.stack([b['val_ordinal_indicators'] for b in batch], dim=0)
+    val_multilabel_ind = torch.stack([b['val_multilabel_indicators'] for b in batch], dim=0)
     event_ind = torch.stack([b['event_indicators'] for b in batch], dim=0)
 
     # Stack per-feature value tensors
     n_numeric_feats = len(batch[0]['val_numeric_values'])
     n_categorical_feats = len(batch[0]['val_categorical_values'])
     n_ordinal_feats = len(batch[0]['val_ordinal_values'])
+    n_multilabel_feats = len(batch[0]['val_multilabel_values'])
 
     val_numeric_values = [
         torch.stack([b['val_numeric_values'][f] for b in batch], dim=0)
@@ -1412,6 +1483,10 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     val_ordinal_values = [
         torch.stack([b['val_ordinal_values'][f] for b in batch], dim=0)
         for f in range(n_ordinal_feats)
+    ]
+    val_multilabel_values = [
+        torch.stack([b['val_multilabel_values'][f] for b in batch], dim=0)
+        for f in range(n_multilabel_feats)
     ]
 
     # Stack pre-computed text embeddings into [batch, max_ts, n_text_feats, embed_dim]
@@ -1448,6 +1523,10 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
             'ordinal': {
                 'indicators': val_ordinal_ind,
                 'values': val_ordinal_values,
+            },
+            'multilabel': {
+                'indicators': val_multilabel_ind,
+                'values': val_multilabel_values,
             },
             'times': val_times,
             'masks': val_masks,
@@ -1553,6 +1632,8 @@ def save_extracted(
     save_array('val_categorical_indicators',
                arrays['val_categorical_indicators'])
     save_array('val_ordinal_indicators', arrays['val_ordinal_indicators'])
+    save_array('val_multilabel_indicators',
+               arrays['val_multilabel_indicators'])
     save_array('event_indicators', arrays['event_indicators'])
     save_array('event_times', arrays['event_times'])
     save_array('event_masks', arrays['event_masks'])
@@ -1569,6 +1650,8 @@ def save_extracted(
         save_array(f'val_categorical_values_{i}', arr)
     for i, arr in enumerate(arrays['val_ordinal_values']):
         save_array(f'val_ordinal_values_{i}', arr)
+    for i, arr in enumerate(arrays['val_multilabel_values']):
+        save_array(f'val_multilabel_values_{i}', arr)
 
     # One dense indicator array per lookup *type*, and CSR files named by
     # type with an index within that type (section 4.4).
@@ -1742,6 +1825,7 @@ def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:
     n_num = metadata['n_numeric_feats']
     n_cat = metadata['n_categorical_feats']
     n_ord = metadata['n_ordinal_feats']
+    n_ml = metadata['n_multilabel_feats']
     lookup_indicators, lookup_csr, lookup_tables = _load_lookup_family(
         base_path, metadata
     )
@@ -1765,6 +1849,10 @@ def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:
         val_ordinal_indicators=load_mmap('val_ordinal_indicators'),
         val_ordinal_values=[
             load_mmap(f'val_ordinal_values_{i}') for i in range(n_ord)
+        ],
+        val_multilabel_indicators=load_mmap('val_multilabel_indicators'),
+        val_multilabel_values=[
+            load_mmap(f'val_multilabel_values_{i}') for i in range(n_ml)
         ],
         categorical_feat_dims=metadata['categorical_feat_dims'],
         ordinal_feat_dims=metadata['ordinal_feat_dims'],
@@ -1937,7 +2025,8 @@ def extract_data(
 
     with open(var_properties_path, 'r') as f:
         var_properties = yaml.safe_load(f)
-    numeric_feats, categorical_feats, ordinal_feats, lookup = (
+    (numeric_feats, categorical_feats, ordinal_feats, multilabel_feats,
+     lookup) = (
         _bucket_valued_feats(reader.valued_feats, lookup_feats,
                              var_properties)
     )
@@ -2011,16 +2100,19 @@ def extract_data(
         'n_numeric_feats': dims.n_numeric_feats,
         'n_categorical_feats': dims.n_categorical_feats,
         'n_ordinal_feats': dims.n_ordinal_feats,
+        'n_multilabel_feats': dims.n_multilabel_feats,
         'n_lookup_feats': dims.n_lookup_feats,
         'n_event_feats': dims.n_event_feats,
         'numeric_feats': numeric_feats,
         'categorical_feats': categorical_feats,
         'ordinal_feats': ordinal_feats,
+        'multilabel_feats': multilabel_feats,
         'lookup_feats': lookup,
         'event_feats': list(reader.event_feats),
         'numeric_feat_dims': dims.numeric_feat_dims,
         'categorical_feat_dims': dims.categorical_feat_dims,
         'ordinal_feat_dims': dims.ordinal_feat_dims,
+        'multilabel_feat_dims': dims.multilabel_feat_dims,
         'lookup_slot_dims': dims.lookup_slot_dims,
         'lookup_table_dims': dims.lookup_table_dims,
         'lookup_pad_indices': dims.lookup_pad_indices,
@@ -2099,6 +2191,13 @@ def _insert_episode(
         )
         for f, values in enumerate(episode.val_ordinal_values):
             arrays['val_ordinal_values'][f][row, start:] = values[-val_len:]
+        arrays['val_multilabel_indicators'][row, start:, :] = (
+            episode.val_multilabel_indicators[-val_len:]
+        )
+        for f, values in enumerate(episode.val_multilabel_values):
+            arrays['val_multilabel_values'][f][row, start:, :] = (
+                values[-val_len:]
+            )
         arrays['val_lookup_indicators'][row, start:, :] = (
             episode.val_lookup_indicators[-val_len:]
         )

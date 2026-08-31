@@ -79,11 +79,13 @@ class TensorDimensions:
         n_numeric_feats: Number of numeric features
         n_categorical_feats: Number of categorical features
         n_ordinal_feats: Number of ordinal features
+        n_multilabel_feats: Number of multilabel features
         n_lookup_feats: Number of lookup (text + drug) features
         n_event_feats: Number of event features
         numeric_feat_dims: Per-feature vector dimension
         categorical_feat_dims: Per-feature number of categories
         ordinal_feat_dims: Per-feature number of levels
+        multilabel_feat_dims: Per-feature number of classes
         lookup_slot_dims: Per-feature slots per timestep -- 1 for text,
             30 for drugs (``size`` in variable_properties.yaml)
         lookup_table_dims: Per-feature width of the embedding table row,
@@ -99,11 +101,13 @@ class TensorDimensions:
     n_numeric_feats: int
     n_categorical_feats: int
     n_ordinal_feats: int
+    n_multilabel_feats: int
     n_lookup_feats: int
     n_event_feats: int
     numeric_feat_dims: list
     categorical_feat_dims: list
     ordinal_feat_dims: list
+    multilabel_feat_dims: list
     lookup_slot_dims: list
     lookup_table_dims: list
     lookup_pad_indices: list
@@ -139,6 +143,8 @@ class EpisodeData(NamedTuple):
             -1 where the value is not in ``category_map`` (section 4.3)
         val_ordinal_indicators: (val_len, n_ordinal_feats)
         val_ordinal_values: List of (val_len,) int16 level indices
+        val_multilabel_indicators: (val_len, n_multilabel_feats)
+        val_multilabel_values: List of (val_len, n_classes) multi-hot rows
         val_lookup_indicators: (val_len, n_lookup_feats)
         val_categorical_misses: (n_categorical_feats,) int64 count of
             out-of-domain values, for the per-feature report (section 4.3)
@@ -169,6 +175,8 @@ class EpisodeData(NamedTuple):
     val_categorical_values: list
     val_ordinal_indicators: 'np.ndarray'
     val_ordinal_values: list
+    val_multilabel_indicators: 'np.ndarray'
+    val_multilabel_values: list
     val_lookup_indicators: 'np.ndarray'
     val_categorical_misses: 'np.ndarray'
     val_ordinal_misses: 'np.ndarray'

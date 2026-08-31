@@ -33,7 +33,7 @@ def test_bucket_returns_four_buckets_with_text_and_drug_together():
         'O': {'type': 'ordinal'}, 'T': {'type': 'text'},
         'D': {'type': 'drug'},
     }
-    numeric, categorical, ordinal, lookup = _bucket_valued_feats(
+    numeric, categorical, ordinal, multilabel, lookup = _bucket_valued_feats(
         ['N', 'C', 'O'], ['T', 'D'], props
     )
     assert (numeric, categorical, ordinal) == (['N'], ['C'], ['O'])
@@ -426,8 +426,10 @@ def test_standardize_saves_statistics_without_scaling_the_values(
     from TransEHR2.data.custom_types import TensorDimensions
     dims = TensorDimensions(
         n_episodes=4, max_ts_len=2, n_numeric_feats=1,
-        n_categorical_feats=0, n_ordinal_feats=0, n_lookup_feats=0,
+        n_categorical_feats=0, n_ordinal_feats=0, n_multilabel_feats=0,
+        n_lookup_feats=0,
         n_event_feats=0, numeric_feat_dims=[1], categorical_feat_dims=[],
+        multilabel_feat_dims=[],
         ordinal_feat_dims=[], lookup_slot_dims=[], lookup_table_dims=[],
         lookup_pad_indices=[], static_feat_dims=[], static_total_dim=0,
     )

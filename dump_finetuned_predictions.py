@@ -39,7 +39,9 @@ from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 from typing import Dict, List, Optional, Tuple
 
-from TransEHR2.data.preprocessing import load_dataset, collate_tensorized
+from TransEHR2.data.preprocessing import (
+    collate_tensorized, compute_static_feat_dims, load_dataset
+)
 from TransEHR2.models import MixedClassifier
 from TransEHR2.modules import EventDataEncoder, ValueDataEncoder
 from TransEHR2.utils import get_param_shapes, move_batch_to_device
@@ -619,6 +621,13 @@ if __name__ == '__main__':
     # ---- Compute feature dimensions ----
     with open(VARIABLE_PROPERTIES_PATH, 'r') as f:
         variable_properties = yaml.safe_load(f)
+    # Width of the stored static_data array. NOT len(STATIC_FEATS): a
+    # categorical static is one-hot and occupies `size` columns, so count and
+    # width diverge the moment any static has size > 1. Derived from the same
+    # helper the extraction uses, so the two cannot drift apart.
+    static_dim = sum(
+        compute_static_feat_dims(variable_properties, STATIC_FEATS)
+    )
 
     tot_val_feat_dim = 0
     for feature in VALUED_FEATS:
@@ -719,7 +728,7 @@ if __name__ == '__main__':
                 n_val_feats=n_val_feats,
                 tot_val_feat_dim=tot_val_feat_dim,
                 n_event_types=n_event_types,
-                n_static_feats=len(STATIC_FEATS),
+                n_static_feats=static_dim,
                 num_classes=num_classes,
                 use_text=USE_TEXT
             )

@@ -1085,6 +1085,31 @@ def _minutes_before(
     return np.asarray(deltas, dtype=np.int32)
 
 
+def compute_static_feat_dims(
+    var_properties: Dict, static_feats: List[str]
+) -> List[int]:
+    """Width of each static feature in the stored ``static_data`` array.
+
+    The model side needs this too, and must not reimplement it.
+    ``len(STATIC_FEATS)`` is *not* the width: since 75c39e8 made categorical
+    encoding actually one-hot, a categorical static occupies ``size`` columns
+    rather than one. An entry point that passes the feature *count* as the
+    static dimension builds a classifier too narrow and dies in the first
+    forward pass with ``mat1 and mat2 shapes cannot be multiplied``.
+
+    ``size`` is the per-timestep dimension for every type (section 4.3), so
+    there is no per-type branch here.
+
+    Args:
+        var_properties: Parsed ``variable_properties.yaml``.
+        static_feats: The STATIC_FEATS list from the dataset config, in order.
+
+    Returns:
+        A list of per-feature widths; ``sum()`` is the stored width.
+    """
+    return [var_properties[f]['size'] for f in static_feats]
+
+
 def _get_tensor_dimensions(
     var_properties_path: str,
     valued_feats: List[str],
@@ -1152,7 +1177,7 @@ def _get_tensor_dimensions(
             lookup_table_dims.append(None)
             lookup_pad_indices.append(None)
 
-    static_feat_dims = [var_properties[f]['size'] for f in static_feats]
+    static_feat_dims = compute_static_feat_dims(var_properties, static_feats)
 
     return TensorDimensions(
         n_episodes=n_episodes,

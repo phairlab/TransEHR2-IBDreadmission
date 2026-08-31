@@ -20,7 +20,7 @@ from typing import List, Union
 
 import pickle
 
-from TransEHR2.data.preprocessing import prepare_dataloaders
+from TransEHR2.data.preprocessing import compute_static_feat_dims, prepare_dataloaders
 from TransEHR2.models import ELECTRA, MixedClassifier
 from TransEHR2.modules import MaskedTokenDiscriminator, MaskedTokenGenerator, TransformerHawkesProcess
 from TransEHR2.modules import EventDataEncoder, ValueDataEncoder
@@ -230,6 +230,13 @@ if __name__ == "__main__":
 
     with open(VARIABLE_PROPERTIES_PATH, 'r') as f_in:
         variable_properties = yaml.safe_load(f_in)
+    # Width of the stored static_data array. NOT len(STATIC_FEATS): a
+    # categorical static is one-hot and occupies `size` columns, so count and
+    # width diverge the moment any static has size > 1. Derived from the same
+    # helper the extraction uses, so the two cannot drift apart.
+    static_dim = sum(
+        compute_static_feat_dims(variable_properties, STATIC_FEATS)
+    )
     tot_val_feat_dim = 0  # Counts the total number of dimensions of all input features
     numeric_feat_dims = []  # The dimension of each numeric feature
     categorical_class_cnts = []  # The number of classes for each categorical feature
@@ -360,7 +367,7 @@ if __name__ == "__main__":
             n_categorical_features=len(categorical_class_cnts),
             n_ordinal_features=len(ordinal_features),
             n_text_features=len(TEXT_FEATS) if USE_TEXT else 0,
-            n_static_features=len(STATIC_FEATS),
+            n_static_features=static_dim,
             dim_feedforward=DISCRIMINATOR_DIM_FEEDFORWARD
         )
         transformer_hawkes_process = TransformerHawkesProcess(
@@ -561,7 +568,7 @@ if __name__ == "__main__":
                     val_encoder=predictor_value_encoder,
                     d_event_enc=THP_ENCODER_D_MODEL,
                     d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
-                    d_statics=len(STATIC_FEATS),
+                    d_statics=static_dim,
                     num_classes=prediction_output_shape,
                     aggr=PREDICTOR_AGGREGATION_METHOD,
                     use_text=USE_TEXT,
@@ -682,7 +689,7 @@ if __name__ == "__main__":
                 val_encoder=predictor_value_encoder,
                 d_event_enc=THP_ENCODER_D_MODEL,
                 d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
-                d_statics=len(STATIC_FEATS),
+                d_statics=static_dim,
                 num_classes=prediction_output_shape,
                 aggr=PREDICTOR_AGGREGATION_METHOD,
                 use_text=USE_TEXT,

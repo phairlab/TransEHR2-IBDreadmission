@@ -850,7 +850,10 @@ class MaskedTokenGenerator(torch.nn.Module):
             output['multilabel']['values'] = [head(val_embed) for head in self.multilabel_heads]
 
         if self.predict_lookup_feats:
-            output['lookup'] = {'indicators': None, 'values': []}
+            # 'embedded_values', not the 'values' the other four families use: a lookup feature's
+            # prediction is a whole embedding, and the two names are what MaskedGeneratorLoss and
+            # ELECTRA._prepare_discriminator_input_inplace dispatch on.
+            output['lookup'] = {'indicators': None, 'embedded_values': []}
             if self.predict_indicators:
                 # Indicator output shape: [batch_size, max_timeseries_length, n_lookup_features]
                 output['lookup']['indicators'] = self.lookup_indicator_head(indicator_embed)

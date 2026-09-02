@@ -580,6 +580,46 @@ def test_the_generator_reconstructs_the_pooled_drug_vector(drug_gate):
     )
 
 
+def test_the_full_batch_loss_scores_the_lookup_family(drug_gate):
+    """``MaskedGeneratorLoss`` accepts two target formats, and the
+    full-batch one read ``predictions['lookup']['values']`` -- a key the
+    generator initialises empty and then never fills, the family's
+    predictions being under ``embedded_values``. The branch zipped over
+    an empty list, so the lookup loss was silently zero.
+
+    The oracle is the weight: if the family contributes, changing
+    ``lookup_weight`` changes the loss. The generator is called directly
+    rather than through ELECTRA, whose forward replaces the masked
+    targets with its own predictions in place -- which is what the
+    sparse format exists to avoid, and a separate matter from this key.
+    """
+    from TransEHR2.utils import resolve_lookup_embeddings
+
+    batch, dims = drug_gate['batch'], drug_gate['dims']
+    resolve_lookup_embeddings(batch['val_data']['lookup'])
+    predictions = drug_gate['electra'].generator(
+        batch['val_data'], drug_gate['record_masks']
+    )
+    assert predictions['lookup']['embedded_values']
+
+    def loss_at(weight):
+        return MaskedGeneratorLoss(
+            lookup_weight=weight, ordinal_features=dims['ordinal'] or None
+        )(predictions, batch, drug_gate['record_masks'])
+
+    assert not torch.equal(loss_at(1.0), loss_at(3.0))
+    # And the same batch through the sparse format the routines actually
+    # pass, which read the right key all along.
+    out = drug_gate['electra'](
+        drug_gate['batch'], drug_gate['record_masks'], device='cpu',
+        compute_intensities=False
+    )
+    sparse = MaskedGeneratorLoss(
+        lookup_weight=1.0, ordinal_features=dims['ordinal'] or None
+    )(out['generator'], out['masked_targets'], drug_gate['record_masks'])
+    assert torch.isfinite(sparse)
+
+
 def test_an_empty_family_leaves_the_model_path_alone(gate):
     """``TEXT_FEATS: []`` and ``DRUG_FEATS: []`` together: the batch
     carries no ``lookup`` key at all, which is what keeps the gate above

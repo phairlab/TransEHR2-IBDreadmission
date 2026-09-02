@@ -536,8 +536,10 @@ class MaskedGeneratorLoss(torch.nn.Module):
 
         # Process lookup features
         if 'lookup' in predictions and 'lookup' in targets['val_data']:
-            # Get predicted lookup embeddings
-            pred_values = predictions['lookup']['values']  # List of tensors, one per feature
+            # Get predicted lookup embeddings. The family's predictions are under
+            # 'embedded_values', not 'values' -- reading 'values' here made this branch zip over
+            # an empty list, so the full-batch path's lookup loss was silently zero.
+            pred_values = predictions['lookup']['embedded_values']  # One tensor per feature
 
             # Get the pre-computed embeddings the generator has to reconstruct
             if 'embedded_values' in targets['val_data']['lookup']:

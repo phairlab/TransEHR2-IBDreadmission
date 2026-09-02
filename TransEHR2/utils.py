@@ -8,7 +8,7 @@ import yaml
 from accelerate import Accelerator
 from datetime import timedelta
 from torch import Tensor
-from typing import Any, Dict, List, OrderedDict, Tuple, Union
+from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Union
 
 from TransEHR2.data.datasets import MixedDataset
 from TransEHR2.data.custom_types import MixedTensorDataset
@@ -303,6 +303,72 @@ def get_non_pad_mask(seq: Tensor, padding_value: int = 0) -> Tensor:
     return non_padding_mask
 
 
+def pool_lookup_slots(
+    slot_values: Tensor,
+    doses: Optional[Tensor],
+    masks: Optional[Tensor]
+) -> Tensor:
+    """Reduce one lookup feature's slots to a single vector per timestep.
+
+    The one drug-specific step in the family, and it sits *before* the family rather than
+    inside it (section 5.1): dose-scale, zero the unused slots, sum, and divide by the mask
+    sum. Text passes through as a no-op -- one slot, weight 1 -- so this is a single
+    parameterized step and not a fork.
+
+    Doing it here, in the forward pass, rather than in ``__getitem__`` is what leaves a
+    gradient on an individual slot and therefore on an individual DIN (section 4.3). Pooling
+    earlier destroys that attribution irrecoverably.
+
+    Args:
+        slot_values: Tensor of shape (batch_size, max_timeseries_length, n_slots, D_f), or
+            (batch_size, max_timeseries_length, D_f) for a single-slot feature.
+        doses: Tensor of shape (batch_size, max_timeseries_length, n_slots) of relative daily
+            quantities, or None for a single-slot feature.
+        masks: Tensor of shape (batch_size, max_timeseries_length, n_slots), 1 on a slot a
+            record actually filled, or None for a single-slot feature.
+
+    Returns:
+        Tensor: The pooled values, of shape (batch_size, max_timeseries_length, D_f).
+    """
+
+    if doses is None:
+        # One slot, weight 1: the values are already what the encoder consumes. Returned
+        # rather than copied, so a single-slot feature's pooled tensor *is* its slot tensor;
+        # the ELECTRA forward's in-place substitution of generated values therefore reaches
+        # both, which is the behaviour the stacked text tensor had before section 5.1 and
+        # nothing in a forward pass reads the slots again after it.
+        return slot_values
+    weights = (doses * masks).unsqueeze(-1)
+    pooled = (slot_values * weights).sum(dim=-2)
+    # A timestep reaching the pool with no unmasked slot would otherwise give 0/0.
+    return pooled / masks.sum(dim=-1).clamp(min=1).unsqueeze(-1)
+
+
+def resolve_lookup_embeddings(lookup: Dict[str, Any]) -> List[Tensor]:
+    """Pool every lookup feature in a batch's ``lookup`` entry, once.
+
+    The result is memoized under ``lookup['embedded_values']`` because the ELECTRA forward pass
+    reads it three times over -- to extract the generator's targets, to feed the generator, and,
+    after the generator's predictions have replaced the masked positions, to feed the
+    discriminator -- and the substitution has to survive into the discriminator's input rather
+    than being pooled away again.
+
+    Args:
+        lookup: A batch's ``val_data['lookup']``, carrying ``slot_values``, ``doses`` and
+            ``masks`` as per-feature lists.
+
+    Returns:
+        List[Tensor]: One (batch_size, max_timeseries_length, D_f) tensor per lookup feature.
+    """
+
+    if 'embedded_values' not in lookup:
+        lookup['embedded_values'] = [
+            pool_lookup_slots(values, doses, masks) for values, doses, masks
+            in zip(lookup['slot_values'], lookup['doses'], lookup['masks'])
+        ]
+    return lookup['embedded_values']
+
+
 def combine_value_and_lookup_data(
         value_assoc_indicators: Tensor,
         value_assoc_values: Tensor,
@@ -421,14 +487,16 @@ def generate_record_masks(
             indicator_mask = torch.zeros_like(feature_data['indicators'], device=batch_device)
             if feature_type == 'lookup':
                 # Lookup features carry pre-computed embeddings whose width is per-feature
-                # (section 5.1), so each mask is sized from its own feature's tensor.
+                # (section 5.1), so each mask is sized from its own feature's tensor. The masks
+                # are drawn before the model pools, so the width comes from the slot values,
+                # whose last dimension is D_f whether or not there is a slot axis in front of it.
                 val_masks[feature_type] = {
                     'indicators': indicator_mask,
                     'embedded_values': [
                         torch.zeros(
-                            (batch_size, max_ts_len, embeddings.shape[-1]), device=batch_device
+                            (batch_size, max_ts_len, values.shape[-1]), device=batch_device
                         )
-                        for embeddings in feature_data['embedded_values']
+                        for values in feature_data['slot_values']
                     ]
                 }
             else:
@@ -470,9 +538,13 @@ def _gen_val_assoc_feat_mask(
     indicators_data = data['val_data'][feature_type]['indicators']
     if feature_type != 'lookup':
         values_key = 'values'
+        values_data = data['val_data'][feature_type][values_key]
     else:
+        # The family's masks are over the pooled vector, but the pool happens in the forward
+        # pass, so the width is read from the unpooled slot values -- whose last dimension is
+        # D_f whether or not there is a slot axis in front of it.
         values_key = 'embedded_values'
-    values_data = data['val_data'][feature_type][values_key]
+        values_data = data['val_data'][feature_type]['slot_values']
     padding_mask = data['val_data']['masks'].unsqueeze(-1)  # (batch_size, max_ts_len, 1)
 
     batch_size, max_ts_len, n_features = indicators_data.shape

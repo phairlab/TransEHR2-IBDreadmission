@@ -6,7 +6,9 @@ from typing import Dict, List, Optional, Tuple, Union
 from TransEHR2.data.custom_types import MixedTensorDataset, ValueAssociatedTensorData
 from TransEHR2.modules import MaskedTokenDiscriminator, MaskedTokenGenerator, TransformerHawkesProcess
 from TransEHR2.modules import EventDataEncoder, ValueDataEncoder
-from TransEHR2.utils import calc_time_diff, sample_non_event_time_diff
+from TransEHR2.utils import (
+    calc_time_diff, resolve_lookup_embeddings, sample_non_event_time_diff
+)
 
 
 class ELECTRA(torch.nn.Module):
@@ -331,8 +333,12 @@ class ELECTRA(torch.nn.Module):
                 }
             
         value_data = batch['val_data']  # Extract the ValueAssociatedTensorData from the batch
-        # Pre-computed lookup embeddings are already in value_data['lookup']['embedded_values']
-        # from the dataloader (produced by embed_text.py and ClinVec).
+        # Reduce the lookup family's slots to one vector per feature per timestep, once and here
+        # (section 5.1). It has to happen before the targets are extracted, because the pooled
+        # vector is what the generator reconstructs, and before the generator's predictions
+        # replace the masked positions, because that substitution is the discriminator's input.
+        if 'lookup' in value_data:
+            resolve_lookup_embeddings(value_data['lookup'])
 
         # MEMORY OPTIMIZATION: Extract masked target values BEFORE in-place modification.
         # This stores only the values needed for generator loss (~15-25% of batch) rather than
@@ -461,9 +467,6 @@ class MixedClassifier(torch.nn.Module):
             val_times = val_data['times']
             val_masks = val_data['masks']
             
-            # Pre-computed lookup embeddings are already in val_data['lookup']['embedded_values']
-            # from the dataloader (produced by embed_text.py and ClinVec).
-
             # Combine all feature types along a single axis for the encoder
             inds_to_concat = []
             vals_to_concat = []
@@ -503,12 +506,14 @@ class MixedClassifier(torch.nn.Module):
                 vals_to_concat.append(multilabel_vals)
 
             # Process lookup features
-            if self.use_lookup and 'lookup' in val_data and 'embedded_values' in val_data['lookup']:
-                # Extract lookup feature indicators and embeddings
+            if self.use_lookup and 'lookup' in val_data:
+                # Extract lookup feature indicators, and pool each feature's slots. The pool is
+                # in the forward pass so that a gradient reaches an individual drug slot, which
+                # is what makes per-DIN attribution possible (sections 4.3, 5.1).
                 lookup_inds = val_data['lookup']['indicators']
                 inds_to_concat.append(lookup_inds)
                 # A per-feature list, so extend rather than append (section 5.1).
-                vals_to_concat.extend(val_data['lookup']['embedded_values'])
+                vals_to_concat.extend(resolve_lookup_embeddings(val_data['lookup']))
         
             if inds_to_concat and vals_to_concat:
                 # Concatenate the tensors for numeric and categorical features along the feature dimension

@@ -298,7 +298,9 @@ def test_text_gathers_a_dense_row_per_timestep(dataset):
     single-slot feature yields (T, D) -- its weight is 1 by definition,
     so there is nothing to slot."""
     item = dataset[0]
-    embeddings = item['val_lookup_embeddings'][0]
+    # TXT is lookup feature 0; DRG follows it (section 4.3's ordering,
+    # ``TEXT_FEATS + DRUG_FEATS``).
+    embeddings = item['val_lookup_slots'][0]
     assert embeddings.shape == (4, TEXT_EMBED_DIM)
     # one_patient carries the same note at two timesteps, interned once,
     # so both gather table row 0, whose fill value is 1.
@@ -306,9 +308,12 @@ def test_text_gathers_a_dense_row_per_timestep(dataset):
     assert embeddings[-1].tolist() == [1.0] * TEXT_EMBED_DIM
     # The timestep with no text gathers nothing.
     assert not embeddings[2].any()
-    # One feature axis over the family, whatever the on-disk split
-    # (section 5.1); with DRG still slotted, only TXT is in it here.
-    assert item['val_lookup_indicators'].shape == (4, 1)
+    # One feature axis over the whole family, whatever the on-disk
+    # split by type (section 5.1). A single-slot feature carries no
+    # dose or mask array: its weight is 1 by definition.
+    assert item['val_lookup_indicators'].shape == (4, 2)
+    assert item['val_lookup_doses'][0] is None
+    assert item['val_lookup_masks'][0] is None
 
 
 def test_drugs_gather_slotted_and_unpooled(dataset):
@@ -317,9 +322,9 @@ def test_drugs_gather_slotted_and_unpooled(dataset):
     doses and masks beside them, so a gradient still reaches an
     individual slot and therefore an individual DIN."""
     item = dataset[0]
-    slots = item['val_drug_slots'][0]
-    doses = item['val_drug_doses'][0]
-    masks = item['val_drug_masks'][0]
+    slots = item['val_lookup_slots'][1]
+    doses = item['val_lookup_doses'][1]
+    masks = item['val_lookup_masks'][1]
     assert slots.shape == (4, 3, CLINVEC_DIM)
     assert doses.shape == (4, 3) and masks.shape == (4, 3)
 
@@ -338,7 +343,7 @@ def test_an_unused_slot_gathers_the_all_zero_pad_row(dataset):
     that row is all zero -- so a padded slot contributes nothing whether
     or not the mask is applied."""
     item = dataset[0]
-    assert not item['val_drug_slots'][0][0, 2].any()
+    assert not item['val_lookup_slots'][1][0, 2].any()
 
 
 def test_the_gather_casts_to_float32(one_patient):
@@ -348,8 +353,8 @@ def test_the_gather_casts_to_float32(one_patient):
     dataset = extracted(one_patient, dtype=np.float64)
     assert dataset.lookup_tables[0].dtype == np.float64
     item = dataset[0]
-    assert item['val_lookup_embeddings'][0].dtype == torch.float32
-    assert item['val_drug_slots'][0].dtype == torch.float32
+    assert item['val_lookup_slots'][0].dtype == torch.float32
+    assert item['val_lookup_slots'][1].dtype == torch.float32
 
 
 def test_a_missing_table_is_refused(one_patient):
@@ -407,16 +412,16 @@ def test_the_batch_collates_with_the_expected_shapes(dataset):
     assert [v.shape for v in val['ordinal']['values']] == [
         (2, 4, 3), (2, 4, 2)
     ]
-    assert val['lookup']['indicators'].shape == (2, 4, 1)
-    assert [v.shape for v in val['lookup']['embedded_values']] == [
-        (2, 4, TEXT_EMBED_DIM)
+    assert val['lookup']['indicators'].shape == (2, 4, 2)
+    assert [v.shape for v in val['lookup']['slot_values']] == [
+        (2, 4, TEXT_EMBED_DIM), (2, 4, 3, CLINVEC_DIM)
     ]
-    assert val['drug']['indicators'].shape == (2, 4, 1)
-    assert [v.shape for v in val['drug']['slot_values']] == [
-        (2, 4, 3, CLINVEC_DIM)
-    ]
-    assert [v.shape for v in val['drug']['doses']] == [(2, 4, 3)]
-    assert [v.shape for v in val['drug']['masks']] == [(2, 4, 3)]
+    assert [None if v is None else v.shape
+            for v in val['lookup']['doses']] == [None, (2, 4, 3)]
+    assert [None if v is None else v.shape
+            for v in val['lookup']['masks']] == [None, (2, 4, 3)]
+    # Unpooled: the dose-weighted mean is part of the forward pass.
+    assert 'embedded_values' not in val['lookup']
     assert batch['event_data']['indicators'].shape == (2, 4, 1)
     assert batch['targets']['time_to_event'].shape == (2, 1)
     assert batch['targets']['event_type'].shape == (2,)
@@ -429,10 +434,11 @@ def test_every_collated_value_is_float32(dataset):
     batch = collate_tensorized([dataset[0], dataset[0]])
     val = batch['val_data']
     tensors = (
-        [val['times'], val['masks']] + val['lookup']['embedded_values']
+        [val['times'], val['masks']] + val['lookup']['slot_values']
         + val['numeric']['values'] + val['categorical']['values']
-        + val['ordinal']['values'] + val['drug']['slot_values']
-        + val['drug']['doses'] + val['drug']['masks']
+        + val['ordinal']['values']
+        + [v for v in val['lookup']['doses'] if v is not None]
+        + [v for v in val['lookup']['masks'] if v is not None]
     )
     assert {t.dtype for t in tensors} == {torch.float32}
 
@@ -617,7 +623,7 @@ def test_a_batch_is_accepted_by_the_generator_unchanged(dataset):
 
     batch = collate_tensorized([dataset[0], dataset[0]])
     val_data = batch['val_data']
-    lookup_dims = [v.shape[-1] for v in val_data['lookup']['embedded_values']]
+    lookup_dims = [v.shape[-1] for v in val_data['lookup']['slot_values']]
 
     numeric_dims = [v.shape[-1] for v in val_data['numeric']['values']]
     categorical_classes = [

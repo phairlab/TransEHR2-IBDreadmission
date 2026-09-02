@@ -415,38 +415,36 @@ class MixedDataset(Dataset):
             for values in self.val_multilabel_values
         ]
 
-        # Section 5.1's per-feature list. A single-slot feature is ready
-        # for the encoder as it stands; a multi-slot one leaves unpooled
-        # (section 4.3), and joining the family is C3's second commit.
+        # Section 5.1's per-feature lists, over the whole family. A
+        # multi-slot feature leaves unpooled (section 4.3): the
+        # dose-weighted mean is part of the forward pass, which is what
+        # leaves a gradient on an individual slot. A single-slot feature
+        # has no dose or mask array -- its weight is 1 by definition --
+        # and its entry is already the (T, D) the encoder wants.
         lookup_columns = []
-        lookup_embeddings = []
+        lookup_values = []
+        lookup_doses = []
+        lookup_masks = []
         for f, (feat_type, column) in enumerate(self._lookup_columns):
             embeddings, doses, masks = self._gather_lookup(f, idx)
-            if doses is None:
-                lookup_columns.append(
-                    np.asarray(self.lookup_indicators[feat_type][idx],
-                               dtype=np.float32)[:, column]
-                )
-                lookup_embeddings.append(torch.from_numpy(embeddings))
-            else:
-                item[f'val_{feat_type}_indicators'] = torch.from_numpy(
-                    np.array(self.lookup_indicators[feat_type][idx],
-                             dtype=np.float32)
-                )
-                item.setdefault(f'val_{feat_type}_slots', []).append(
-                    torch.from_numpy(embeddings)
-                )
-                item.setdefault(f'val_{feat_type}_doses', []).append(
-                    torch.from_numpy(doses)
-                )
-                item.setdefault(f'val_{feat_type}_masks', []).append(
-                    torch.from_numpy(masks)
-                )
-        if lookup_embeddings:
+            lookup_columns.append(
+                np.asarray(self.lookup_indicators[feat_type][idx],
+                           dtype=np.float32)[:, column]
+            )
+            lookup_values.append(torch.from_numpy(embeddings))
+            lookup_doses.append(
+                None if doses is None else torch.from_numpy(doses)
+            )
+            lookup_masks.append(
+                None if masks is None else torch.from_numpy(masks)
+            )
+        if lookup_values:
             item['val_lookup_indicators'] = torch.from_numpy(
                 np.stack(lookup_columns, axis=-1)
             )
-            item['val_lookup_embeddings'] = lookup_embeddings
+            item['val_lookup_slots'] = lookup_values
+            item['val_lookup_doses'] = lookup_doses
+            item['val_lookup_masks'] = lookup_masks
 
         item['event_indicators'] = torch.from_numpy(
             np.array(self.event_indicators[idx], dtype=np.float32)

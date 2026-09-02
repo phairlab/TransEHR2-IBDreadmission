@@ -15,7 +15,7 @@ from TransEHR2.layers import (
     build_key_padding_attention_mask,
     get_activation_module,
 )
-from TransEHR2.utils import combine_value_and_lookup_data
+from TransEHR2.utils import combine_value_and_lookup_data, resolve_lookup_embeddings
 
 
 class GradientTraceableLLM(torch.nn.Module):
@@ -769,7 +769,9 @@ class MaskedTokenGenerator(torch.nn.Module):
             #   lookup_indicators shape: [batch_size, max_timeseries_length, n_lookup_features]
             #   lookup_embeddings: [(batch_size, max_timeseries_length, D_f) x n_lookup_features]
             lookup_indicators = batch['lookup']['indicators']
-            lookup_embeddings = batch['lookup']['embedded_values']
+            # The dose-weighted pool, memoized: the ELECTRA forward has already run it, and a
+            # generator called on its own has not (section 5.1).
+            lookup_embeddings = resolve_lookup_embeddings(batch['lookup'])
             # Zero out masked lookup feature embedding components. The masks are already a
             # per-feature list, so this is an elementwise multiply per feature rather than a
             # torch.stack the ragged widths could not take (section 5.1).
@@ -974,12 +976,11 @@ class MaskedTokenDiscriminator(torch.nn.Module):
 
         if self.predict_lookup_feats:
             inds_to_concat.append(batch['lookup']['indicators'])
-            if 'embedded_values' in batch['lookup']:
-                # A per-feature list, so extend rather than append: the concatenation below
-                # produces the layout the stacked tensor's flatten used to (section 5.1).
-                vals_to_concat.extend(batch['lookup']['embedded_values'])
-            else:
-                raise ValueError("Expected 'embedded_values' key in batch['lookup'] for discriminator input.")
+            # A per-feature list, so extend rather than append: the concatenation below
+            # produces the layout the stacked tensor's flatten used to (section 5.1). The
+            # embeddings the generator substituted into are already resolved by this point;
+            # resolve_lookup_embeddings returns them rather than pooling the slots again.
+            vals_to_concat.extend(resolve_lookup_embeddings(batch['lookup']))
 
         # Concatenate the tensors for numeric and categorical features along the feature dimension
         #   val_indicators shape: (batch_size, max_timeseries_length, n_num_feats + n_cat_feats)

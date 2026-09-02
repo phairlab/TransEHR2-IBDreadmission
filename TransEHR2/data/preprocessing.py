@@ -67,13 +67,15 @@ Readings this module commits to
   with ``spawn``; ``datasets.py``'s module docstring records the
   measurement, the reasoning and the alternatives.
 * **The lookup family's batch keys are keyed by presence** (C2), the way
-  ``episode_id`` already was, so ``TEXT_FEATS: []`` or ``DRUG_FEATS: []``
-  simply omits them. Drug slots are collated *unpooled* into
-  ``val_data['drug']`` and read by nothing until C3: section 4.3 puts the
-  dose-weighted mean in the forward pass, where a gradient still reaches
-  an individual slot. The stacked ``(B, T, n_feats, D)`` text tensor is
-  left exactly as it is -- replacing it with a per-feature list is
-  section 5.1's, and C3's first commit.
+  ``episode_id`` already was, so an empty ``TEXT_FEATS`` and ``DRUG_FEATS``
+  together omit ``val_data['lookup']`` entirely. Text and drugs share that
+  one key and one feature axis (C3, section 5.1); the split into
+  ``text_*`` and ``drug_*`` is an on-disk matter only (section 4.4). The
+  slots are collated *unpooled*: section 4.3 puts the dose-weighted mean
+  in the forward pass, where a gradient still reaches an individual slot.
+  Per-feature stacking rather than a single ``(B, T, n_feats, D)`` tensor
+  is what admits ragged widths, and it is one copy per batch cheaper
+  besides (section 5.1).
 * **Invariant 12 runs before any patient data is read.** Section 6 asks
   for it as the first step of ``extract_data.py``. The category_map clause
   used to be checked inside the per-timestep loop, so a bad map raised
@@ -1430,24 +1432,22 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     Takes a list of episode dicts and stacks them into the
     MixedTensorDataset format expected by the model. The lookup family
     arrives as one feature axis at
-    ``batch['val_data']['lookup']['indicators']`` beside a per-feature
-    list of ``(batch_size, max_ts_len, D_f)`` embeddings (section 5.1).
+    ``batch['val_data']['lookup']['indicators']`` beside per-feature
+    lists of slot values, doses and masks (section 5.1). The
+    dose-weighted pool that reduces a feature to one
+    ``(batch_size, max_ts_len, D_f)`` tensor is part of the forward
+    pass, not of collation, so that a gradient survives to an individual
+    slot and therefore to an individual DIN (section 4.3).
 
     Section 4.2 removes the history region, so the history-masking
     arguments this took are gone with it.
 
     Everything a member of the lookup family contributes is keyed by
     presence rather than by a feature count, the way ``episode_id``
-    already is: with ``TEXT_FEATS: []`` or ``DRUG_FEATS: []`` the
-    corresponding keys are simply absent from the item, which is what
-    keeps section 5.1's regression gate -- run with ``DRUG_FEATS: []`` --
-    unaffected by the drug branch existing.
-
-    **Drug slots are passed through unpooled** (section 4.3). Nothing
-    reads ``val_data['drug']`` yet: the dose-weighted mean is part of the
-    forward pass, so that a gradient survives to an individual slot, and
-    wiring it is C3's. Collating it here rather than dropping it is what
-    makes the shapes assertable end to end.
+    already is: with both ``TEXT_FEATS`` and ``DRUG_FEATS`` empty the
+    ``lookup`` key is simply absent, which is what keeps section 5.1's
+    regression gate -- run with ``DRUG_FEATS: []`` -- a statement about
+    text alone.
 
     Args:
         batch: List of episode dicts from MixedDataset.__getitem__.
@@ -1493,15 +1493,16 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     # [batch, max_ts, n_lookup_feats, embed_dim] tensor (section 5.1):
     # the widths are ragged -- text is 4096 or 8192 beside ClinVec's 128
     # -- and per-feature batching is one stack of the same total bytes
-    # where the stacked form was two.
-    if 'val_lookup_embeddings' in batch[0]:
-        n_lookup_feats = len(batch[0]['val_lookup_embeddings'])
-        val_lookup_embeddings = [
-            torch.stack([b['val_lookup_embeddings'][f] for b in batch], dim=0)
-            for f in range(n_lookup_feats)
+    # where the stacked form was two. A single-slot feature's dose and
+    # mask entries are None, which is the family's degenerate case
+    # rather than missing data.
+    def stack_lookup(key: str) -> list:
+        n_feats = len(batch[0][key])
+        return [
+            None if batch[0][key][f] is None
+            else torch.stack([b[key][f] for b in batch], dim=0)
+            for f in range(n_feats)
         ]
-    else:
-        val_lookup_embeddings = None
 
     # Stack targets
     time_to_event = torch.stack(
@@ -1550,34 +1551,14 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
             [b['static_data'] for b in batch], dim=0
         )
 
-    if val_lookup_embeddings is not None:
+    if 'val_lookup_slots' in batch[0]:
         result['val_data']['lookup'] = {
             'indicators': torch.stack(
                 [b['val_lookup_indicators'] for b in batch], dim=0
             ),
-            'embedded_values': val_lookup_embeddings,
-        }
-
-    # Slots, doses and masks, unpooled (section 4.3). Read by nobody
-    # until C3 puts the dose-weighted mean at the encoder input.
-    if 'val_drug_slots' in batch[0]:
-        n_drug_feats = len(batch[0]['val_drug_slots'])
-        result['val_data']['drug'] = {
-            'indicators': torch.stack(
-                [b['val_drug_indicators'] for b in batch], dim=0
-            ),
-            'slot_values': [
-                torch.stack([b['val_drug_slots'][f] for b in batch], dim=0)
-                for f in range(n_drug_feats)
-            ],
-            'doses': [
-                torch.stack([b['val_drug_doses'][f] for b in batch], dim=0)
-                for f in range(n_drug_feats)
-            ],
-            'masks': [
-                torch.stack([b['val_drug_masks'][f] for b in batch], dim=0)
-                for f in range(n_drug_feats)
-            ],
+            'slot_values': stack_lookup('val_lookup_slots'),
+            'doses': stack_lookup('val_lookup_doses'),
+            'masks': stack_lookup('val_lookup_masks'),
         }
 
     # Identifiers for mapping model outputs (e.g. XAI scores) back to the

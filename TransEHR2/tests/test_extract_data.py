@@ -370,11 +370,10 @@ def test_a_fixture_batch_collates_at_the_live_widths(loaded, widths):
         2, T, widths['categorical']
     )
     assert val['ordinal']['indicators'].shape == (2, T, widths['ordinal'])
-    assert [v.shape for v in val['lookup']['embedded_values']] == [
-        (2, T, FIXTURE_TEXT_DIM)
+    assert [v.shape for v in val['lookup']['slot_values']] == [
+        (2, T, FIXTURE_TEXT_DIM), (2, T, 30, 128)
     ]
-    assert val['drug']['slot_values'][0].shape == (2, T, 30, 128)
-    assert val['drug']['doses'][0].shape == (2, T, 30)
+    assert val['lookup']['doses'][1].shape == (2, T, 30)
     assert 'static_data' not in batch
 
 

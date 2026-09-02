@@ -238,6 +238,80 @@ def create_timer(results_dir: str = None, experiment_name: str = "experiment") -
     return DistributedTimer(results_path=results_path)
 
 
+def _densify_lookup_entry(lookup: Dict[str, Any]) -> Dict[str, Any]:
+    """Rebuild one batch's lookup tensors in place, and return the entry.
+
+    Idempotent: an entry that already carries ``slot_values`` has no
+    ``sparse`` key left to consume and is returned untouched, which is
+    what lets every reader of the family call this defensively.
+    """
+
+    if 'sparse' not in lookup:
+        return lookup
+
+    blocks = lookup.pop('sparse')
+    batch_size, max_ts_len = lookup['indicators'].shape[:2]
+    for key in ('slot_values', 'doses', 'masks'):
+        lookup[key] = []
+
+    for block in blocks:
+        episodes, timesteps = block['episode_index'], block['timestep_index']
+        for key, source in (('slot_values', 'values'),
+                            ('doses', 'doses'),
+                            ('masks', 'masks')):
+            entries = block[source]
+            if entries is None:
+                # A single-slot feature's weight is 1 by definition, so
+                # it has no dose or mask tensor to build (section 4.3).
+                lookup[key].append(None)
+                continue
+            # The trailing dimensions come from the entries themselves --
+            # (D,) for a single-slot feature, (S, D) otherwise -- so a
+            # feature no episode in the batch filled still lands at its
+            # own width rather than needing the shape carried beside it.
+            dense = torch.zeros(
+                (batch_size, max_ts_len, *entries.shape[1:]),
+                dtype=entries.dtype, device=entries.device
+            )
+            if episodes.numel():
+                dense[episodes, timesteps] = entries
+            lookup[key].append(dense)
+
+    return lookup
+
+
+def densify_lookup_slots(batch: MixedTensorDataset) -> MixedTensorDataset:
+    """Rebuild the lookup family's dense tensors from the collated blocks.
+
+    ``collate_tensorized`` ships one flat block per lookup feature --
+    episode index, timestep index, and the entries -- rather than the
+    dense ``(batch, ts_len, ...)`` tensors the model consumes. Records in
+    the family are rare against the timestep axis, so the dense form is
+    almost entirely zeros: about 4.8 GB per batch at section 4.5's
+    ``T = 500`` and a batch of 200, carrying about 7 MB of content.
+
+    This runs inside ``move_batch_to_device``, so it builds the dense
+    tensors wherever the batch has just landed. VRAM is unchanged --
+    those tensors were already built there -- and what it saves is the
+    worker boundary and the host-side copy in front of it.
+
+    Args:
+        batch: A batch whose ``val_data['lookup']`` entry holds
+            ``sparse``. A batch with no lookup feature, or one already
+            densified, is returned untouched.
+
+    Returns:
+        The same batch, with ``slot_values``, ``doses`` and ``masks`` in
+        place of the sparse blocks.
+    """
+
+    lookup = (batch.get('val_data', {}).get('lookup')
+              if isinstance(batch, dict) else None)
+    if isinstance(lookup, dict):
+        _densify_lookup_entry(lookup)
+    return batch
+
+
 def move_batch_to_device(batch: MixedTensorDataset, device: torch.device) -> MixedTensorDataset:
     """Recursively move all tensors in a batch to the specified device.
     
@@ -262,8 +336,10 @@ def move_batch_to_device(batch: MixedTensorDataset, device: torch.device) -> Mix
             return tuple(_move_to_device(item) for item in obj)
         else:
             return obj
-    
-    return _move_to_device(batch)
+
+    # Densified after the move, so the dense tensors are allocated on the
+    # target device and only the family's records cross the boundary.
+    return densify_lookup_slots(_move_to_device(batch))
 
 
 def ensure_float32(data: MixedDataset) -> MixedDataset:
@@ -361,6 +437,9 @@ def resolve_lookup_embeddings(lookup: Dict[str, Any]) -> List[Tensor]:
         List[Tensor]: One (batch_size, max_timeseries_length, D_f) tensor per lookup feature.
     """
 
+    # Densified if it has not been already. `move_batch_to_device` normally does this; the call
+    # is idempotent and free once the tensors exist.
+    _densify_lookup_entry(lookup)
     if 'embedded_values' not in lookup:
         lookup['embedded_values'] = [
             pool_lookup_slots(values, doses, masks) for values, doses, masks
@@ -469,6 +548,12 @@ def generate_record_masks(
         tensor(batch_size, max_ts_len, n_event_feats)  # Mask indicators for features
         ```
     """
+
+    # The lookup family reaches the masks dense, whether or not the caller came through
+    # `move_batch_to_device`: both the mask widths below and `_gen_val_assoc_feat_mask` read
+    # `slot_values`, and a caller reading a collated batch directly would otherwise fail on a
+    # missing key. The call is idempotent and free once the tensors exist.
+    densify_lookup_slots(data)
 
     # Get batch dimensions from the collated data structure
     batch_size, max_ts_len = data['val_data']['times'].shape

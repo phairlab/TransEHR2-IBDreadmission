@@ -12,9 +12,26 @@ a timestamp nothing else names.
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 import yaml
 
 from pathlib import Path
+
+from TransEHR2.data.preprocessing import collate_tensorized
+from TransEHR2.utils import move_batch_to_device
+
+
+def collate_for_model(items: list) -> dict:
+    """A batch in the form the model sees it.
+
+    The lookup family crosses the worker boundary sparsely (section
+    5.1), and ``move_batch_to_device`` is what rebuilds its dense
+    tensors -- so a batch that has not been through the move is not the
+    batch any model or loss is ever handed. The device is the CPU here,
+    which is the only difference from the training loop.
+    """
+    return move_batch_to_device(collate_tensorized(items),
+                                torch.device('cpu'))
 
 
 # One feature of every type, kept small enough to read an array by eye.

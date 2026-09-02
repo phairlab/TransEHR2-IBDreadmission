@@ -35,7 +35,7 @@ from TransEHR2.utils import generate_record_masks
 
 from extract_data import main as extract_main
 
-from .conftest import MiniRoot
+from .conftest import MiniRoot, collate_for_model
 
 BASELINE = Path(__file__).parent / 'fixtures' / 'lookup_family_baseline.npz'
 
@@ -208,7 +208,7 @@ def gate(tmp_path):
     nothing.
     """
     dataset = extract_and_load(build_root(tmp_path))
-    batch = collate_tensorized([dataset[0], dataset[1]])
+    batch = collate_for_model([dataset[0], dataset[1]])
     dims = encoder_dims(batch['val_data'])
     n_lookup = batch['val_data']['lookup']['indicators'].shape[-1]
     n_event_types = batch['event_data']['indicators'].shape[-1]
@@ -265,7 +265,7 @@ def test_the_refactored_path_reproduces_the_baseline_bitwise(gate, tmp_path):
 
     # A fresh batch: the ELECTRA forward mutates its own in place.
     dataset = extract_and_load(build_root(tmp_path / 'clf'))
-    clf_batch = collate_tensorized([dataset[0], dataset[1]])
+    clf_batch = collate_for_model([dataset[0], dataset[1]])
     current['classifier_logits'] = gate['classifier'](clf_batch).detach()
 
     baseline = np.load(BASELINE)
@@ -405,7 +405,7 @@ def drug_gate(tmp_path):
     mini.add_fold('fold0', train=[0, 1], val=[0, 1], test=[0, 1])
 
     dataset = extract_and_load(mini)
-    batch = collate_tensorized([dataset[0], dataset[1]])
+    batch = collate_for_model([dataset[0], dataset[1]])
     dims = encoder_dims(batch['val_data'])
     n_lookup = batch['val_data']['lookup']['indicators'].shape[-1]
     n_event_types = batch['event_data']['indicators'].shape[-1]

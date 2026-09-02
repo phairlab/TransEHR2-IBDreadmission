@@ -328,48 +328,64 @@ class MixedDataset(Dataset):
         return torch.from_numpy(one_hot)
 
     def _gather_lookup(self, f: int, idx: int):
-        """Gather one lookup feature's embeddings for one episode.
+        """Gather one lookup feature's CSR slice for one episode.
+
+        Only the timesteps that hold a record. The family's records are
+        rare against the timestep axis -- section 4.5 measures ~1.2 KB
+        of text and ~36 KB of drugs per episode -- so the dense extent
+        is almost all zeros, and it is built by
+        ``densify_lookup_slots`` on the device the batch lands on rather
+        than here, where every byte of it would cross the worker
+        boundary and one host-side copy first.
 
         One code path for both members of the family (section 4.3),
         branching only on slot count: a single-slot feature's values are
-        rank 1 on disk and it carries no dose or mask array, so it yields
-        ``(T, D)``; a multi-slot feature yields ``(T, S, D)`` with
-        ``(T, S)`` doses and masks beside it. Unused slots index the
+        rank 1 on disk and it carries no dose or mask array, so an entry
+        is ``(D,)``; a multi-slot feature's entry is ``(S, D)`` with
+        ``(S,)`` doses and masks beside it. Unused slots index the
         table's all-zero pad row and are zeroed by the mask regardless.
 
         Returns:
-            ``(embeddings, doses, masks)``, the last two None for a
-            single-slot feature.
+            ``(timesteps, embeddings, doses, masks)``. ``timesteps`` is
+            ``(n,)`` int64 over the extracted axis; ``embeddings`` is
+            ``(n, D)`` or ``(n, S, D)``; the last two are ``(n, S)``, or
+            None for a single-slot feature.
         """
         csr = self.lookup_csr[f]
         n_slots = self.lookup_slot_dims[f]
         width = self.lookup_table_dims[f]
 
-        if n_slots == 1:
-            embeddings = np.zeros((self.max_ts_len, width), dtype=np.float32)
-            doses = masks = None
-        else:
-            embeddings = np.zeros(
-                (self.max_ts_len, n_slots, width), dtype=np.float32
-            )
-            doses = np.zeros((self.max_ts_len, n_slots), dtype=np.float32)
-            masks = np.zeros((self.max_ts_len, n_slots), dtype=np.float32)
-
         start = int(csr['offsets'][idx])
         end = int(csr['offsets'][idx + 1])
+        # Copied, not viewed: the CSR arrays may be memory-mapped, and
+        # `torch.from_numpy` on a read-only view gives a tensor torch
+        # will not let anything write to. The copy is per-record, which
+        # is the point of carrying records rather than the axis.
+        timesteps = np.array(csr['timesteps'][start:end], dtype=np.int64)
         if end > start:
-            timesteps = np.asarray(csr['timesteps'][start:end])
-            values = np.asarray(csr['values'][start:end])
             # Section 5.1's cast at the gather: whatever the table's
             # dtype, the model's torch.cat sees float32.
-            embeddings[timesteps] = self.lookup_tables[f][values].astype(
-                np.float32, copy=False
+            embeddings = self.lookup_tables[f][
+                np.asarray(csr['values'][start:end])
+            ].astype(np.float32, copy=False)
+        else:
+            # Shaped rather than bare: an episode with no record still
+            # has to name its feature's width, or a batch in which no
+            # episode fills the feature has nothing to size the dense
+            # tensor from.
+            embeddings = np.zeros(
+                (0, width) if n_slots == 1 else (0, n_slots, width),
+                dtype=np.float32
             )
-            if n_slots > 1:
-                doses[timesteps] = csr['doses'][start:end]
-                masks[timesteps] = csr['masks'][start:end]
 
-        return embeddings, doses, masks
+        if n_slots == 1:
+            return timesteps, embeddings, None, None
+        return (
+            timesteps,
+            embeddings,
+            np.array(csr['doses'][start:end], dtype=np.float32),
+            np.array(csr['masks'][start:end], dtype=np.float32),
+        )
 
     def __getitem__(self, idx: int) -> Dict:
         """One episode as torch tensors, in ``labels.csv`` row order."""
@@ -415,36 +431,32 @@ class MixedDataset(Dataset):
             for values in self.val_multilabel_values
         ]
 
-        # Section 5.1's per-feature lists, over the whole family. A
-        # multi-slot feature leaves unpooled (section 4.3): the
-        # dose-weighted mean is part of the forward pass, which is what
-        # leaves a gradient on an individual slot. A single-slot feature
-        # has no dose or mask array -- its weight is 1 by definition --
-        # and its entry is already the (T, D) the encoder wants.
+        # Section 5.1's per-feature lists, over the whole family, and
+        # sparse: the dense extent is rebuilt on the device the batch
+        # lands on. A multi-slot feature leaves unpooled (section 4.3):
+        # the dose-weighted mean is part of the forward pass, which is
+        # what leaves a gradient on an individual slot. A single-slot
+        # feature has no dose or mask array -- its weight is 1 by
+        # definition.
         lookup_columns = []
-        lookup_values = []
-        lookup_doses = []
-        lookup_masks = []
+        lookup_sparse = []
         for f, (feat_type, column) in enumerate(self._lookup_columns):
-            embeddings, doses, masks = self._gather_lookup(f, idx)
+            timesteps, embeddings, doses, masks = self._gather_lookup(f, idx)
             lookup_columns.append(
                 np.asarray(self.lookup_indicators[feat_type][idx],
                            dtype=np.float32)[:, column]
             )
-            lookup_values.append(torch.from_numpy(embeddings))
-            lookup_doses.append(
-                None if doses is None else torch.from_numpy(doses)
-            )
-            lookup_masks.append(
-                None if masks is None else torch.from_numpy(masks)
-            )
-        if lookup_values:
+            lookup_sparse.append({
+                'timestep_index': torch.from_numpy(timesteps),
+                'values': torch.from_numpy(embeddings),
+                'doses': None if doses is None else torch.from_numpy(doses),
+                'masks': None if masks is None else torch.from_numpy(masks),
+            })
+        if lookup_sparse:
             item['val_lookup_indicators'] = torch.from_numpy(
                 np.stack(lookup_columns, axis=-1)
             )
-            item['val_lookup_slots'] = lookup_values
-            item['val_lookup_doses'] = lookup_doses
-            item['val_lookup_masks'] = lookup_masks
+            item['val_lookup_sparse'] = lookup_sparse
 
         item['event_indicators'] = torch.from_numpy(
             np.array(self.event_indicators[idx], dtype=np.float32)

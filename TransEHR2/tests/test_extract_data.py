@@ -27,6 +27,8 @@ from TransEHR2.data.preprocessing import (
 
 from extract_data import main as extract_main
 
+from .conftest import collate_for_model
+
 # .../TransEHR2-IBDreadmission/TransEHR2/TransEHR2/tests/this_file.py
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 IBDDATAPREP = PROJECT_ROOT / 'IBDdataprep'
@@ -360,7 +362,7 @@ def test_every_index_expands_to_at_most_one_hot(loaded):
 def test_a_fixture_batch_collates_at_the_live_widths(loaded, widths):
     """Section 4.4's 94 / 37 / 16, through __getitem__ and collate."""
     dataset = load_dataset(str(loaded / 'extracted'), fold='fold0')
-    batch = collate_tensorized([dataset[0], dataset[1]])
+    batch = collate_for_model([dataset[0], dataset[1]])
     val = batch['val_data']
     T = MAX_EPISODE_LEN_STEPS
 

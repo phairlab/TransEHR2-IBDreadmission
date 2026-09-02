@@ -1492,17 +1492,38 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     # The lookup family batches per feature, not into one
     # [batch, max_ts, n_lookup_feats, embed_dim] tensor (section 5.1):
     # the widths are ragged -- text is 4096 or 8192 beside ClinVec's 128
-    # -- and per-feature batching is one stack of the same total bytes
-    # where the stacked form was two. A single-slot feature's dose and
-    # mask entries are None, which is the family's degenerate case
+    # -- so there is no common width to stack along.
+    #
+    # It also batches sparsely. Each feature contributes one flat block
+    # -- episode index, timestep index, and the entries themselves --
+    # and ``densify_lookup_slots`` rebuilds the dense tensors inside
+    # ``move_batch_to_device``, on the device the batch has landed on.
+    # Records in the family are rare against the timestep axis, so
+    # assembling the dense form here would put almost the whole batch
+    # through the worker boundary and a host-side copy to carry zeros:
+    # about 4.8 GB per batch at section 4.5's T = 500 and a batch of
+    # 200, against about 7 MB of content. A single-slot feature's dose
+    # and mask entries are None, which is the family's degenerate case
     # rather than missing data.
-    def stack_lookup(key: str) -> list:
-        n_feats = len(batch[0][key])
-        return [
-            None if batch[0][key][f] is None
-            else torch.stack([b[key][f] for b in batch], dim=0)
-            for f in range(n_feats)
-        ]
+    def concat_lookup(f: int) -> dict:
+        blocks = [b['val_lookup_sparse'][f] for b in batch]
+        block = {
+            'episode_index': torch.cat([
+                torch.full((b['timestep_index'].numel(),), i,
+                           dtype=torch.int64)
+                for i, b in enumerate(blocks)
+            ]),
+            'timestep_index': torch.cat(
+                [b['timestep_index'] for b in blocks]
+            ),
+            'values': torch.cat([b['values'] for b in blocks]),
+        }
+        for key in ('doses', 'masks'):
+            block[key] = (
+                None if blocks[0][key] is None
+                else torch.cat([b[key] for b in blocks])
+            )
+        return block
 
     # Stack targets
     time_to_event = torch.stack(
@@ -1551,14 +1572,18 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
             [b['static_data'] for b in batch], dim=0
         )
 
-    if 'val_lookup_slots' in batch[0]:
+    if 'val_lookup_sparse' in batch[0]:
         result['val_data']['lookup'] = {
             'indicators': torch.stack(
                 [b['val_lookup_indicators'] for b in batch], dim=0
             ),
-            'slot_values': stack_lookup('val_lookup_slots'),
-            'doses': stack_lookup('val_lookup_doses'),
-            'masks': stack_lookup('val_lookup_masks'),
+            # Consumed and replaced by ``densify_lookup_slots``, which
+            # every batch passes through in ``move_batch_to_device``.
+            # Nothing downstream sees this key.
+            'sparse': [
+                concat_lookup(f)
+                for f in range(len(batch[0]['val_lookup_sparse']))
+            ],
         }
 
     # Identifiers for mapping model outputs (e.g. XAI scores) back to the

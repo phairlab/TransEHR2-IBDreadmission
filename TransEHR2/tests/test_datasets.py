@@ -21,7 +21,7 @@ from TransEHR2.data.preprocessing import (
 
 from extract_data import main as extract_main
 
-from .conftest import CLINVEC_DIM, CLINVEC_ROWS
+from .conftest import CLINVEC_DIM, CLINVEC_ROWS, collate_for_model
 
 # Deliberately not CLINVEC_DIM: section 5.1 makes the embedding width
 # per-feature, text being 4096 or 8192 beside ClinVec's 128.
@@ -292,28 +292,32 @@ def test_a_missing_fold_npz_is_refused(one_patient):
 
 # --- the lookup family's gather (sections 4.3, 4.4, 5.1) -------------
 
-def test_text_gathers_a_dense_row_per_timestep(dataset):
+def test_text_gathers_the_table_row_of_each_timestep_that_has_one(dataset):
     """Section 4.4: ``text_values`` is an int32 row index into the global
-    table, and __getitem__ is the only consumer of the CSR arrays. A
-    single-slot feature yields (T, D) -- its weight is 1 by definition,
-    so there is nothing to slot."""
+    table, and __getitem__ is the only consumer of the CSR arrays. The
+    item carries one entry per timestep that holds a record rather than
+    the whole timestep axis (section 5.1) -- a single-slot feature's
+    entry is (D,), its weight being 1 by definition, so there is nothing
+    to slot."""
     item = dataset[0]
     # TXT is lookup feature 0; DRG follows it (section 4.3's ordering,
     # ``TEXT_FEATS + DRUG_FEATS``).
-    embeddings = item['val_lookup_slots'][0]
-    assert embeddings.shape == (4, TEXT_EMBED_DIM)
+    text = item['val_lookup_sparse'][0]
     # one_patient carries the same note at two timesteps, interned once,
     # so both gather table row 0, whose fill value is 1.
-    assert embeddings[1].tolist() == [1.0] * TEXT_EMBED_DIM
-    assert embeddings[-1].tolist() == [1.0] * TEXT_EMBED_DIM
-    # The timestep with no text gathers nothing.
-    assert not embeddings[2].any()
+    assert text['timestep_index'].tolist() == [1, 3]
+    assert text['values'].shape == (2, TEXT_EMBED_DIM)
+    assert text['values'][0].tolist() == [1.0] * TEXT_EMBED_DIM
+    assert text['values'][1].tolist() == [1.0] * TEXT_EMBED_DIM
+    # The timestep with no text gathers nothing, which under the sparse
+    # form means it is simply not named.
+    assert 2 not in text['timestep_index'].tolist()
     # One feature axis over the whole family, whatever the on-disk
     # split by type (section 5.1). A single-slot feature carries no
     # dose or mask array: its weight is 1 by definition.
     assert item['val_lookup_indicators'].shape == (4, 2)
-    assert item['val_lookup_doses'][0] is None
-    assert item['val_lookup_masks'][0] is None
+    assert text['doses'] is None
+    assert text['masks'] is None
 
 
 def test_drugs_gather_slotted_and_unpooled(dataset):
@@ -322,20 +326,20 @@ def test_drugs_gather_slotted_and_unpooled(dataset):
     doses and masks beside them, so a gradient still reaches an
     individual slot and therefore an individual DIN."""
     item = dataset[0]
-    slots = item['val_lookup_slots'][1]
-    doses = item['val_lookup_doses'][1]
-    masks = item['val_lookup_masks'][1]
-    assert slots.shape == (4, 3, CLINVEC_DIM)
-    assert doses.shape == (4, 3) and masks.shape == (4, 3)
+    drug = item['val_lookup_sparse'][1]
+    # one_patient dispenses at its first timestep and nowhere else.
+    assert drug['timestep_index'].tolist() == [0]
+    assert drug['values'].shape == (1, 3, CLINVEC_DIM)
+    assert drug['doses'].shape == (1, 3) and drug['masks'].shape == (1, 3)
 
-    # one_patient dispenses ClinVec rows 2 and 3 at its first timestep,
-    # at doses 1.0 and 0.5; the third slot is unused.
-    assert slots[0, 0].tolist() == [3.0] * CLINVEC_DIM
-    assert slots[0, 1].tolist() == [4.0] * CLINVEC_DIM
-    assert doses[0].tolist() == [1.0, 0.5, 0.0]
-    assert masks[0].tolist() == [1.0, 1.0, 0.0]
+    # ClinVec rows 2 and 3, at doses 1.0 and 0.5; the third slot is
+    # unused.
+    assert drug['values'][0, 0].tolist() == [3.0] * CLINVEC_DIM
+    assert drug['values'][0, 1].tolist() == [4.0] * CLINVEC_DIM
+    assert drug['doses'][0].tolist() == [1.0, 0.5, 0.0]
+    assert drug['masks'][0].tolist() == [1.0, 1.0, 0.0]
     # No mean anywhere: an unpooled slot tensor still names its slots.
-    assert slots[0, 0].tolist() != slots[0, 1].tolist()
+    assert drug['values'][0, 0].tolist() != drug['values'][0, 1].tolist()
 
 
 def test_an_unused_slot_gathers_the_all_zero_pad_row(dataset):
@@ -343,7 +347,7 @@ def test_an_unused_slot_gathers_the_all_zero_pad_row(dataset):
     that row is all zero -- so a padded slot contributes nothing whether
     or not the mask is applied."""
     item = dataset[0]
-    assert not item['val_lookup_slots'][1][0, 2].any()
+    assert not item['val_lookup_sparse'][1]['values'][0, 2].any()
 
 
 def test_the_gather_casts_to_float32(one_patient):
@@ -353,8 +357,8 @@ def test_the_gather_casts_to_float32(one_patient):
     dataset = extracted(one_patient, dtype=np.float64)
     assert dataset.lookup_tables[0].dtype == np.float64
     item = dataset[0]
-    assert item['val_lookup_slots'][0].dtype == torch.float32
-    assert item['val_lookup_slots'][1].dtype == torch.float32
+    assert item['val_lookup_sparse'][0]['values'].dtype == torch.float32
+    assert item['val_lookup_sparse'][1]['values'].dtype == torch.float32
 
 
 def test_a_missing_table_is_refused(one_patient):
@@ -399,7 +403,7 @@ def test_the_batch_collates_with_the_expected_shapes(dataset):
     """The model's input format is unchanged by any of this: one
     indicator tensor per family, a per-feature list of values, and the
     stacked (B, T, n_feats, D) text tensor section 5.1 replaces in C3."""
-    batch = collate_tensorized([dataset[0], dataset[0]])
+    batch = collate_for_model([dataset[0], dataset[0]])
     val = batch['val_data']
 
     assert val['times'].shape == (2, 4)
@@ -431,7 +435,7 @@ def test_every_collated_value_is_float32(dataset):
     """Everything that reaches ``torch.cat`` in the encoder has to agree
     on dtype, and the one-hot expansion and the gather are where the
     int16 indices and the table rows stop being integers."""
-    batch = collate_tensorized([dataset[0], dataset[0]])
+    batch = collate_for_model([dataset[0], dataset[0]])
     val = batch['val_data']
     tensors = (
         [val['times'], val['masks']] + val['lookup']['slot_values']
@@ -621,7 +625,7 @@ def test_a_batch_is_accepted_by_the_generator_unchanged(dataset):
     from TransEHR2.modules import MaskedTokenGenerator, ValueDataEncoder
     from TransEHR2.utils import generate_record_masks
 
-    batch = collate_tensorized([dataset[0], dataset[0]])
+    batch = collate_for_model([dataset[0], dataset[0]])
     val_data = batch['val_data']
     lookup_dims = [v.shape[-1] for v in val_data['lookup']['slot_values']]
 

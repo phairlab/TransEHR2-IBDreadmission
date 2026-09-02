@@ -1007,8 +1007,7 @@ def pretrain_model(
     # is free for the other two. MaskedGeneratorLoss holds a BetaLoss per ordinal feature, and
     # BetaLoss registers its class-probability table as a buffer. Left on the CPU, that buffer
     # is indexed by target classes that live on the GPU, and every ordinal feature raises
-    # "indices should be either on cpu or on the same device as the indexed tensor". The data
-    # has three ordinal features (the GCS scales), so this fires on the first batch.
+    # "indices should be either on cpu or on the same device as the indexed tensor".
     gen_loss_fn = MaskedGeneratorLoss(
         ordinal_features=ordinal_features
     ).to(accelerator.device)
@@ -1602,8 +1601,7 @@ def pretrain_with_hyperparameter(
     # is free for the other two. MaskedGeneratorLoss holds a BetaLoss per ordinal feature, and
     # BetaLoss registers its class-probability table as a buffer. Left on the CPU, that buffer
     # is indexed by target classes that live on the GPU, and every ordinal feature raises
-    # "indices should be either on cpu or on the same device as the indexed tensor". The data
-    # has three ordinal features (the GCS scales), so this fires on the first batch.
+    # "indices should be either on cpu or on the same device as the indexed tensor".
     gen_loss_fn = MaskedGeneratorLoss(
         ordinal_features=ordinal_features
     ).to(accelerator.device)

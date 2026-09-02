@@ -15,7 +15,7 @@ from TransEHR2.layers import (
     build_key_padding_attention_mask,
     get_activation_module,
 )
-from TransEHR2.utils import combine_value_and_text_data
+from TransEHR2.utils import combine_value_and_lookup_data
 
 
 class GradientTraceableLLM(torch.nn.Module):
@@ -593,8 +593,7 @@ class MaskedTokenGenerator(torch.nn.Module):
         categorical_classes: List[int],
         ordinal_features: Optional[List[int]] = None,
         multilabel_classes: Optional[List[int]] = None,
-        n_text_features: int = 0,
-        text_embed_dim: int = 0,
+        lookup_dims: Optional[List[int]] = None,
         predict_indicators: bool = False,
         dim_feedforward: Optional[int] = 128
     ):
@@ -609,9 +608,9 @@ class MaskedTokenGenerator(torch.nn.Module):
                 number of ordinal levels for that feature. Defaults to None (no ordinal features).
             multilabel_classes (List[int], optional): List of class counts for each multilabel feature. Each entry is
                 the number of classes for that feature. Defaults to None (no multilabel features).
-            n_text_features (int): Number of text features. Defaults to 0. If 0, no text features will be processed or
-                predicted.
-            text_embed_dim (int): Dimensionality of pre-computed text embeddings. Required when n_text_features > 0.
+            lookup_dims (List[int], optional): Embedding width of each lookup (text or drug) feature, in the
+                family's feature order. Defaults to None (no lookup features). The width is per-feature rather
+                than shared because text is 4096 or 8192 wide beside ClinVec's 128 (section 5.1).
             predict_indicators (bool): Whether to predict feature presence indicators
             dim_feedforward (int, optional): Used when predict_indicators is True. The dimensionality of the hidden
                 layer in the MLP that predicts indicators. Defaults to 128.
@@ -624,6 +623,8 @@ class MaskedTokenGenerator(torch.nn.Module):
             ordinal_features = []
         if multilabel_classes is None:
             multilabel_classes = []
+        if lookup_dims is None:
+            lookup_dims = []
 
         # In the original implementation that only considered scalar real-valued features, the output head was a single
         # linear layer that produced a tensor with n_features as the last dimension. In this implementation, there is a
@@ -650,15 +651,16 @@ class MaskedTokenGenerator(torch.nn.Module):
             torch.nn.Linear(d_model, n_classes) for n_classes in multilabel_classes
         ])
 
-        self.text_heads = torch.nn.ModuleList([
-            torch.nn.Linear(d_model, text_embed_dim) for _ in range(n_text_features)
+        # One head per lookup feature, each projecting to that feature's own width.
+        self.lookup_heads = torch.nn.ModuleList([
+            torch.nn.Linear(d_model, feat_dim) for feat_dim in lookup_dims
         ])
 
         self.predict_numeric_feats = len(self.numeric_heads) > 0
         self.predict_categorical_feats = len(self.categorical_heads) > 0
         self.predict_ordinal_feats = len(self.ordinal_heads) > 0
         self.predict_multilabel_feats = len(self.multilabel_heads) > 0
-        self.predict_text_feats = len(self.text_heads) > 0
+        self.predict_lookup_feats = len(self.lookup_heads) > 0
 
         # Indicator prediction heads (optional)
         self.predict_indicators = predict_indicators  # If True, the model will also predict feature presence indicators
@@ -671,7 +673,7 @@ class MaskedTokenGenerator(torch.nn.Module):
             self.categorical_indicator_head = torch.nn.Linear(dim_feedforward, len(categorical_classes))
             self.ordinal_indicator_head = torch.nn.Linear(dim_feedforward, len(ordinal_features))
             self.multilabel_indicator_head = torch.nn.Linear(dim_feedforward, len(multilabel_classes))
-            self.text_indicator_head = torch.nn.Linear(dim_feedforward, n_text_features)
+            self.lookup_indicator_head = torch.nn.Linear(dim_feedforward, len(lookup_dims))
 
     def forward(
         self, 
@@ -683,8 +685,8 @@ class MaskedTokenGenerator(torch.nn.Module):
             
             Args:
                 batch: A batch of Tensors prepared from the MixedDataset structure, which may include numeric 
-                    features with indicators and values, categorical features with indicators and values, and text 
-                    features with indicators and token IDs.
+                    features with indicators and values, categorical features with indicators and values, and lookup 
+                    features with indicators and pre-computed embeddings.
                 record_masks: A dictionary of value-associated data masks for each feature type (returned by 
                     utils.generate_record_masks()). The masked values are simulated by the generator and used for 
                     training. Masked components should be represented by values of one, while unmasked components 
@@ -703,7 +705,7 @@ class MaskedTokenGenerator(torch.nn.Module):
                         ]
                     },
                     'categorical': { ... },
-                    'text': { ... }  # feature_dim for text is TEXT_EMBED_DIM
+                    'lookup': { ... }  # per-feature embedding widths, under 'embedded_values'
                 }
                 'times': tensor(batch_size, max_ts_len)  # Timestamps for each record, not predicted but passed through
                 'masks': tensor(batch_size, max_ts_len)  # Masks for each record, not predicted but passed through
@@ -762,23 +764,28 @@ class MaskedTokenGenerator(torch.nn.Module):
         timestamps = batch['times']  # (batch_size, max_timeseries_length)
         timestep_masks = batch['masks']  # (batch_size, max_timeseries_length)
 
-        if self.predict_text_feats:
-            # Extract text feature indicators, token sequences, and token sequence attention masks from the batch
-            #   text_indicators shape: [batch_size, max_timeseries_length, n_text_features]
-            #   text_embeddings shape: [batch_size, max_timeseries_length, n_text_features, TEXT_EMBED_DIM]
-            text_indicators = batch['text']['indicators']
-            text_embeddings = batch['text']['embedded_values']
-            # Zero out masked text feature embedding components
-            masked_text_indicators = text_indicators * (1 - record_masks['text']['indicators'])
-            masked_text_embeddings = text_embeddings * (1 - torch.stack(record_masks['text']['embedded_values'], dim=2))
-            # Combine the numeric, categorical, and text data into a single tensor for input to the encoder
-            #   masked_indicators shape: (batch_size, max_timeseries_length, n_num_feats + n_cat_feats + n_text_feats)
+        if self.predict_lookup_feats:
+            # Extract the lookup family's indicators and pre-computed embeddings from the batch
+            #   lookup_indicators shape: [batch_size, max_timeseries_length, n_lookup_features]
+            #   lookup_embeddings: [(batch_size, max_timeseries_length, D_f) x n_lookup_features]
+            lookup_indicators = batch['lookup']['indicators']
+            lookup_embeddings = batch['lookup']['embedded_values']
+            # Zero out masked lookup feature embedding components. The masks are already a
+            # per-feature list, so this is an elementwise multiply per feature rather than a
+            # torch.stack the ragged widths could not take (section 5.1).
+            masked_lookup_indicators = lookup_indicators * (1 - record_masks['lookup']['indicators'])
+            masked_lookup_embeddings = [
+                embeddings * (1 - value_mask) for embeddings, value_mask
+                in zip(lookup_embeddings, record_masks['lookup']['embedded_values'])
+            ]
+            # Combine the numeric, categorical, and lookup data into a single tensor for input to the encoder
+            #   masked_indicators shape: (batch_size, max_timeseries_length, n_num_feats + n_cat_feats + n_lookup_feats)
             #   masked_values shape: (batch_size, max_timeseries_length, total_feat_dim)
-            masked_indicators, masked_values = combine_value_and_text_data(
+            masked_indicators, masked_values = combine_value_and_lookup_data(
                 value_assoc_indicators=masked_indicators,
                 value_assoc_values=masked_values,
-                text_assoc_indicators=masked_text_indicators, 
-                text_embeddings=masked_text_embeddings
+                lookup_assoc_indicators=masked_lookup_indicators,
+                lookup_embeddings=masked_lookup_embeddings
             )
 
         # Get embeddings for each batch item, timestep from the encoder transformer
@@ -786,7 +793,7 @@ class MaskedTokenGenerator(torch.nn.Module):
             indicator_embed = self.indicator_mlp(masked_indicators)  # (batch_size, max_timeseries_length, d_model)
         # val_embed shape: (batch_size, max_timeseries_length, d_model)
         val_embed = self.encoder(
-            masked_indicators,  # [batch_size, max_timeseries_length, n_num_feats + n_cat_feats + n_text_feats]
+            masked_indicators,  # [batch_size, max_timeseries_length, n_num_feats + n_cat_feats + n_lookup_feats]
             masked_values,  # [batch_size, max_timeseries_length, total_feat_dim]
             timestamps,  # [batch_size, max_timeseries_length]
             timestep_masks  # [batch_size, max_timeseries_length]
@@ -840,14 +847,14 @@ class MaskedTokenGenerator(torch.nn.Module):
             # Each head produces logits for independent binary classification per class
             output['multilabel']['values'] = [head(val_embed) for head in self.multilabel_heads]
 
-        if self.predict_text_feats:
-            output['text'] = {'indicators': None, 'values': []}
+        if self.predict_lookup_feats:
+            output['lookup'] = {'indicators': None, 'values': []}
             if self.predict_indicators:
-                # Indicator output shape: [batch_size, max_timeseries_length, n_text_features]
-                output['text']['indicators'] = self.text_indicator_mlp(indicator_embed)
-            # Each head produces predictions for one text feature
-            # Value output shape: [(batch_size, max_timeseries_length, TEXT_EMBED_DIM) x n_text_features]
-            output['text']['embedded_values'] = [head(val_embed) for head in self.text_heads]
+                # Indicator output shape: [batch_size, max_timeseries_length, n_lookup_features]
+                output['lookup']['indicators'] = self.lookup_indicator_head(indicator_embed)
+            # Each head produces predictions for one lookup feature
+            # Value output shape: [(batch_size, max_timeseries_length, D_f) x n_lookup_features]
+            output['lookup']['embedded_values'] = [head(val_embed) for head in self.lookup_heads]
 
         # Add the timestamps and masks to the output (convenience for downstream discriminator)
         output['times'] = timestamps  # (batch_size, max_timeseries_length)
@@ -873,7 +880,7 @@ class MaskedTokenDiscriminator(torch.nn.Module):
         n_categorical_features: int,
         n_ordinal_features: int = 0,
         n_multilabel_features: int = 0,
-        n_text_features: int = 0,
+        n_lookup_features: int = 0,
         n_static_features: int = 0,
         dim_feedforward: int = 64
     ):
@@ -885,7 +892,7 @@ class MaskedTokenDiscriminator(torch.nn.Module):
             n_numeric_feats (int): The number of numeric features to predict
             n_categorical_feats (int): The number of categorical features to predict
             n_ordinal_features (int): The number of ordinal features to predict. Defaults to zero.
-            n_text_feats (int): The number of text features to predict. Defaults to zero.
+            n_lookup_features (int): The number of lookup (text or drug) features to predict. Defaults to zero.
             n_static_features (int): The number of static (non-time-varying) features to concatenate with the output
                 from the encoder. Defaults to zero.
             dim_feedforward (int): The dimension of the feedforward layer.
@@ -916,16 +923,16 @@ class MaskedTokenDiscriminator(torch.nn.Module):
         else:
             self.multilabel_head = None
 
-        if n_text_features > 0:
-            self.text_head = torch.nn.Linear(dim_feedforward, n_text_features)
+        if n_lookup_features > 0:
+            self.lookup_head = torch.nn.Linear(dim_feedforward, n_lookup_features)
         else:
-            self.text_head = None
+            self.lookup_head = None
 
         self.predict_numeric_feats = (self.numeric_head is not None)
         self.predict_categorical_feats = (self.categorical_head is not None)
         self.predict_ordinal_feats = (self.ordinal_head is not None)
         self.predict_multilabel_feats = (self.multilabel_head is not None)
-        self.predict_text_feats = (self.text_head is not None)
+        self.predict_lookup_feats = (self.lookup_head is not None)
 
     def forward(
         self, 
@@ -965,13 +972,14 @@ class MaskedTokenDiscriminator(torch.nn.Module):
             inds_to_concat.append(batch['multilabel']['indicators'])
             vals_to_concat.append(torch.cat(batch['multilabel']['values'], dim=2))
 
-        if self.predict_text_feats:
-            inds_to_concat.append(batch['text']['indicators'])
-            if 'embedded_values' in batch['text']:
-                text_embeddings = batch['text']['embedded_values'].flatten(start_dim=2)
-                vals_to_concat.append(text_embeddings)
+        if self.predict_lookup_feats:
+            inds_to_concat.append(batch['lookup']['indicators'])
+            if 'embedded_values' in batch['lookup']:
+                # A per-feature list, so extend rather than append: the concatenation below
+                # produces the layout the stacked tensor's flatten used to (section 5.1).
+                vals_to_concat.extend(batch['lookup']['embedded_values'])
             else:
-                raise ValueError("Expected 'embedded_values' key in batch['text'] for discriminator input.")
+                raise ValueError("Expected 'embedded_values' key in batch['lookup'] for discriminator input.")
 
         # Concatenate the tensors for numeric and categorical features along the feature dimension
         #   val_indicators shape: (batch_size, max_timeseries_length, n_num_feats + n_cat_feats)
@@ -984,7 +992,7 @@ class MaskedTokenDiscriminator(torch.nn.Module):
 
         # val_embed shape: (batch_size, max_timeseries_length, d_model)
         val_embed = self.encoder(
-            val_indicators,  # (batch_size, max_timeseries_length, n_num_feats + n_cat_feats + n_text_feats)
+            val_indicators,  # (batch_size, max_timeseries_length, n_num_feats + n_cat_feats + n_lookup_feats)
             val_values,  # (batch_size, max_timeseries_length, total_feat_dim)
             timestamps,  # (batch_size, max_timeseries_length)
             timestep_masks  # (batch_size, max_timeseries_length)
@@ -1011,8 +1019,8 @@ class MaskedTokenDiscriminator(torch.nn.Module):
             output['ordinal'] = self.ordinal_head(val_embed)  # (batch_size, max_timeseries_length, n_ordinal_feats)
         if self.predict_multilabel_feats:
             output['multilabel'] = self.multilabel_head(val_embed)
-        if self.predict_text_feats:
-            output['text'] = self.text_head(val_embed)  # (batch_size, max_timeseries_length, n_text_feats)
+        if self.predict_lookup_feats:
+            output['lookup'] = self.lookup_head(val_embed)  # (batch_size, max_timeseries_length, n_lookup_feats)
 
         return output
 

@@ -16,13 +16,13 @@ class ELECTRA(torch.nn.Module):
         generator: MaskedTokenGenerator,
         discriminator: MaskedTokenDiscriminator,
         hawkes: TransformerHawkesProcess,
-        use_text: bool = False,
+        use_lookup: bool = False,
     ):
         super().__init__()
         self.generator = generator
         self.discriminator = discriminator
         self.hawkes = hawkes
-        self.use_text = use_text
+        self.use_lookup = use_lookup
 
     def _extract_masked_targets(
         self,
@@ -38,12 +38,12 @@ class ELECTRA(torch.nn.Module):
         
         For numeric features, we store the masked value components (sparse extraction).
         For categorical features, we store the masked one-hot encoded values.
-        For text features, we store complete embedding vectors at masked positions since
+        For lookup features, we store complete embedding vectors at masked positions since
         the cosine similarity loss requires the full embedding for normalization.
         
         Args:
             value_data: Original value-associated data from the batch, containing numeric,
-                categorical, and/or text features with their values and indicators.
+                categorical, and/or lookup features with their values and indicators.
             record_masks: Masks indicating which records and feature values were hidden from
                 the generator. A value of 1 indicates a record was masked, 0 indicates not.
                 
@@ -59,7 +59,7 @@ class ELECTRA(torch.nn.Module):
                     'values': List[Tensor],  # Masked one-hot values per feature  
                     'indicators': Tensor     # Masked indicator values (if predict_indicators)
                 },
-                'text': {
+                'lookup': {
                     'embedded_values': List[Tensor],  # Full embeddings at masked positions
                     'indicators': Tensor              # Masked indicator values (if predict_indicators)
                 }
@@ -67,7 +67,7 @@ class ELECTRA(torch.nn.Module):
         """
         masked_targets = {}
         
-        for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'text']:
+        for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'lookup']:
             if feat_type not in value_data or feat_type not in record_masks:
                 continue
 
@@ -113,25 +113,23 @@ class ELECTRA(torch.nn.Module):
                     # Result shape: (n_masked_positions, n_levels)
                     masked_targets[feat_type]['values'].append(orig_vals[feat_mask].clone())
 
-            elif feat_type == 'text':
-                # For text features, we must store the COMPLETE embedding vectors at masked positions.
+            elif feat_type == 'lookup':
+                # For lookup features, we must store the COMPLETE embedding vectors at masked positions.
                 # The cosine similarity loss requires the full embedding for proper L2 normalization;
                 # storing only masked components would corrupt the similarity computation.
                 if 'embedded_values' in value_data[feat_type]:
-                    # embedded_values shape: (batch_size, max_ts_len, n_text_feats, TEXT_EMBED_DIM)
+                    # embedded_values: [(batch_size, max_ts_len, D_f) x n_lookup_feats]
                     orig_embeddings = value_data[feat_type]['embedded_values']
-                    feature_masks = record_masks[feat_type]['indicators']  # (batch_size, max_ts_len, n_text_feats)
-                    
+                    feature_masks = record_masks[feat_type]['indicators']  # (batch_size, max_ts_len, n_lookup_feats)
+
                     masked_targets[feat_type]['embedded_values'] = []
-                    n_text_feats = feature_masks.shape[2]
-                    
-                    for i in range(n_text_feats):
+                    for i, feat_embeddings in enumerate(orig_embeddings):
                         # feat_mask shape: (batch_size, max_ts_len)
                         feat_mask = feature_masks[:, :, i].bool()
                         # Extract complete embeddings at masked positions
-                        # Result shape: (n_masked_positions, TEXT_EMBED_DIM)
+                        # Result shape: (n_masked_positions, D_f)
                         masked_targets[feat_type]['embedded_values'].append(
-                            orig_embeddings[:, :, i, :][feat_mask].clone()
+                            feat_embeddings[feat_mask].clone()
                         )
             
             # Extract masked indicators if the generator predicts them
@@ -169,11 +167,11 @@ class ELECTRA(torch.nn.Module):
         Returns:
             None. The value_data dictionary is modified in-place.
         """
-        for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'text']:
+        for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'lookup']:
             # The generator output only has keys for feature types that were used for prediction.
             # If the input batch's feature list for a type was empty, the output will not have
-            # a key for that type. Text is only processed if the MaskedTokenGenerator was
-            # initialized with n_text_features > 0.
+            # a key for that type. The lookup family is only processed if the
+            # MaskedTokenGenerator was initialized with a non-empty lookup_dims.
             if feat_type not in gen_output or feat_type not in value_data:
                 continue
 
@@ -225,16 +223,16 @@ class ELECTRA(torch.nn.Module):
                     dest_tensor = value_data[feat_type]['values'][i]
                     dest_tensor[value_mask] = pred_binary[value_mask].to(dest_tensor.dtype)
 
-            elif feat_type == 'text':
-                # Replace masked text embeddings with generator predictions in-place
-                # embedded_values shape: (batch_size, max_ts_len, n_text_feats, TEXT_EMBED_DIM)
-                pred_embeddings = torch.stack(gen_output[feat_type]['embedded_values'], dim=2)
-                # value_mask shape: (batch_size, max_ts_len, n_text_feats, TEXT_EMBED_DIM)
-                value_mask = torch.stack(record_masks[feat_type]['embedded_values'], dim=2).bool()
-                # Get destination tensor and its dtype for casting
-                dest_tensor = value_data[feat_type]['embedded_values']
-                # In-place update at masked positions, casting to destination dtype
-                dest_tensor[value_mask] = pred_embeddings[value_mask].to(dest_tensor.dtype)
+            elif feat_type == 'lookup':
+                # Replace masked lookup embeddings with generator predictions in-place.
+                # Per feature, since the widths are ragged (section 5.1).
+                for i, pred_embeddings in enumerate(gen_output[feat_type]['embedded_values']):
+                    # value_mask shape: (batch_size, max_ts_len, D_f)
+                    value_mask = record_masks[feat_type]['embedded_values'][i].bool()
+                    # Get destination tensor and its dtype for casting
+                    dest_tensor = value_data[feat_type]['embedded_values'][i]
+                    # In-place update at masked positions, casting to destination dtype
+                    dest_tensor[value_mask] = pred_embeddings[value_mask].to(dest_tensor.dtype)
 
             # Replace masked indicators with predicted ones if available
             if self.generator.predict_indicators:
@@ -333,8 +331,8 @@ class ELECTRA(torch.nn.Module):
                 }
             
         value_data = batch['val_data']  # Extract the ValueAssociatedTensorData from the batch
-        # Pre-computed text embeddings are already in value_data['text']['embedded_values']
-        # from the dataloader (produced by embed_text.py).
+        # Pre-computed lookup embeddings are already in value_data['lookup']['embedded_values']
+        # from the dataloader (produced by embed_text.py and ClinVec).
 
         # MEMORY OPTIMIZATION: Extract masked target values BEFORE in-place modification.
         # This stores only the values needed for generator loss (~15-25% of batch) rather than
@@ -373,7 +371,7 @@ class MixedClassifier(torch.nn.Module):
         d_statics: int,
         num_classes: int,
         aggr: str = 'max',
-        use_text: bool = False,
+        use_lookup: bool = False,
     ):
         """Initialize MixedClassifier.
 
@@ -385,7 +383,7 @@ class MixedClassifier(torch.nn.Module):
             d_statics: Dimensionality of static data (0 if no static data)
             num_classes: Number of output classes
             aggr: Aggregation method ('max' or 'mean') for sequence-level encoding
-            use_text: If True, the model will expect pre-computed text embeddings in the input batch.
+            use_lookup: If True, the model will expect pre-computed lookup embeddings in the input batch.
         """
 
         super().__init__()
@@ -394,7 +392,7 @@ class MixedClassifier(torch.nn.Module):
         self.linear = torch.nn.Linear(d_event_enc + d_val_enc + d_statics, 32)
         self.linear1 = torch.nn.Linear(32, num_classes)
         self.aggr = aggr
-        self.use_text = use_text
+        self.use_lookup = use_lookup
 
     def forward(self, batch: MixedTensorDataset, trace_grads: bool = False) -> Tensor:
         """Forward pass through the mixed classifier.
@@ -463,8 +461,8 @@ class MixedClassifier(torch.nn.Module):
             val_times = val_data['times']
             val_masks = val_data['masks']
             
-            # Pre-computed text embeddings are already in val_data['text']['embedded_values']
-            # from the dataloader (produced by embed_text.py).
+            # Pre-computed lookup embeddings are already in val_data['lookup']['embedded_values']
+            # from the dataloader (produced by embed_text.py and ClinVec).
 
             # Combine all feature types along a single axis for the encoder
             inds_to_concat = []
@@ -504,13 +502,13 @@ class MixedClassifier(torch.nn.Module):
                 multilabel_vals = torch.cat(val_data['multilabel']['values'], dim=2)
                 vals_to_concat.append(multilabel_vals)
 
-            # Process text features
-            if self.use_text and 'text' in val_data and 'embedded_values' in val_data['text']:
-                # Extract text feature indicators and embeddings
-                text_inds = val_data['text']['indicators']
-                inds_to_concat.append(text_inds)
-                text_embeddings = val_data['text']['embedded_values'].flatten(start_dim=2)
-                vals_to_concat.append(text_embeddings)
+            # Process lookup features
+            if self.use_lookup and 'lookup' in val_data and 'embedded_values' in val_data['lookup']:
+                # Extract lookup feature indicators and embeddings
+                lookup_inds = val_data['lookup']['indicators']
+                inds_to_concat.append(lookup_inds)
+                # A per-feature list, so extend rather than append (section 5.1).
+                vals_to_concat.extend(val_data['lookup']['embedded_values'])
         
             if inds_to_concat and vals_to_concat:
                 # Concatenate the tensors for numeric and categorical features along the feature dimension

@@ -298,7 +298,7 @@ def test_text_gathers_a_dense_row_per_timestep(dataset):
     single-slot feature yields (T, D) -- its weight is 1 by definition,
     so there is nothing to slot."""
     item = dataset[0]
-    embeddings = item['val_text_embeddings'][0]
+    embeddings = item['val_lookup_embeddings'][0]
     assert embeddings.shape == (4, TEXT_EMBED_DIM)
     # one_patient carries the same note at two timesteps, interned once,
     # so both gather table row 0, whose fill value is 1.
@@ -306,7 +306,9 @@ def test_text_gathers_a_dense_row_per_timestep(dataset):
     assert embeddings[-1].tolist() == [1.0] * TEXT_EMBED_DIM
     # The timestep with no text gathers nothing.
     assert not embeddings[2].any()
-    assert item['val_text_indicators'].shape == (4, 1)
+    # One feature axis over the family, whatever the on-disk split
+    # (section 5.1); with DRG still slotted, only TXT is in it here.
+    assert item['val_lookup_indicators'].shape == (4, 1)
 
 
 def test_drugs_gather_slotted_and_unpooled(dataset):
@@ -346,7 +348,7 @@ def test_the_gather_casts_to_float32(one_patient):
     dataset = extracted(one_patient, dtype=np.float64)
     assert dataset.lookup_tables[0].dtype == np.float64
     item = dataset[0]
-    assert item['val_text_embeddings'][0].dtype == torch.float32
+    assert item['val_lookup_embeddings'][0].dtype == torch.float32
     assert item['val_drug_slots'][0].dtype == torch.float32
 
 
@@ -405,8 +407,10 @@ def test_the_batch_collates_with_the_expected_shapes(dataset):
     assert [v.shape for v in val['ordinal']['values']] == [
         (2, 4, 3), (2, 4, 2)
     ]
-    assert val['text']['indicators'].shape == (2, 4, 1)
-    assert val['text']['embedded_values'].shape == (2, 4, 1, TEXT_EMBED_DIM)
+    assert val['lookup']['indicators'].shape == (2, 4, 1)
+    assert [v.shape for v in val['lookup']['embedded_values']] == [
+        (2, 4, TEXT_EMBED_DIM)
+    ]
     assert val['drug']['indicators'].shape == (2, 4, 1)
     assert [v.shape for v in val['drug']['slot_values']] == [
         (2, 4, 3, CLINVEC_DIM)
@@ -425,7 +429,7 @@ def test_every_collated_value_is_float32(dataset):
     batch = collate_tensorized([dataset[0], dataset[0]])
     val = batch['val_data']
     tensors = (
-        [val['times'], val['masks'], val['text']['embedded_values']]
+        [val['times'], val['masks']] + val['lookup']['embedded_values']
         + val['numeric']['values'] + val['categorical']['values']
         + val['ordinal']['values'] + val['drug']['slot_values']
         + val['drug']['doses'] + val['drug']['masks']
@@ -603,7 +607,7 @@ def test_a_batch_is_accepted_by_the_generator_unchanged(dataset):
     The oracle is the real encoder rather than an assertion about
     shapes: a collated batch goes through ``generate_record_masks`` and
     ``MaskedTokenGenerator`` -- so through ``torch.cat`` over the
-    families, ``combine_value_and_text_data``, and the timestamp
+    families, ``combine_value_and_lookup_data``, and the timestamp
     encoding -- and every head produces its feature's width back.
     ``norm`` and ``predict_indicators`` are what all four experiment
     configs set.
@@ -613,7 +617,7 @@ def test_a_batch_is_accepted_by_the_generator_unchanged(dataset):
 
     batch = collate_tensorized([dataset[0], dataset[0]])
     val_data = batch['val_data']
-    text_dim = val_data['text']['embedded_values'].shape[-1]
+    lookup_dims = [v.shape[-1] for v in val_data['lookup']['embedded_values']]
 
     numeric_dims = [v.shape[-1] for v in val_data['numeric']['values']]
     categorical_classes = [
@@ -622,11 +626,11 @@ def test_a_batch_is_accepted_by_the_generator_unchanged(dataset):
     ordinal_levels = [v.shape[-1] for v in val_data['ordinal']['values']]
     n_features = (
         len(numeric_dims) + len(categorical_classes) + len(ordinal_levels)
-        + val_data['text']['indicators'].shape[-1]
+        + val_data['lookup']['indicators'].shape[-1]
     )
     feat_dim = (
         sum(numeric_dims) + sum(categorical_classes) + sum(ordinal_levels)
-        + text_dim
+        + sum(lookup_dims)
     )
 
     torch.manual_seed(0)
@@ -640,8 +644,7 @@ def test_a_batch_is_accepted_by_the_generator_unchanged(dataset):
         numeric_dims=numeric_dims,
         categorical_classes=categorical_classes,
         ordinal_features=ordinal_levels,
-        n_text_features=1,
-        text_embed_dim=text_dim,
+        lookup_dims=lookup_dims,
         predict_indicators=False,
         dim_feedforward=32
     )
@@ -658,4 +661,6 @@ def test_a_batch_is_accepted_by_the_generator_unchanged(dataset):
     assert [v.shape for v in output['ordinal']['values']] == [
         (2, T, n) for n in ordinal_levels
     ]
-    assert output['text']['embedded_values'][0].shape == (2, T, text_dim)
+    assert [v.shape for v in output['lookup']['embedded_values']] == [
+        (2, T, dim) for dim in lookup_dims
+    ]

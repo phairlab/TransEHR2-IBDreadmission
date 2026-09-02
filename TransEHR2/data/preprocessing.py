@@ -1428,10 +1428,10 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     """Collate function for MixedDataset.
 
     Takes a list of episode dicts and stacks them into the
-    MixedTensorDataset format expected by the model. Pre-computed text
-    embeddings are stacked into a single tensor at
-    batch['val_data']['text']['embedded_values'] with shape
-    [batch_size, max_ts_len, n_text_feats, embed_dim].
+    MixedTensorDataset format expected by the model. The lookup family
+    arrives as one feature axis at
+    ``batch['val_data']['lookup']['indicators']`` beside a per-feature
+    list of ``(batch_size, max_ts_len, D_f)`` embeddings (section 5.1).
 
     Section 4.2 removes the history region, so the history-masking
     arguments this took are gone with it.
@@ -1489,19 +1489,19 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
         for f in range(n_multilabel_feats)
     ]
 
-    # Stack pre-computed text embeddings into [batch, max_ts, n_text_feats, embed_dim]
-    # Each b['val_text_embeddings'][f] has shape [max_ts_len, embed_dim]
-    # First stack features: [max_ts_len, n_text_feats, embed_dim] per episode
-    # Then stack episodes: [batch_size, max_ts_len, n_text_feats, embed_dim]
-    # Section 5.1 replaces this stack with a per-feature list; that is
-    # C3's first commit, together with the model sites that read it.
-    if 'val_text_embeddings' in batch[0]:
-        val_text_embeddings = torch.stack([
-            torch.stack(b['val_text_embeddings'], dim=1)  # [max_ts, n_feats, embed_dim]
-            for b in batch
-        ], dim=0)  # [batch, max_ts, n_feats, embed_dim]
+    # The lookup family batches per feature, not into one
+    # [batch, max_ts, n_lookup_feats, embed_dim] tensor (section 5.1):
+    # the widths are ragged -- text is 4096 or 8192 beside ClinVec's 128
+    # -- and per-feature batching is one stack of the same total bytes
+    # where the stacked form was two.
+    if 'val_lookup_embeddings' in batch[0]:
+        n_lookup_feats = len(batch[0]['val_lookup_embeddings'])
+        val_lookup_embeddings = [
+            torch.stack([b['val_lookup_embeddings'][f] for b in batch], dim=0)
+            for f in range(n_lookup_feats)
+        ]
     else:
-        val_text_embeddings = None
+        val_lookup_embeddings = None
 
     # Stack targets
     time_to_event = torch.stack(
@@ -1550,12 +1550,12 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
             [b['static_data'] for b in batch], dim=0
         )
 
-    if val_text_embeddings is not None:
-        result['val_data']['text'] = {
+    if val_lookup_embeddings is not None:
+        result['val_data']['lookup'] = {
             'indicators': torch.stack(
-                [b['val_text_indicators'] for b in batch], dim=0
+                [b['val_lookup_indicators'] for b in batch], dim=0
             ),
-            'embedded_values': val_text_embeddings,
+            'embedded_values': val_lookup_embeddings,
         }
 
     # Slots, doses and masks, unpooled (section 4.3). Read by nobody

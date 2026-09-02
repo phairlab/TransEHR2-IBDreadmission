@@ -19,7 +19,7 @@ class MaskedGeneratorLoss(torch.nn.Module):
     - Numeric features: Squared L2 norm of the difference between targets and predictions, averaged across samples.
     - Categorical features: Cross entropy loss with ignored padding class
     - Multilabel features: Binary cross entropy per class (independent binary classification)
-    - Text features: Cosine similarity loss (rescaled from [-1,1] to [0,1])
+    - Lookup features (text and drugs): Cosine similarity loss (rescaled from [-1,1] to [0,1])
     
     This loss function supports two input formats for targets:
     1. Full batch format (MixedTensorDataset): The original format with complete batch data
@@ -33,7 +33,7 @@ class MaskedGeneratorLoss(torch.nn.Module):
         categorical_weight: float = 1.0,
         ordinal_weight: float = 1.0,
         multilabel_weight: float = 1.0,
-        text_weight: float = 1.0,
+        lookup_weight: float = 1.0,
         indicator_weight: float = 1.0,
         ordinal_features: Optional[List[int]] = None
     ):
@@ -45,7 +45,7 @@ class MaskedGeneratorLoss(torch.nn.Module):
             categorical_weight (float): Weight for categorical feature loss
             ordinal_weight (float): Weight for ordinal feature loss
             multilabel_weight (float): Weight for multilabel feature loss
-            text_weight (float): Weight for text feature loss
+            lookup_weight (float): Weight for lookup (text and drug) feature loss
             indicator_weight (float): Weight for indicator prediction loss
             ordinal_features (List[int], optional): List of number of levels for
                 each ordinal feature. Required if ordinal features are present.
@@ -55,7 +55,7 @@ class MaskedGeneratorLoss(torch.nn.Module):
         self.categorical_weight = categorical_weight
         self.ordinal_weight = ordinal_weight
         self.multilabel_weight = multilabel_weight
-        self.text_weight = text_weight
+        self.lookup_weight = lookup_weight
         self.indicator_weight = indicator_weight
 
         # Define loss functions
@@ -281,15 +281,15 @@ class MaskedGeneratorLoss(torch.nn.Module):
                     total_loss += self.indicator_weight * indicator_loss
                     n_masked += indicator_n_masked
 
-        # Process text features
-        if 'text' in predictions and 'text' in masked_targets:
-            if 'embedded_values' in masked_targets['text']:
-                pred_values = predictions['text']['embedded_values']
-                target_values = masked_targets['text']['embedded_values']
-                feature_masks = record_masks['text']['indicators']
+        # Process lookup features
+        if 'lookup' in predictions and 'lookup' in masked_targets:
+            if 'embedded_values' in masked_targets['lookup']:
+                pred_values = predictions['lookup']['embedded_values']
+                target_values = masked_targets['lookup']['embedded_values']
+                feature_masks = record_masks['lookup']['indicators']
 
-                text_loss = 0.0
-                text_n_masked = 0
+                lookup_loss = 0.0
+                lookup_n_masked = 0
                 for f, (pred, target) in enumerate(zip(pred_values, target_values)):
                     if target.numel() == 0:
                         continue
@@ -315,19 +315,19 @@ class MaskedGeneratorLoss(torch.nn.Module):
                     # Convert similarity [-1,1] to distance [0,2] and rescale to [0,1]
                     cosine_distance = (1.0 - cosine_sim) / 2.0
 
-                    # For text, count each valid masked embedding as one loss unit
-                    text_loss += cosine_distance.sum()
-                    text_n_masked += cosine_distance.numel()
+                    # For a lookup feature, count each valid masked embedding as one loss unit
+                    lookup_loss += cosine_distance.sum()
+                    lookup_n_masked += cosine_distance.numel()
 
-                total_loss += self.text_weight * text_loss
-                n_masked += text_n_masked
+                total_loss += self.lookup_weight * lookup_loss
+                n_masked += lookup_n_masked
 
-                # Process text indicators
-                if 'indicators' in predictions['text'] and predictions['text']['indicators'] is not None:
-                    if 'indicators' in masked_targets['text']:
+                # Process lookup indicators
+                if 'indicators' in predictions['lookup'] and predictions['lookup']['indicators'] is not None:
+                    if 'indicators' in masked_targets['lookup']:
                         indicator_loss, indicator_n_masked = self._calculate_indicator_loss_sparse(
-                            predictions['text']['indicators'],
-                            masked_targets['text']['indicators'],
+                            predictions['lookup']['indicators'],
+                            masked_targets['lookup']['indicators'],
                             feature_masks.bool()
                         )
                         total_loss += self.indicator_weight * indicator_loss
@@ -534,25 +534,24 @@ class MaskedGeneratorLoss(torch.nn.Module):
                 total_loss += self.indicator_weight * masked_indicator_loss
                 n_masked += indicator_n_masked
 
-        # Process text features
-        if 'text' in predictions and 'text' in targets['val_data']:
-            # Get predicted text embeddings
-            pred_values = predictions['text']['values']  # List of tensors, one per feature
+        # Process lookup features
+        if 'lookup' in predictions and 'lookup' in targets['val_data']:
+            # Get predicted lookup embeddings
+            pred_values = predictions['lookup']['values']  # List of tensors, one per feature
 
-            # Get LLM-generated embeddings from target tokens
-            # The LLM embeddings should already be computed in the targets
-            if 'embedded_values' in targets['val_data']['text']:
-                target_values = targets['val_data']['text']['embedded_values']
+            # Get the pre-computed embeddings the generator has to reconstruct
+            if 'embedded_values' in targets['val_data']['lookup']:
+                target_values = targets['val_data']['lookup']['embedded_values']
                 has_target_embeddings = True
             else:
                 target_values = None
                 has_target_embeddings = False
             
             if has_target_embeddings:
-                # Process each text feature
-                feature_masks = record_masks['text']['indicators']  # [batch_size, max_ts_len, n_text_feats]
-                value_masks = record_masks['text']['embedded_values']  # List: [batch_size, max_ts_len, TEXT_EMBED_DIM]
-                text_loss = 0.0
+                # Process each lookup feature
+                feature_masks = record_masks['lookup']['indicators']  # [batch_size, max_ts_len, n_lookup_feats]
+                value_masks = record_masks['lookup']['embedded_values']  # List: [batch_size, max_ts_len, D_f]
+                lookup_loss = 0.0
                 for f, (pred, target, value_mask) in enumerate(zip(pred_values, target_values, value_masks)):
                     # Extract feature mask for this feature
                     feat_mask = feature_masks[:, :, f].bool()  # [batch_size, max_ts_len]
@@ -568,8 +567,8 @@ class MaskedGeneratorLoss(torch.nn.Module):
                     if not valid_mask.any():
                         continue
                     # Extract valid vectors
-                    pred_valid = pred[valid_mask]  # [n_valid, TEXT_EMBED_DIM]
-                    target_valid = target[valid_mask]  # [n_valid, TEXT_EMBED_DIM]
+                    pred_valid = pred[valid_mask]  # [n_valid, D_f]
+                    target_valid = target[valid_mask]  # [n_valid, D_f]
                     
                     # Normalize embeddings for cosine similarity
                     pred_norm = F.normalize(pred_valid, p=2, dim=-1)
@@ -579,18 +578,18 @@ class MaskedGeneratorLoss(torch.nn.Module):
                     # Convert similarity [-1,1] to distance [0,2] and rescale to [0,1]
                     cosine_distance = (1.0 - cosine_sim) / 2.0
                     
-                    # For text, count each valid masked embedding as one loss unit
-                    text_loss += cosine_distance.sum()
+                    # For a lookup feature, count each valid masked embedding as one loss unit
+                    lookup_loss += cosine_distance.sum()
                     n_masked += cosine_distance.numel()
-                
-                total_loss += self.text_weight * text_loss
-                
-                # Process text indicators if available
-                if 'indicators' in predictions['text'] and predictions['text']['indicators'] is not None:
-                    if 'indicators' in targets['text']:
+
+                total_loss += self.lookup_weight * lookup_loss
+
+                # Process lookup indicators if available
+                if 'indicators' in predictions['lookup'] and predictions['lookup']['indicators'] is not None:
+                    if 'indicators' in targets['lookup']:
                         indicator_loss, indicator_n_masked = self._calculate_indicator_loss_sparse(
-                            predictions['text']['indicators'],
-                            targets['text']['indicators'],
+                            predictions['lookup']['indicators'],
+                            targets['lookup']['indicators'],
                             feature_masks.bool()
                         )
                         total_loss += self.indicator_weight * indicator_loss
@@ -668,7 +667,7 @@ class MaskedDiscriminatorLoss(torch.nn.Module):
                 {
                     'numeric': Tensor of shape (batch_size, max_ts_len, n_numeric_feats),
                     'categorical': Tensor of shape (batch_size, max_ts_len, n_categorical_feats),
-                    'text': Tensor of shape (batch_size, max_ts_len, n_text_feats)
+                    'lookup': Tensor of shape (batch_size, max_ts_len, n_lookup_feats)
                 }
             record_masks (Dict): Dictionary of masks indicating which values were masked during generation.
                 A value of 1 indicates a record was masked (and should be predicted as generated),
@@ -681,7 +680,7 @@ class MaskedDiscriminatorLoss(torch.nn.Module):
         n_predictions = 0
         
         # Process each feature type
-        for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'text']:
+        for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'lookup']:
             if feat_type not in predictions or feat_type not in record_masks:
                 continue
             pred_logits = predictions[feat_type]  # (batch_size, max_ts_len, n_features)

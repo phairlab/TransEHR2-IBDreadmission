@@ -99,6 +99,7 @@ distributed-training subsection is untouched.
 import numpy as np
 import torch
 
+from collections import Counter
 from torch.utils.data import Dataset
 from typing import Dict, List, Optional
 
@@ -253,6 +254,16 @@ class MixedDataset(Dataset):
         self.lookup_tables = lookup_tables
         self.lookup_slot_dims = lookup_slot_dims
         self.lookup_feat_types = lookup_feat_types
+        # The family's canonical feature order is ``lookup_feat_types``'s
+        # (section 4.4). The dense indicators are split by type on disk
+        # and only there, so each feature's column within its own type's
+        # array is recorded here and the item carries one feature axis
+        # (section 5.1).
+        self._lookup_columns = []
+        seen: Counter = Counter()
+        for feat_type in lookup_feat_types:
+            self._lookup_columns.append((feat_type, seen[feat_type]))
+            seen[feat_type] += 1
         # The table's own width, not metadata's: text has no declared
         # width until C4 builds the table (section 4.4).
         self.lookup_table_dims = [t.shape[1] for t in lookup_tables]
@@ -404,17 +415,24 @@ class MixedDataset(Dataset):
             for values in self.val_multilabel_values
         ]
 
-        for feat_type, indicators in self.lookup_indicators.items():
-            item[f'val_{feat_type}_indicators'] = torch.from_numpy(
-                np.array(indicators[idx], dtype=np.float32)
-            )
-        for f, feat_type in enumerate(self.lookup_feat_types):
+        # Section 5.1's per-feature list. A single-slot feature is ready
+        # for the encoder as it stands; a multi-slot one leaves unpooled
+        # (section 4.3), and joining the family is C3's second commit.
+        lookup_columns = []
+        lookup_embeddings = []
+        for f, (feat_type, column) in enumerate(self._lookup_columns):
             embeddings, doses, masks = self._gather_lookup(f, idx)
             if doses is None:
-                item.setdefault(f'val_{feat_type}_embeddings', []).append(
-                    torch.from_numpy(embeddings)
+                lookup_columns.append(
+                    np.asarray(self.lookup_indicators[feat_type][idx],
+                               dtype=np.float32)[:, column]
                 )
+                lookup_embeddings.append(torch.from_numpy(embeddings))
             else:
+                item[f'val_{feat_type}_indicators'] = torch.from_numpy(
+                    np.array(self.lookup_indicators[feat_type][idx],
+                             dtype=np.float32)
+                )
                 item.setdefault(f'val_{feat_type}_slots', []).append(
                     torch.from_numpy(embeddings)
                 )
@@ -424,6 +442,11 @@ class MixedDataset(Dataset):
                 item.setdefault(f'val_{feat_type}_masks', []).append(
                     torch.from_numpy(masks)
                 )
+        if lookup_embeddings:
+            item['val_lookup_indicators'] = torch.from_numpy(
+                np.stack(lookup_columns, axis=-1)
+            )
+            item['val_lookup_embeddings'] = lookup_embeddings
 
         item['event_indicators'] = torch.from_numpy(
             np.array(self.event_indicators[idx], dtype=np.float32)

@@ -1,11 +1,12 @@
-"""End to end over B0's fixture root and the live config (section 4.4).
+"""End to end over B0's fixture root and the live config.
 
 This is the test that pins the numbers: the 94 / 37 / 16 indicator widths
 are counts of ``VALUED_FEATS`` entries by ``type`` in the real
-``variable_properties.yaml`` (section A.3), so they are asserted against
+``variable_properties.yaml``, so they are asserted against
 the derived counts and never against literals. Everything the unit tests
 check they check on a six-feature cohort they write themselves; this one
-checks that the real pair of config files produces section 4.4's table.
+checks that the real pair of config files produces the documented
+on-disk layout.
 
 Skipped when IBDdataprep's fixture has not been generated -- it is
 untracked, and ``python -m IBDdataprep.make_fixture`` rebuilds it.
@@ -75,8 +76,8 @@ def extracted(tmp_path_factory):
     config_path = tmp_path / 'dataset.yaml'
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
-    # One fold, so extraction writes the standardization statistics C2
-    # loads. The partitions are a hand-made split rather than split.py's
+    # One fold, so extraction writes the standardization statistics
+    # load_dataset reads. The partitions are a hand-made split rather than split.py's
     # -- nothing here tests the draw, only that a fold is row indices.
     n = len(pd.read_csv(data_dir / 'labels.csv'))
     assert n >= 3, "the fold needs three partitions"
@@ -137,8 +138,8 @@ def test_dense_arrays_match_the_shapes_and_dtypes_of_section_4_4(
 
 
 def test_the_derived_widths_are_the_94_37_16_of_section_4_4(widths):
-    """Section A.3 froze the contract at these counts. If this fails the
-    config and the YAML have moved, and section 4.4 needs revisiting --
+    """The feature set was frozen at these counts. If this fails the
+    config and the YAML have moved, and the array widths need revisiting --
     it is not a licence to hard-code new numbers downstream."""
     assert widths == {'numeric': 94, 'categorical': 37, 'ordinal': 16}
 
@@ -180,7 +181,7 @@ def test_sparse_text_and_drug_arrays_match_section_4_4(extracted):
 
 
 def test_no_static_data_and_no_per_episode_text_payload(extracted):
-    """Section 4.4: no zero-width static array, and the per-episode text
+    """No zero-width static array, and no per-episode text
     tokens and masks go away with the rest of the payload."""
     written = {p.name for p in (extracted / 'extracted').iterdir()}
     assert 'static_data.npy' not in written
@@ -196,7 +197,8 @@ def test_metadata_and_ids_are_written(extracted):
         metadata = pickle.load(f)
     assert metadata['lookup_feats'] == ['TEXT_SUPERFEATURE', 'DRUG']
     assert metadata['lookup_slot_dims'] == [1, 30]
-    # The pad index is the ClinVec row count; the text table is C4's.
+    # The pad index is the ClinVec row count; the text table's width is
+    # not known until embed.py builds it.
     assert metadata['lookup_pad_indices'][0] is None
     assert metadata['lookup_pad_indices'][1] > 0
 
@@ -233,7 +235,7 @@ def test_the_last_records_are_kept_at_the_right_of_the_row(extracted):
 
 
 def test_val_times_are_increasing_and_non_positive(extracted):
-    """Invariant 7, over the fixture cohort."""
+    """Times are non-decreasing and <= 0 inside each masked region."""
     times = load(extracted, 'val_times')
     masks = load(extracted, 'val_masks')
     assert (times <= 0).all()
@@ -243,7 +245,8 @@ def test_val_times_are_increasing_and_non_positive(extracted):
 
 
 def test_lookup_indices_are_in_range_for_their_tables(extracted):
-    """Invariant 8, as far as C1 can check it: text indices against the
+    """Every stored index is a row of its table, as far as extraction
+    alone can check it: text indices against the
     string table it just assigned, drug indices against ClinVec."""
     with open(extracted / 'extracted' / 'text_strings.pkl', 'rb') as f:
         strings = pickle.load(f)
@@ -284,19 +287,19 @@ def test_targets_and_ids_follow_labels_csv(extracted):
             labels.EVENT_TYPE.to_numpy()).all()
 
 
-# --- C2 over the same cohort and the same pair of config files -------
+# --- the dataset over the same cohort and config files --------------
 
 # Small enough to keep the test cheap; the real width is the LLM's and
-# is per-feature under section 5.1, so nothing may assume it.
+# is per-feature, so nothing may assume it.
 FIXTURE_TEXT_DIM = 8
 
 
 @pytest.fixture(scope='module')
 def loaded(extracted):
-    """The extracted fixture cohort, with C4's tables stood in for.
+    """The extracted fixture cohort, with the global tables stood in for.
 
-    Section 4.4's global tables are C4's, so a C2 test has to supply
-    them. Row *r* is filled with *r*, which makes a gathered vector name
+    The tables are built by ``embed.py``, so a dataset test has to supply
+    them itself. Row *r* is filled with *r*, which makes a gathered vector name
     the row it came from; the drug table's final row is the all-zero pad.
     """
     directory = extracted / 'extracted'
@@ -324,7 +327,7 @@ def loaded(extracted):
 
 
 def test_one_hot_widths_equal_the_declared_category_sizes(loaded):
-    """C2's headline claim, against the live pair of config files rather
+    """The headline claim, against the live pair of config files rather
     than a fixture's: an int16 index expands to exactly as many columns
     as ``variable_properties.yaml`` declares levels."""
     props = yaml.safe_load(VARIABLE_PROPERTIES.read_text())
@@ -337,7 +340,8 @@ def test_one_hot_widths_equal_the_declared_category_sizes(loaded):
         widths = [v.shape[-1] for v in item[f'val_{family}_values']]
         declared = [props[f]['size'] for f in metadata[f'{family}_feats']]
         assert widths == declared, family
-        # ``size`` and the map agree -- invariant 12 -- so either is the
+        # ``size`` and the map agree, checked by the feature contract,
+        # so either is the
         # width; asserting both is what makes this not a tautology.
         assert widths == [
             len(props[f]['category_map']) for f in metadata[f'{family}_feats']
@@ -362,7 +366,7 @@ def test_every_index_expands_to_at_most_one_hot(loaded):
 
 
 def test_a_fixture_batch_collates_at_the_live_widths(loaded, widths):
-    """Section 4.4's 94 / 37 / 16, through __getitem__ and collate."""
+    """The derived indicator widths, through __getitem__ and collate."""
     dataset = load_dataset(str(loaded / 'extracted'), fold='fold0')
     batch = collate_for_model([dataset[0], dataset[1]])
     val = batch['val_data']
@@ -382,7 +386,7 @@ def test_a_fixture_batch_collates_at_the_live_widths(loaded, widths):
 
 
 def test_the_loaders_partition_the_fixture_cohort(loaded):
-    """The whole path, over the layout section 3 and section 4.4
+    """The whole path, over the layout the labels file and the extractor
     actually produce: one extracted/ and one fold{i}/ of row indices."""
     train, val, test = prepare_dataloaders(
         str(loaded), 'fold0', batch_size=2, num_workers=0

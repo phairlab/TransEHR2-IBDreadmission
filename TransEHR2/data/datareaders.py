@@ -3,20 +3,20 @@
 Readings this module commits to
 -------------------------------
 
-* **The reader is indexed by patient, not by episode** (section 4.1). One
+* **The reader is indexed by patient, not by episode.** One
   ``timeseries.csv`` read and parse serves every episode of that patient,
   and a patient's episodes differ only in where their window ends. The
   insertion pass puts the results back in ``labels.csv`` order, so the
   canonical order survives the reordering that parallelism imposes.
 * **``labels.csv`` supplies the row order and the targets; ``stays.csv``
-  supplies ``INDEX_TIME``** (section 3, B4). The file's own row order is
+  supplies ``INDEX_TIME``.** The file's own row order is
   canonical -- patient directories lexicographically, then ``STAY_INDEX``
   -- so ``time_to_event.npy``, ``event_type.npy`` and ``episode_ids.pkl``
-  are columns of it rather than a second derivation. ``INDEX_TIME`` is the
-  one thing section 3 leaves out of ``labels.csv``, so it is looked up in
+  are columns of it rather than a second derivation. ``INDEX_TIME`` is
+  the one thing ``labels.csv`` leaves out, so it is looked up in
   ``stays.csv`` on ``(PATID, STAY_INDEX)`` -- in labels order, never in
   stays order.
-* **Categorical, ordinal and text columns are read as strings** (section
+* **Categorical, ordinal and text columns are read as strings** (see
   5's dtype trap). ``category_map`` is keyed on the YAML's values, and
   ``BLDUA``'s declared levels are numeric-looking *strings* (``"0"``,
   ``"1-24"``, ...). A patient whose ``BLDUA`` column happens to hold only
@@ -33,17 +33,18 @@ Readings this module commits to
   ``BLDUA`` trap above and the only declared level currently exposed:
   scanning every ``categorical`` and ``ordinal`` ``category_map`` against
   ``pandas._libs.parsers.STR_NA_VALUES`` returns ``UBAC`` alone.
-* **Rows are not dropped from the value stream.** Section 2.6 writes one
-  row per distinct minute, and a row carrying only text or only a
-  dispensation is still a timestep -- section 2.7 says so explicitly, and
-  invariant 4 requires every ``drugs.csv`` timestamp to name a
-  ``timeseries.csv`` row. Only the *event* stream is thinned to the rows
-  that carry an event, which is what makes it a separate stream.
-* **``DRUG_FEATS`` has no timeseries column** (section 2.6), so drugs reach
-  the extractor through ``drugs.csv`` alone, joined on ``TIMESTAMP``. The
+* **Rows are not dropped from the value stream.** ``timeseries.csv`` has
+  one row per distinct minute, and a row carrying only text or only a
+  dispensation is still a timestep -- every ``drugs.csv`` timestamp is
+  required upstream to name a ``timeseries.csv`` row, since the timestamp
+  is the only join between the two files. Only the *event* stream is
+  thinned to the rows that carry an event, which is what makes it a
+  separate stream.
+* **``DRUG_FEATS`` has no ``timeseries.csv`` column**, so drugs reach the
+  extractor through ``drugs.csv`` alone, joined on ``TIMESTAMP``. The
   reader therefore hands back text columns and drug rows separately even
-  though section 4.3 stores them as one family; the asymmetry is in the
-  source, not in the storage.
+  though they are stored as one family; the asymmetry is in the source,
+  not in the storage.
 """
 
 import numpy as np
@@ -55,7 +56,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-# Written by IBDdataprep's build_labels.py (section 3).
+# Written by IBDdataprep's build_labels.py.
 LABELS_COLUMNS = ('PATID', 'STAY_INDEX', 'TIME_TO_EVENT', 'EVENT_TYPE')
 
 TIMESTAMP_COLUMN = 'TIMESTAMP'
@@ -88,17 +89,17 @@ class EHRDataReader(Sequence):
 
         Args:
             labels_path: ``labels.csv`` from ``build_labels.py``. Its row
-                order is the canonical episode order (section 3).
+                order is the canonical episode order.
             root_dir: Directory holding one subdirectory per ``PATID``.
             valued_feats: Value-associated feature names.
             event_feats: Event-associated feature names.
             text_feats: Text feature names (may be None or empty).
-            drug_feats: Drug feature names. Carried for the lookup family
-                (section 4.3), not used to select columns: section 2.6
-                gives ``DRUG_FEATS`` no ``timeseries.csv`` column, so the
-                data comes from ``drugs.csv``.
+            drug_feats: Drug feature names. Carried for the lookup
+                family, not used to select columns: a drug feature has no
+                ``timeseries.csv`` column, so the data comes from
+                ``drugs.csv``.
             static_feats: Static feature names. ``STATIC_FEATS`` is empty
-                under section A.3; the path is kept, not exercised.
+                for this study; the path is kept, not exercised.
             string_feats: Feature names whose column must be read as
                 strings -- every categorical and ordinal feature, plus the
                 text features. See the dtype trap above.
@@ -249,7 +250,7 @@ class EHRDataReader(Sequence):
     def _read_drugs(self, patid: int) -> pd.DataFrame:
         """Read ``drugs.csv``, dropping the over-cap rows.
 
-        Section 2.7 keeps rows the 30-slot cap dropped, marked
+        ``drugs.csv`` keeps the rows the slot cap dropped, marked
         ``SLOT = -1``, so the webapp can show them; the extractor ignores
         them. An absent file means the patient was dispensed nothing.
         """

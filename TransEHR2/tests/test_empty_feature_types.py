@@ -20,7 +20,7 @@ from .test_datasets import extracted
 def _no_ordinals(mini):
     """The mini cohort with every ordinal feature removed from the config."""
     mini.config['VALUED_FEATS'] = ['NUM', 'CAT']
-    # Invariant 12: every variable_properties entry must appear in some
+    # The feature contract: every variable_properties entry must appear in some
     # config feature list, so the entries go with the config change.
     for feat in ('ORD', 'UB'):
         del mini.var_properties[feat]

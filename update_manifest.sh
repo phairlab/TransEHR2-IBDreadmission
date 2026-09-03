@@ -19,7 +19,12 @@
 #                   - relative to the current working directory
 #   source        Where to fetch the file from. Either a filesystem path
 #                 (for local_copy / local_symlink) or a URL (for download).
-#   source_type   One of: local_copy, local_symlink, download
+#   source_type   One of: local_copy, local_symlink, download, build
+#                 'build' marks a file produced locally rather than
+#                 fetched -- the global lookup tables of blueprint
+#                 section 4.4. Its 'source' is the command that makes it;
+#                 setup_data.sh verifies such a file when it is present
+#                 and reports rather than fetches when it is not.
 #   DATA_ROOT     Optional. Overrides SHARED_DATA_ROOT and the default.
 #
 # Environment variables:
@@ -71,9 +76,9 @@ MANIFEST="$PROJECT_ROOT/manifest.csv"
 # ---------------------------------------------------------------------------
 
 case "$SOURCE_TYPE" in
-    local_copy|local_symlink|download) ;;
+    local_copy|local_symlink|download|build) ;;
     *)
-        echo "Error: source_type must be one of: local_copy, local_symlink, download" >&2
+        echo "Error: source_type must be one of: local_copy, local_symlink, download, build" >&2
         exit 1
         ;;
 esac

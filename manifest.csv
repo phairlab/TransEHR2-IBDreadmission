@@ -1,2 +1,5 @@
 path,sha256,source,source_type
 ibd/variable_properties.yaml,dccfcc4453d75c1346d738eb0ccf3f313d7ebbe9dff5e53d84b936b83826fab3,https://drive.google.com/file/d/1bvhTnfrrGwC5Bpg8aRDiNLhHLFjZ_NqH/view?usp=drive_link,download
+lookup_tables/text_embeddings.npy,pending,python embed.py TransEHR2/configs/datasets/RMT23345.yaml --tables text,build
+lookup_tables/text_tokens.npy,pending,python embed.py TransEHR2/configs/datasets/RMT23345.yaml --tables text,build
+lookup_tables/drug_embeddings.npy,pending,python embed.py TransEHR2/configs/datasets/RMT23345.yaml --tables drug,build

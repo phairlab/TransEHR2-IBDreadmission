@@ -51,9 +51,14 @@ Output is ``{DATA_DIR}/extracted/``, whose contract is section 4.4:
 There is **no** ``static_data.npy``: ``STATIC_FEATS`` is empty under
 section A.3, so the array would be ``(n, 0)``.
 
+Section 4.4's global lookup tables are **not** written here and are not
+in this directory: they are ``{DATA_DIR}/lookup_tables/``, built once for
+the study by ``embed.py`` (C4). This directory is cleared on every run,
+which is exactly why they are not in it.
+
 ``text_strings.pkl`` is the unique-string table's key order, assigned here
 because section 9 makes neither C1 nor C4 depend on the other; C4's
-``embed_text.py`` embeds that list *in that order*, which is what makes
+``embed.py`` embeds that list *in that order*, which is what makes
 ``text_values`` valid indices into ``text_embeddings.npy``.
 """
 

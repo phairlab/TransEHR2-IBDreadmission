@@ -47,14 +47,14 @@ def write_tables(mini, text_dim=TEXT_EMBED_DIM, dtype=np.float32):
     text = np.repeat(
         np.arange(1, n_strings + 1, dtype=dtype)[:, None], text_dim, axis=1
     )
-    np.save(mini.extracted / 'text_embeddings.npy', text)
+    np.save(mini.lookup_tables / 'text_embeddings.npy', text)
 
     drug = np.repeat(
         np.arange(1, CLINVEC_ROWS + 1, dtype=np.float32)[:, None],
         CLINVEC_DIM, axis=1
     )
     drug = np.vstack([drug, np.zeros((1, CLINVEC_DIM), dtype=np.float32)])
-    np.save(mini.extracted / 'drug_embeddings.npy', drug)
+    np.save(mini.lookup_tables / 'drug_embeddings.npy', drug)
 
 
 def extracted(mini, fold='fold0', rows=(0,), **kwargs):
@@ -378,7 +378,7 @@ def test_a_stale_text_table_is_refused(one_patient):
     one_patient.add_fold('fold0', train=[0])
     assert run(one_patient) == 0
     write_tables(one_patient)
-    np.save(one_patient.extracted / 'text_embeddings.npy',
+    np.save(one_patient.lookup_tables / 'text_embeddings.npy',
             np.zeros((99, TEXT_EMBED_DIM), dtype=np.float32))
     with pytest.raises(ValueError, match='text_strings.pkl'):
         load_dataset(str(one_patient.extracted), fold='fold0')
@@ -391,7 +391,7 @@ def test_a_drug_table_must_have_the_pad_row(one_patient):
     one_patient.add_fold('fold0', train=[0])
     assert run(one_patient) == 0
     write_tables(one_patient)
-    np.save(one_patient.extracted / 'drug_embeddings.npy',
+    np.save(one_patient.lookup_tables / 'drug_embeddings.npy',
             np.zeros((CLINVEC_ROWS, CLINVEC_DIM), dtype=np.float32))
     with pytest.raises(ValueError, match='pads unused slots'):
         load_dataset(str(one_patient.extracted), fold='fold0')

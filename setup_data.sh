@@ -139,6 +139,31 @@ while IFS=',' read -r rel_path expected_sha256 source source_type; do
 
     needs_fetch=false
 
+    # A 'build' entry is produced locally and has no upstream to fetch
+    # from: the global lookup tables of blueprint section 4.4 are made by
+    # embed.py and run to tens of gigabytes. They are in the manifest
+    # because invariant 9 verifies them against it at use, so this
+    # verifies one when it is present and reports rather than fetches
+    # when it is not. 'pending' is a table built but not yet checksummed;
+    # embed.py records its own checksum on completion.
+    if [[ "$source_type" == "build" ]]; then
+        if [[ ! -f "$dest" ]]; then
+            warn "Not built yet: $rel_path"
+            warn "  build it with: $source"
+        elif [[ "$expected_sha256" == "pending" ]]; then
+            warn "No checksum recorded yet: $rel_path"
+        elif [[ "$(sha256_of "$dest")" == "$expected_sha256" ]]; then
+            info "OK: $rel_path"
+            (( n_ok++ )) || true
+        else
+            error "Checksum mismatch on a locally built file: $rel_path"
+            error "  expected: $expected_sha256"
+            error "  rebuild it with: $source"
+            (( n_failed++ )) || true
+        fi
+        continue
+    fi
+
     if [[ -L "$dest" ]]; then
         # It's a symlink — just verify the target exists; skip checksum
         if [[ ! -e "$dest" ]]; then

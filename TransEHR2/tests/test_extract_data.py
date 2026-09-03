@@ -300,6 +300,8 @@ def loaded(extracted):
     the row it came from; the drug table's final row is the all-zero pad.
     """
     directory = extracted / 'extracted'
+    tables = extracted / 'lookup_tables'
+    tables.mkdir(exist_ok=True)
     with open(directory / 'metadata.pkl', 'rb') as f:
         metadata = pickle.load(f)
     with open(directory / 'text_strings.pkl', 'rb') as f:
@@ -309,7 +311,7 @@ def loaded(extracted):
         np.arange(n_strings, dtype=np.float32)[:, None],
         FIXTURE_TEXT_DIM, axis=1
     )
-    np.save(directory / 'text_embeddings.npy', text)
+    np.save(tables / 'text_embeddings.npy', text)
 
     pad, width = (metadata['lookup_pad_indices'][1],
                   metadata['lookup_table_dims'][1])
@@ -317,7 +319,7 @@ def loaded(extracted):
         np.arange(pad + 1, dtype=np.float32)[:, None], width, axis=1
     )
     drug[pad] = 0.0
-    np.save(directory / 'drug_embeddings.npy', drug)
+    np.save(tables / 'drug_embeddings.npy', drug)
     return extracted
 
 

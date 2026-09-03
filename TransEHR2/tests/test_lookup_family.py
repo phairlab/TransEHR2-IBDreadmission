@@ -90,7 +90,7 @@ def extract_and_load(mini):
         np.arange(1, n_strings + 1, dtype=np.float32)[:, None],
         TEXT_EMBED_DIM, axis=1
     )
-    np.save(mini.extracted / 'text_embeddings.npy', table)
+    np.save(mini.lookup_tables / 'text_embeddings.npy', table)
 
     if mini.config['DRUG_FEATS']:
         drug = np.repeat(
@@ -99,7 +99,7 @@ def extract_and_load(mini):
         )
         # The final all-zero row is the pad unused slots index.
         drug = np.vstack([drug, np.zeros((1, CLINVEC_DIM), dtype=np.float32)])
-        np.save(mini.extracted / 'drug_embeddings.npy', drug)
+        np.save(mini.lookup_tables / 'drug_embeddings.npy', drug)
 
     return load_dataset(str(mini.extracted), fold='fold0')
 

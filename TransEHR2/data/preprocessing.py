@@ -15,7 +15,7 @@ Readings this module commits to
   2026 August 23, C1, since section 9 makes neither C1 nor C4 depend on
   the other). Workers hand back the raw string; the insertion pass interns
   it, first appearance in canonical row order winning index 0, and writes
-  the table's key order to ``text_strings.pkl``. C4's ``embed_text.py``
+  the table's key order to ``text_strings.pkl``. C4's ``embed.py``
   embeds that list *in that order*, which is what makes the index valid.
 * **The drug pad index comes from ``ClinVec_atc.csv``, not from
   ``drug_embeddings.npy``.** Section 4.4 pads unused slots with ``V``, the
@@ -52,6 +52,15 @@ Readings this module commits to
   ``TOKENIZER_PAD_TOKEN`` and ``MAX_TOKEN_LENGTH`` from ``constants.py``;
   the *resolved* ``pad_token_id`` section 4.4 also asks for is added by C4,
   where the tokenizer is actually loaded and the fact established.
+* **The global lookup tables live beside ``extracted/``, not in it**
+  (C4, 2026 September 2; raised by C1 and left to C4 to settle).
+  ``save_extracted`` clears every ``.npy``, ``.pkl`` and ``.npz`` in its
+  own directory, so a 64.8 GB ``text_embeddings.npy`` kept there would
+  not survive the next extraction; and ``drug_embeddings.npy`` is a pure
+  function of ``ClinVec_atc.csv``, cohort-independent and not invalidated
+  by a re-extraction, so it does not belong to an extraction's output at
+  all. ``lookup_tables_path`` names the directory and ``embed.py``
+  writes it.
 * **A fold is a set of row indices, so the loaders wrap one cohort
   dataset in a ``Subset`` per partition** (C2, from section 2's decision
   to extract once). ``prepare_dataloaders`` therefore takes
@@ -106,6 +115,7 @@ from TransEHR2.constants import HF_API_TOKEN, LLM_NAME, MAX_TOKEN_LENGTH, TOKENI
 from TransEHR2.data.custom_types import EpisodeData, MixedTensorDataset, TensorDimensions
 from TransEHR2.data.datareaders import EHRDataReader
 from TransEHR2.data.datasets import LazyArray, MixedDataset
+from TransEHR2.data.manifest import verify as verify_manifest_checksum
 
 
 # Global variables for multi-process data extraction
@@ -1624,7 +1634,9 @@ def save_extracted(
     # and section 4.3 says the webapp finds drugs by filename. Only the
     # three extensions this function and extract_data write are removed,
     # and only at the top level, so nothing outside our own output is
-    # touched.
+    # touched. Section 4.4's global lookup tables are safe from this by
+    # construction rather than by exception: C4 puts them in the
+    # ``lookup_tables/`` sibling, not here (``lookup_tables_path``).
     for stale in os.listdir(base_path):
         if stale.endswith(('.npy', '.pkl', '.npz')):
             os.remove(os.path.join(base_path, stale))
@@ -1683,6 +1695,22 @@ def save_extracted(
     print(f"Saved extracted dataset to {base_path}/")
 
 
+def lookup_tables_path(base_path: str) -> str:
+    """``lookup_tables/``, the sibling of ``extracted/`` (C4).
+
+    Section 4.4's global tables sit beside the per-episode arrays rather
+    than among them (decided 2026 September 2). ``save_extracted`` clears
+    every ``.npy``, ``.pkl`` and ``.npz`` in its own directory, so a
+    64.8 GB ``text_embeddings.npy`` kept there would be deleted by the
+    next extraction run; and ``drug_embeddings.npy`` is a pure function
+    of ``ClinVec_atc.csv``, cohort-independent and not invalidated by a
+    re-extraction, so it does not belong to any extraction's output.
+    """
+    return os.path.join(
+        os.path.dirname(os.path.normpath(base_path)), 'lookup_tables'
+    )
+
+
 def _load_lookup_family(
     base_path: str,
     metadata: dict
@@ -1692,7 +1720,8 @@ def _load_lookup_family(
     The CSR filenames carry the feature's *type* and its index within
     that type, which is how ``save_extracted`` writes them and how the
     webapp finds drugs; the embedding table is per type, since section
-    4.4 names two files rather than one per feature.
+    4.4 names two files rather than one per feature. The CSR arrays are
+    in ``base_path``; the tables are in its ``lookup_tables/`` sibling.
 
     A missing table is refused rather than worked around. Both tables are
     C4's, so this is the state of a tree in which C4 has not run -- but a
@@ -1704,6 +1733,14 @@ def _load_lookup_family(
     every run, so a table left over from an earlier extraction indexes a
     vocabulary that no longer exists.
 
+    Three checks run here rather than at build time, because this is
+    where the pairing is used: the row-count agreement above, invariant 8
+    (every CSR index is a row of its table) and invariant 9 (the table
+    matches its ``manifest.csv`` checksum *at use*). Each reads its file
+    once and streams it, which is the price of not training on a table
+    that copied wrong -- the tables are order-sensitive, so neither shape
+    nor dtype would notice.
+
     Returns:
         ``(indicators_by_type, csr_per_feature, table_per_feature)``.
     """
@@ -1711,6 +1748,7 @@ def _load_lookup_family(
     slot_dims = metadata['lookup_slot_dims']
     pad_indices = metadata['lookup_pad_indices']
     table_dims = metadata['lookup_table_dims']
+    tables_dir = lookup_tables_path(base_path)
 
     def path(name: str) -> str:
         return os.path.join(base_path, f'{name}.npy')
@@ -1721,14 +1759,16 @@ def _load_lookup_family(
 
     tables = {}
     for feat_type in dict.fromkeys(feat_types):
-        table_path = path(f'{feat_type}_embeddings')
+        table_path = os.path.join(tables_dir, f'{feat_type}_embeddings.npy')
         if not os.path.exists(table_path):
             raise FileNotFoundError(
                 f"{table_path} not found. The global {feat_type} lookup "
-                f"table is built by C4 (embed_text.py for text, ClinVec "
-                f"for drugs); section 4.4's int32 values are row indices "
-                f"into it, so the feature cannot be gathered without it."
+                f"table is built by C4 (embed.py, from the LLM for text "
+                f"and from ClinVec for drugs); section 4.4's int32 "
+                f"values are row indices into it, so the feature cannot "
+                f"be gathered without it."
             )
+        verify_manifest_checksum(table_path)
         tables[feat_type] = LazyArray(table_path)
 
     if 'text' in tables:
@@ -1740,7 +1780,7 @@ def _load_lookup_family(
                 f"text_embeddings.npy has {rows} row(s) but "
                 f"text_strings.pkl has {n_strings} string(s). The table "
                 f"predates this extraction, which reassigned the string "
-                f"indices (section 4.4); rebuild it with embed_text.py."
+                f"indices (section 4.4); rebuild it with embed.py."
             )
 
     csr = []
@@ -1774,8 +1814,41 @@ def _load_lookup_family(
                 f"extraction recorded {table_dims[f]} for "
                 f"'{metadata['lookup_feats'][f]}'."
             )
+        _check_indices_in_range(
+            entry['values'], table.shape[0], metadata['lookup_feats'][f],
+            feat_type
+        )
 
     return indicators, csr, [tables[t] for t in feat_types]
+
+
+def _check_indices_in_range(
+    values: LazyArray,
+    n_rows: int,
+    feat: str,
+    feat_type: str
+) -> None:
+    """Invariant 8: every CSR index is a row of its table.
+
+    Checked here rather than left to the gather, because ``__getitem__``
+    would only catch half of it: a fancy index past the end raises, but a
+    negative one wraps to the far end of the table and returns some other
+    drug's or some other string's vector without a word.
+    """
+    if values.shape[0] == 0:
+        return
+    # A view of the mapping, not a copy: the drug array is (nnz, 30)
+    # int32 and min/max stream through it.
+    array = values[:]
+    low, high = int(array.min()), int(array.max())
+    if low < 0 or high >= n_rows:
+        raise ValueError(
+            f"'{feat}' indexes rows {low}..{high} of "
+            f"{feat_type}_embeddings.npy, which has {n_rows} row(s) "
+            f"(invariant 8). The table and the extraction disagree; "
+            f"rebuild the table with embed.py against this extraction's "
+            f"text_strings.pkl, or re-extract."
+        )
 
 
 def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:

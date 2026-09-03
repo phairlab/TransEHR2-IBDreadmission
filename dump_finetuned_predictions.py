@@ -648,7 +648,7 @@ if __name__ == '__main__':
         if text_embed_dim == 0:
             raise RuntimeError(
                 "text_embed_dim is 0 in dataset metadata. "
-                "Run embed_text.py to pre-compute text embeddings "
+                "Run embed.py to pre-compute text embeddings "
                 "before inference."
             )
         tot_val_feat_dim += len(TEXT_FEATS) * text_embed_dim

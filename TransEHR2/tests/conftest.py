@@ -158,6 +158,18 @@ class MiniRoot:
     def extracted(self) -> Path:
         return self.data_dir / 'extracted'
 
+    @property
+    def lookup_tables(self) -> Path:
+        """Section 4.4's global tables, the *sibling* of ``extracted/``.
+
+        C4 puts them here rather than among the per-episode arrays,
+        because ``save_extracted`` clears its own directory and would
+        otherwise delete a table that cost GPU-hours to build.
+        """
+        path = self.data_dir / 'lookup_tables'
+        path.mkdir(exist_ok=True)
+        return path
+
     def load(self, name: str) -> np.ndarray:
         return np.load(self.extracted / f'{name}.npy')
 

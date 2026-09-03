@@ -1,6 +1,6 @@
 """Multi-label features, ported from upstream caf91a2 as inert plumbing.
 
-RMT23345 declares no multi-label feature -- section 4.3's type table lists
+RMT23345 declares no multi-label feature -- the supported types are
 numeric, categorical, ordinal, text and drug -- so nothing here exercises the
 path in production. The port exists so that upstream changes touching the
 multilabel branches apply cleanly. These probes therefore have to supply their
@@ -59,7 +59,7 @@ def test_semicolons_become_a_multi_hot_row(mini):
     assert values.shape == (4, 3), values.shape
     np.testing.assert_array_equal(values[1], [1.0, 0.0, 1.0])  # 'a;c'
     np.testing.assert_array_equal(values[2], [0.0, 1.0, 0.0])  # 'b'
-    # Observed but undeclared: indicator set, row all zero (section 4.3).
+    # Observed but undeclared: indicator set, row all zero.
     np.testing.assert_array_equal(values[3], [0.0, 0.0, 0.0])
     assert indicators[3, 0] == 1.0
     # Unobserved: indicator clear, row all zero.

@@ -1,21 +1,26 @@
 #!/usr/bin/env python
-"""Measure the post-merge text dedup ratio (section 8, item 2).
+"""Count how many unique text strings the cohort contains.
 
-Section 4.5 sizes ``text_embeddings.npy`` from a *pre-merge* count --
-AMB 1,784,100 + DAD 269,234 + CLM 1,900,036, about 3.95 M unique strings
--- and says that number is a **floor**: section 2.3 merges the three
-sources' ``TEXT_SUPERFEATURE`` fields at a shared timestamp, and a merged
-string is a new string. How far above the floor the real figure sits
-decides whether the table is 10^6 or 10^7 rows, which is the difference
-between a 65 GB artifact and a 650 GB one.
+``text_embeddings.npy`` has one row per unique ``TEXT_SUPERFEATURE``
+string, so that count is what sizes it -- the difference between a table
+of roughly 10^6 rows and one of 10^7 is the difference between a 65 GB
+artifact and a 650 GB one, and between a few GPU-hours and something that
+does not finish.
 
-This walks Stage B's ``root/`` and counts. It reads real patient records
-and so is **run by the user, not by Claude**; it prints counts and sizes
-only, never a string, a PATID or a row.
+The count is not knowable from the source tables alone. Records from
+different sources that land on the same minute have their text fields
+merged into one string, and a merged string is a new string, so the sum
+of the sources' own unique counts is a floor rather than an estimate.
+This walks the prepared per-patient timeseries and counts what is
+actually there.
 
-Strings are held as 16-byte BLAKE2b digests rather than as themselves:
-at 4 M merged code descriptions the set would otherwise be several GB,
-and a digest collision at that scale is far below the precision the
+It reads real patient records and so is **run by the operator, not by an
+assistant**; it prints counts and sizes only, never a string, a patient
+identifier or a row.
+
+Strings are held as 16-byte BLAKE2b digests rather than as themselves: at
+a few million merged code descriptions the set would otherwise be several
+GB, and a digest collision at that scale is far below the precision the
 answer is wanted to.
 
 Usage:
@@ -65,7 +70,7 @@ def scan(root: str, column: str = COLUMN):
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Post-merge text dedup ratio (section 8, item 2)"
+        description="Count the cohort's unique text strings"
     )
     parser.add_argument('--root', '-r', required=True,
                         help="Stage B's data/root/ directory")
@@ -85,7 +90,7 @@ def main(argv=None) -> int:
         print(f"Text-bearing timesteps: "
               f"{100 * n_nonblank / max(n_rows, 1):.1f}% of rows")
 
-    # Section 4.5's table, at the measured U rather than at its floor.
+    # What the measured U costs, per stored artifact.
     gb = 1024 ** 3
     print(f"\nProjected table sizes at U = {unique}:")
     print(f"  text_tokens.npy      int32 x 1024 : "
@@ -93,8 +98,8 @@ def main(argv=None) -> int:
     for width in (4096, 8192):
         print(f"  text_embeddings.npy  fp32  x {width:<4} : "
               f"{unique * width * 4 / gb:8.1f} GB")
-    print(f"\nSection 4.5's pre-merge floor is 3,950,000 unique strings; "
-          f"this run is {unique / 3_950_000:.2f}x that.")
+    print(f"\nThe pre-merge floor for this cohort is 3,950,000 unique "
+          f"strings; this run is {unique / 3_950_000:.2f}x that.")
     return 0
 
 

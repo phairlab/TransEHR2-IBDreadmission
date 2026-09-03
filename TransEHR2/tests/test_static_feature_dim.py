@@ -8,8 +8,8 @@ actually one-hot, a categorical static occupies `size` columns rather than one.
 Upstream (9b47377) that divergence killed the first forward pass with
 `mat1 and mat2 shapes cannot be multiplied`.
 
-Here it is **dormant**: `RMT23345.yaml` sets `STATIC_FEATS: []` (blueprint A.3 --
-every REG feature is attached to every timestep instead), so both derivations
+Here it is **dormant**: `RMT23345.yaml` sets `STATIC_FEATS: []` -- every
+registry feature is attached to every timestep instead -- so both derivations
 give 0 and nothing currently breaks. These probes defend the property that they
 cannot diverge once a static feature of `size > 1` is added.
 """
@@ -49,7 +49,7 @@ def test_a_multicolumn_static_is_wider_than_the_feature_count():
 
 
 def test_size_is_the_width_for_every_type():
-    """Blueprint 4.3: `size` is the per-timestep dimension for every type."""
+    """`size` is the per-timestep dimension for every feature type."""
     var_properties = {
         'ORD': {'type': 'ordinal', 'size': 5},
         'TXT': {'type': 'text', 'size': 1},

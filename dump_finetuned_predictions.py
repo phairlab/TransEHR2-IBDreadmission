@@ -181,9 +181,9 @@ def create_inference_loader(
     rank 1 gets the second, etc.  After ``accelerator.gather()``, the
     concatenated predictions are in original dataset order.
 
-    A split is a set of row indices into the cohort-wide arrays of
-    blueprint section 4.4, not a directory of its own, so the shard is
-    taken over those rows.
+    A split is a set of row indices into the cohort-wide extracted
+    arrays, not a directory of its own, so the shard is taken over those
+    rows.
 
     Args:
         data_dir: DATA_DIR, holding extracted/ and fold{i}/.

@@ -1,97 +1,103 @@
-"""Stage C extraction: ``data/root`` to ``data/extracted`` (sections 4, 5).
+"""Extraction: ``data/root`` to ``data/extracted``, and the loaders over it.
 
-Readings this module commits to
--------------------------------
+Reads the per-patient CSVs the data-prep package writes and produces one
+cohort-wide set of memory-mapped ``.npy`` arrays, then opens those arrays
+as a ``MixedDataset`` and wraps them in dataloaders for one fold.
 
-* **``lookup`` replaces the text internals.** ``_bucket_valued_feats``
-  returns numeric / categorical / ordinal / lookup, and text and drugs
-  share one CSR writer parameterised by slot count (section 4.3, escalated
-  in section 9 and decided 2026 August 23, C1). On disk the names stay
-  ``text_*`` and ``drug_*`` per section 4.4; only the internals are one
-  path. A single-slot feature writes no dose or mask array, its weight
-  being 1 by definition, and its values array is rank 1 -- both are what
-  section 4.4's table asks for.
-* **The extractor assigns the ``text_values`` row indices** (escalated
-  2026 August 23, C1, since section 9 makes neither C1 nor C4 depend on
-  the other). Workers hand back the raw string; the insertion pass interns
-  it, first appearance in canonical row order winning index 0, and writes
-  the table's key order to ``text_strings.pkl``. C4's ``embed.py``
-  embeds that list *in that order*, which is what makes the index valid.
-* **The drug pad index comes from ``ClinVec_atc.csv``, not from
-  ``drug_embeddings.npy``.** Section 4.4 pads unused slots with ``V``, the
-  final all-zero row of a ``(V+1, 128)`` table C4 builds. Deriving ``V``
-  from the cohort's own indices would be wrong -- a vocabulary entry no
-  patient was dispensed would leave the pad colliding with a real drug --
-  so it is read from the vocabulary file Stage A indexed against
-  (``prepare_RMT23345_PIN.R:75-77``). This adds ``CLINVEC_PATH`` to the
-  dataset config, which section 5's cleanup list does not mention.
-* **Every row of ``labels.csv`` is extracted; none is filtered out.**
-  Section 3's fold arrays are row indices into these arrays, so the row
-  count is fixed by ``labels.csv`` and a dropped episode would silently
-  shift every later fold index. ``MIN_EPISODE_LEN_STEPS`` therefore
-  becomes a *reported count* rather than a filter -- invariant 4 makes
-  every ``INDEX_TIME`` name a ``timeseries.csv`` row, so an episode below
-  the minimum means an upstream invariant failed, which is worth saying
-  out loud rather than quietly deleting.
-* **The series is right-aligned** (section 4.2): the index time, the last
-  record and ``t = 0`` all land in the final column, and the left of the
-  row is zero padding. The section's "no left-padding" refers to the
-  history region the old layout reserved, which is gone; "right-aligned at
-  the prediction origin and zero-padded on the left" is the alignment.
+Design decisions this module commits to
+---------------------------------------
+
+* **Text and drugs are one "lookup" family internally.**
+  ``_bucket_valued_feats`` returns numeric / categorical / ordinal /
+  lookup, and the two lookup types share one sparse (CSR) writer
+  parameterised by slot count -- text being the degenerate case with one
+  slot and weight 1. On disk the filenames stay ``text_*`` and ``drug_*``,
+  because the webapp finds drugs by filename; only the internals
+  are one path. A single-slot feature writes no dose or mask array, its
+  weight being 1 by definition, and its values array is rank 1.
+* **The extractor assigns the text row indices.** A text value is stored
+  as an ``int32`` index into a table of unique strings, not as the string.
+  Workers hand back the raw string; the insertion pass interns it, first
+  appearance in canonical row order winning index 0, and writes the
+  table's key order to ``text_strings.pkl``. ``embed.py`` embeds that list
+  *in that order*, which is what makes the index valid. Interning in row
+  order rather than in worker-completion order is what keeps the table
+  reproducible across worker counts.
+* **The drug pad index comes from the ClinVec vocabulary file, not from
+  the cohort.** Unused drug slots are padded with ``V``, the final
+  all-zero row of a ``(V + 1, 128)`` table. Deriving ``V`` as one past the
+  largest index actually dispensed would be wrong: a vocabulary entry no
+  patient received would leave the pad colliding with a real drug. It is
+  read from the same file the drug preparation step indexed against, named
+  by ``CLINVEC_PATH`` in the dataset config.
+* **Every row of ``labels.csv`` is extracted; none is filtered out.** The
+  fold arrays are row indices into these arrays, so the row count is fixed
+  by ``labels.csv`` and a dropped episode would silently shift every later
+  fold index. ``MIN_EPISODE_LEN_STEPS`` is therefore a *reported count*
+  rather than a filter: every index time is guaranteed upstream to name a
+  ``timeseries.csv`` row, so an episode below the minimum means something
+  upstream is wrong, which is worth saying out loud rather than quietly
+  deleting.
+* **The series is right-aligned.** The index time, the last record and
+  ``t = 0`` all land in the final column, and the left of the row is zero
+  padding. Times are integer minutes before the index time, stored as
+  ``int32``: float32 is exact for integers only to 16,777,216, which is
+  ±32 years in minutes but destroys sub-day resolution if the unit is days
+  or hours. The conversion to days happens in ``__getitem__``, where the
+  model wants a sanely scaled input.
 * **Misses are counted once per record, not once per episode.** A record
   inside ten episodes' windows is one out-of-domain value in the data, not
-  ten, so the per-feature report (section 4.3) counts over each patient's
-  timeseries once.
+  ten, so the per-feature report counts over each patient's timeseries
+  once.
 * **``index_times`` is looked up in ``stays.csv``, in ``labels.csv``
-  order.** Section 3 makes ``labels.csv`` the canonical order but gives it
-  no ``INDEX_TIME`` column, so the value is joined on
-  ``(PATID, STAY_INDEX)`` while the order stays the file's.
-* **Extraction loads no tokenizer.** Under section 4.4's content
-  addressing the tokenizer only matters when ``text_tokens.npy`` is built,
-  which is C4's. ``metadata.pkl`` records ``LLM_NAME``,
-  ``TOKENIZER_PAD_TOKEN`` and ``MAX_TOKEN_LENGTH`` from ``constants.py``;
-  the *resolved* ``pad_token_id`` section 4.4 also asks for is added by C4,
-  where the tokenizer is actually loaded and the fact established.
-* **The global lookup tables live beside ``extracted/``, not in it**
-  (C4, 2026 September 2; raised by C1 and left to C4 to settle).
+  order.** ``labels.csv`` fixes the canonical episode order but carries no
+  ``INDEX_TIME`` column, so the value is joined on ``(PATID, STAY_INDEX)``
+  while the order stays the file's.
+* **Extraction loads no tokenizer.** Because a text value is stored by
+  content rather than by tokens, the tokenizer matters only when the token
+  table is built, which is ``embed.py``'s job. ``metadata.pkl`` records
+  ``LLM_NAME``, ``TOKENIZER_PAD_TOKEN`` and ``MAX_TOKEN_LENGTH`` from
+  ``constants.py``; the *resolved* ``pad_token_id`` is added by
+  ``embed.py``, where the tokenizer is actually loaded. Making a
+  multi-hour extraction depend on the LLM being present would give up the
+  independence this arrangement buys.
+* **The global lookup tables live beside ``extracted/``, not in it.**
   ``save_extracted`` clears every ``.npy``, ``.pkl`` and ``.npz`` in its
-  own directory, so a 64.8 GB ``text_embeddings.npy`` kept there would
-  not survive the next extraction; and ``drug_embeddings.npy`` is a pure
-  function of ``ClinVec_atc.csv``, cohort-independent and not invalidated
-  by a re-extraction, so it does not belong to an extraction's output at
-  all. ``lookup_tables_path`` names the directory and ``embed.py``
-  writes it.
+  own directory, so a text embedding table kept there -- tens of gigabytes
+  and hours of GPU time -- would not survive the next extraction; and the
+  drug table is a pure function of the ClinVec file, cohort-independent
+  and not invalidated by a re-extraction, so it does not belong to an
+  extraction's output at all. ``lookup_tables_path`` names the directory
+  and ``embed.py`` writes it.
 * **A fold is a set of row indices, so the loaders wrap one cohort
-  dataset in a ``Subset`` per partition** (C2, from section 2's decision
-  to extract once). ``prepare_dataloaders`` therefore takes
-  ``(data_dir, fold_name)`` rather than a fold directory: the arrays are
-  in ``extracted/`` and only the row indices are in ``fold{i}/``. One set
-  of mappings serves all three partitions, ``MixedDataset`` stays
-  cohort-wide and fold-agnostic, and ``item['idx']`` stays a row of
-  ``labels.csv``. Nothing in section 5.1's distributed subsection is
-  affected -- ``TextBalancedDistributedSampler`` reads only
-  ``len(dataset)``, so per-rank sample counts are what they were.
-* **The dataset is handed paths, not open memmaps** (C2). A
-  ``np.memmap`` pickles by value, and these loaders start their workers
-  with ``spawn``; ``datasets.py``'s module docstring records the
-  measurement, the reasoning and the alternatives.
-* **The lookup family's batch keys are keyed by presence** (C2), the way
+  dataset in a ``Subset`` per partition.** ``prepare_dataloaders``
+  therefore takes ``(data_dir, fold_name)`` rather than a fold directory:
+  the arrays are in ``extracted/`` and only the row indices are in
+  ``fold{i}/``. One set of mappings serves all three partitions,
+  ``MixedDataset`` stays cohort-wide and fold-agnostic, and ``item['idx']``
+  stays a row of ``labels.csv``.
+* **The dataset is handed paths, not open memmaps.** A ``np.memmap``
+  pickles by value, and these loaders start their workers with ``spawn``;
+  ``datasets.py``'s module docstring records the measurement, the
+  reasoning and the alternatives.
+* **The lookup family's batch keys are keyed by presence**, the way
   ``episode_id`` already was, so an empty ``TEXT_FEATS`` and ``DRUG_FEATS``
   together omit ``val_data['lookup']`` entirely. Text and drugs share that
-  one key and one feature axis (C3, section 5.1); the split into
-  ``text_*`` and ``drug_*`` is an on-disk matter only (section 4.4). The
-  slots are collated *unpooled*: section 4.3 puts the dose-weighted mean
-  in the forward pass, where a gradient still reaches an individual slot.
+  one key and one feature axis; the split into ``text_*`` and ``drug_*``
+  is an on-disk matter only. The slots are collated *unpooled*, because
+  the dose-weighted mean belongs in the forward pass, where a gradient
+  still reaches an individual slot and therefore an individual drug.
   Per-feature stacking rather than a single ``(B, T, n_feats, D)`` tensor
-  is what admits ragged widths, and it is one copy per batch cheaper
-  besides (section 5.1).
-* **Invariant 12 runs before any patient data is read.** Section 6 asks
-  for it as the first step of ``extract_data.py``. The category_map clause
-  used to be checked inside the per-timestep loop, so a bad map raised
-  part-way through a multi-hour run (section A.3); it is hoisted here.
-  IBDdataprep's ``check_contract.py`` is the CI-side copy of the same
-  three clauses -- importing it would put a cross-repository dependency in
-  the extractor's import path.
+  is what admits ragged widths -- text is 4096 or 8192 wide, drugs 128 --
+  and it is one copy per batch cheaper besides.
+* **The feature contract is checked before any patient data is read.**
+  ``check_feature_contract`` runs as the first step of
+  ``extract_data.py``. The ``category_map`` clause used to be checked
+  inside the per-timestep loop, so a bad map raised part-way through a
+  multi-hour run; it is hoisted here. The data-prep package carries an
+  independent copy of the same three clauses for its own CI -- importing
+  it would put a cross-repository dependency in the extractor's import
+  path.
 """
 
 import gc
@@ -123,12 +129,12 @@ _tensorized_processor = None
 _tensorized_dims = None
 
 # The two ``type`` values that make a feature a member of the lookup family
-# (section 4.3). The on-disk file prefix is the type itself, which is what
+#. The on-disk file prefix is the type itself, which is what
 # keeps ``text_*`` and ``drug_*`` distinct for the webapp.
 LOOKUP_TYPES = ('text', 'drug')
 
 # Index meaning "observed, but the value is not in category_map"
-# (section 4.3). Not a magic zero: zero is a real category.
+#. Not a magic zero: zero is a real category.
 OUT_OF_DOMAIN = -1
 
 
@@ -146,9 +152,10 @@ def _bucket_valued_feats(
     a value maps back to its feature via (input order, type).
 
     ``lookup_feats`` comes from ``TEXT_FEATS + DRUG_FEATS`` rather than
-    from ``VALUED_FEATS``: section 2.6 gives ``DRUG_FEATS`` no timeseries
-    column at all, so the family's members are named by their own config
-    lists, not by a type within the valued list.
+    from ``VALUED_FEATS``: a drug feature has no ``timeseries.csv``
+    column at all -- its records come from ``drugs.csv`` -- so the
+    family's members are named by their own config lists, not by a type
+    within the valued list.
 
     Args:
         valued_feats: Value-associated feature names.
@@ -190,7 +197,10 @@ def _is_index(key) -> bool:
 
 
 def check_feature_contract(config: dict, var_properties: dict) -> List[str]:
-    """Invariant 12, checked before any patient data is read (section 6).
+    """Check the config against ``variable_properties.yaml``.
+
+    Runs before any patient data is read, so a mismatch costs a second
+    rather than the first hour of a multi-hour run.
 
     Three clauses: the YAML's key set is exactly the union of the config's
     five feature lists; each family's indicator width is the count of
@@ -232,7 +242,7 @@ def check_feature_contract(config: dict, var_properties: dict) -> List[str]:
         except (TypeError, ValueError):
             # Reported, not raised: this function exists so that a
             # malformed YAML fails here with a name attached rather than
-            # part-way through a multi-hour run (section A.3).
+            # part-way through a multi-hour run.
             bad = sorted(str(k) for k in cat_map if not _is_index(k))
             failures.append(
                 f"feature '{feat}': category_map key(s) {bad} are not "
@@ -302,10 +312,10 @@ class LLMTextProcessor:
         Returns:
             numpy.ndarray: Array of token IDs with shape (max_tokens,)
         """
-        # An empty string is all padding, not all token 0. Section 4.4
-        # derives the attention mask as ``ids != pad_id`` and stores no
-        # mask, so the returned pair has to be self-consistent even on
-        # this branch -- with zeros it would invert to an all-ones mask.
+        # An empty string is all padding, not all token 0. No attention
+        # mask is ever stored -- it is derived as ``ids != pad_id`` -- so
+        # the returned pair has to be self-consistent even on this
+        # branch; with zeros it would invert to an all-ones mask.
         if not text or pd.isna(text) or text.strip() == '':
             pad_id = self.tokenizer.pad_token_id
             return {
@@ -336,14 +346,14 @@ class DataProcessor:
     """
     Processes one patient's record into numpy arrays for tensor insertion.
 
-    The unit is the patient, not the episode (section 4.1): a patient's
+    The unit is the patient, not the episode: a patient's
     episodes are nested suffixes of one timeseries, so the columns are
     typed and mapped once and each episode is a slice of the result.
 
     The processor handles:
     - Numeric features: float32 values, zero where unobserved
     - Categorical and ordinal features: int16 category indices, -1 for
-      unobserved or out-of-domain (section 4.3)
+      unobserved or out-of-domain
     - Lookup features: CSR entries carrying a string (text) or slot
       indices with doses and masks (drugs)
     - Event indicators: float32, set from presence alone
@@ -385,10 +395,10 @@ class DataProcessor:
         self.static_feats = static_feats
         self.dims = dims
 
-        # value -> index, keyed on ``str`` so that the dtype trap in
-        # section 5 cannot fire: BLDUA's levels are numeric-looking
-        # strings, and a patient whose column pandas read as numeric would
-        # otherwise miss every one of them.
+        # value -> index, keyed on ``str``, so a column pandas happened
+        # to read as numeric still matches. Several ordinal features
+        # declare numeric-looking levels -- BLDUA's are '0', '1-24',
+        # '25-50' -- and int 0 does not equal '0'.
         self.index_maps = {
             feat: {
                 str(v): int(k)
@@ -409,7 +419,7 @@ class DataProcessor:
 
         Args:
             data: DataFrame indexed by absolute timestamp, one row per
-                distinct minute (section 2.6).
+                distinct minute.
 
         Returns:
             Tuple of:
@@ -440,7 +450,7 @@ class DataProcessor:
             block = data[cols].to_numpy(dtype=np.float32)
             observed = ~np.isnan(block).all(axis=1)
             numeric_indicators[:, f] = observed
-            # Every numeric feature is size 1 today (section 4.3), but a
+            # Every numeric feature is size 1 today, but a
             # vector one must not write past its declared dimension.
             width = min(self.dims.numeric_feat_dims[f], block.shape[1])
             numeric_values[f][:, :width] = np.nan_to_num(
@@ -471,7 +481,7 @@ class DataProcessor:
         """Expand semicolon-separated labels into multi-hot rows.
 
         A multi-hot cannot be expressed as a single index, so unlike
-        categorical and ordinal (section 4.3) the value array is stored
+        categorical and ordinal the value array is stored
         dense and ``__getitem__`` performs no expansion. An unobserved
         timestep is an all-zero row with indicator 0; an observed cell
         naming no declared label is an all-zero row with indicator 1 --
@@ -508,7 +518,7 @@ class DataProcessor:
     ) -> Tuple[np.ndarray, List[np.ndarray], np.ndarray]:
         """Map categorical or ordinal values to int16 indices.
 
-        Indicator and index are independent (section 4.3): indicator 0
+        Indicator and index are independent: indicator 0
         with index -1 is "not observed", indicator 1 with index -1 is
         "observed, out of domain", indicator 1 with index k is category k.
         The arrays start at -1, never at 0 -- zero is ``"L"`` for
@@ -551,10 +561,10 @@ class DataProcessor:
         """
         Build the lookup family's indicators and CSR entries.
 
-        Text and drugs are one family (section 4.3) but reach the reader
+        Text and drugs are one family but reach the reader
         by different routes: a text feature is a column of
         ``timeseries.csv``, while ``DRUG_FEATS`` has no column at all
-        (section 2.6) and arrives as ``drugs.csv`` rows joined on
+        and arrives as ``drugs.csv`` rows joined on
         ``TIMESTAMP``.
 
         Args:
@@ -595,9 +605,9 @@ class DataProcessor:
     def _text_entries(text_data: pd.DataFrame, feat: str) -> list:
         """One entry per timestep whose text cell is non-blank.
 
-        A blank cell is not a text record: section 2.6 gives it indicator
-        0 and no CSR entry, and section 4.4 keeps the empty string out of
-        the unique-string table for the same reason.
+        A blank cell is not a text record: it gets indicator 0 and no
+        sparse entry, and the empty string is kept out of the
+        unique-string table for the same reason.
         """
         if feat not in text_data.columns:
             return []
@@ -618,13 +628,14 @@ class DataProcessor:
         """One entry per timestep carrying a dispensation.
 
         Unused slots take ``pad_index`` -- the all-zero final row of
-        ``drug_embeddings.npy`` (section 4.4) -- with dose 0 and mask 0.
+        ``drug_embeddings.npy`` -- with dose 0 and mask 0.
         ``drug_masks`` is derivable from ``values == pad_index`` and is
-        kept anyway, per section 4.4.
+        kept anyway: it costs little and simplifies the forward pass.
 
-        A ``drugs.csv`` timestamp naming no ``timeseries.csv`` row would
-        violate invariant 4, so it is an error rather than a dropped
-        dispensation.
+        With no drug column in ``timeseries.csv``, the timestamp is the
+        only join between the two files, and the data-prep step
+        guarantees every one of them names a row. A timestamp that names
+        none is therefore an error rather than a dropped dispensation.
         """
         if drug_data.empty:
             return []
@@ -632,8 +643,9 @@ class DataProcessor:
         if (positions < 0).any():
             unmatched = drug_data['TIMESTAMP'][positions < 0].unique()
             raise ValueError(
-                f"invariant 4: {len(unmatched)} drugs.csv timestamp(s) "
-                f"name no timeseries.csv row, e.g. {unmatched[0]}"
+                f"{len(unmatched)} drugs.csv timestamp(s) name no "
+                f"timeseries.csv row, e.g. {unmatched[0]}. The timestamp "
+                f"is the only join between the two files."
             )
 
         entries = []
@@ -666,9 +678,9 @@ class DataProcessor:
         Process event-associated data into a flat numpy array.
 
         The indicator is set from *presence* -- any non-NA, non-empty cell
-        -- and the declared type is never consulted (section A.3). This is
-        why section 2.6 requires ``ADMIT_DAD`` to be empty rather than 0
-        on a non-admission row.
+        -- and the declared type is never consulted. This is why the
+        event column has to be empty rather than 0 on a row where the
+        event did not occur: a literal 0 is a value, and reads as one.
 
         Args:
             data: DataFrame indexed by timestamp, event columns only
@@ -704,10 +716,10 @@ class DataProcessor:
         """
         Process static data into a flat numpy array.
 
-        ``STATIC_FEATS`` is empty under section A.3, so this returns a
-        zero-width array and section 4.4 writes no file. The path is kept
-        rather than deleted so that restoring a static feature does not
-        reach into the encoder.
+        ``STATIC_FEATS`` is empty for this study, so this returns a
+        zero-width array and no file is written. The path is kept rather
+        than deleted so that restoring a static feature does not reach
+        into the encoder.
 
         Args:
             data: Series or DataFrame containing static features
@@ -939,7 +951,7 @@ def get_text_counts_from_dataset(dataset) -> np.ndarray:
     """
     Compute total text entry count per episode from MixedDataset sparse storage.
 
-    Counted over the text members of the lookup family (section 4.3):
+    Counted over the text members of the lookup family:
     balancing exists to keep one rank from receiving every text-heavy
     episode, and it is the LLM-width embeddings that make an episode
     heavy, not the 128-wide drug ones.
@@ -975,8 +987,9 @@ def _init_tensorized_worker(
     """
     Initialize worker process with a DataProcessor.
 
-    Called once per worker when the process pool is created. No tokenizer
-    is built: extraction stores strings and indices, and C4 embeds them.
+    Called once per worker when the process pool is created. No
+    tokenizer is built: extraction stores strings and indices, and
+    ``embed.py`` embeds them later.
     """
     global _tensorized_processor, _tensorized_dims
 
@@ -999,11 +1012,12 @@ def filter_timeseries_records(
 ) -> Tuple[int, int]:
     """Select an episode's records: the **last** N at or before the origin.
 
-    This is the opposite end from MIMIC (section 4.1). The MIMIC filter
-    kept the *first* N records of a window, which is right for "the first
-    48 h of an ICU stay"; an IBD episode is every record up to its
-    ``INDEX_TIME``, of which the most recent ``max_episode_len_steps`` are
-    kept, because the prediction is made looking backwards from the origin.
+    This is the opposite end of the window from the one the code was
+    originally written for. The earlier filter kept the *first* N records,
+    which is right for "the first 48 h of an ICU stay"; an IBD episode is
+    every record up to its ``INDEX_TIME``, of which the most recent
+    ``max_episode_len_steps`` are kept, because the prediction is made
+    looking backwards from the origin.
 
     ``index`` must be sorted, which the reader guarantees, so the kept
     records are a contiguous slice and no boolean mask is needed.
@@ -1028,7 +1042,7 @@ def _process_single_patient(
     max_episode_len_steps: int
 ) -> Tuple[List[EpisodeData], np.ndarray, np.ndarray, Optional[str]]:
     """
-    Process every episode of one patient (section 4.1).
+    Process every episode of one patient.
 
     One CSV read, one typing pass and one mapping pass serve all of the
     patient's episodes, each of which is a suffix slice of the result.
@@ -1051,11 +1065,12 @@ def _process_single_patient(
         (patid, episode_rows, statics, val_data, event_data,
          text_data, drug_data) = reader[i]
 
-        # One row per distinct minute. Invariant 3 already guarantees it,
-        # so this is identity on conforming input; it replaces
+        # One row per distinct minute. The data-prep step already
+        # guarantees no two rows of a patient share a timestamp, so this
+        # is identity on conforming input; it replaces
         # ``.resample('1h')``, which materializes every hourly bin between
         # a patient's first and last record -- ~175,200 empty bins across
-        # a 20-year history, per episode, per worker (section 5).
+        # a 20-year history, per episode, per worker.
         val_data = val_data.groupby(val_data.index.floor('min')).first()
         text_data = text_data.groupby(text_data.index.floor('min')).first()
         if not event_data.empty:
@@ -1137,7 +1152,7 @@ def _process_single_patient(
 def _minutes_before(
     timestamps: pd.DatetimeIndex, index_time: pd.Timestamp
 ) -> np.ndarray:
-    """Minutes from ``index_time``, negative before it (section 4.2).
+    """Minutes from ``index_time``, negative before it.
 
     int32 minutes, not float hours or days: float32 has a 24-bit
     significand, exact for integers to 16,777,216 -- +/-31.9 years in
@@ -1162,7 +1177,7 @@ def compute_static_feat_dims(
     static dimension builds a classifier too narrow and dies in the first
     forward pass with ``mat1 and mat2 shapes cannot be multiplied``.
 
-    ``size`` is the per-timestep dimension for every type (section 4.3), so
+    ``size`` is the per-timestep dimension for every type, so
     there is no per-type branch here.
 
     Args:
@@ -1188,9 +1203,9 @@ def _get_tensor_dimensions(
     """
     Compute tensor dimensions from configuration for pre-allocation.
 
-    The widths are *derived* from the two config files -- section 4.4's
-    94 / 37 / 16 are counts of ``VALUED_FEATS`` entries by ``type`` -- and
-    are never declared here.
+    The per-family indicator widths are *derived* from the two config
+    files -- each is the count of ``VALUED_FEATS`` entries of that
+    ``type`` -- and are never declared here.
 
     Args:
         var_properties_path: Path to variable_properties.yaml
@@ -1201,8 +1216,8 @@ def _get_tensor_dimensions(
         max_ts_len: Timesteps per episode
         n_episodes: Number of rows in labels.csv
         clinvec_path: ``ClinVec_atc.csv``, the vocabulary Stage A indexed
-            drugs against. Supplies the drug table's row count -- the pad
-            index of section 4.4 -- and its embedding width.
+            drugs against. Supplies the drug table's row count -- which
+            is the pad index -- and its embedding width.
 
     Returns:
         TensorDimensions dataclass with all dimension information
@@ -1224,7 +1239,7 @@ def _get_tensor_dimensions(
         var_properties[f]['size'] for f in multilabel_feats
     ]
 
-    # ``size`` is the per-timestep dimension for every type (section 4.3);
+    # ``size`` is the per-timestep dimension for every type;
     # for a lookup feature that is its slot count.
     lookup_slot_dims = [var_properties[f]['size'] for f in lookup]
     lookup_table_dims = []
@@ -1242,7 +1257,8 @@ def _get_tensor_dimensions(
             lookup_table_dims.append(table_dim)
             lookup_pad_indices.append(n_rows)
         else:
-            # The text table is C4's; a one-slot feature never pads.
+            # A text feature has no declared width until embed.py builds
+            # its table, and a one-slot feature never pads.
             lookup_table_dims.append(None)
             lookup_pad_indices.append(None)
 
@@ -1273,9 +1289,8 @@ def _read_clinvec_shape(clinvec_path: str) -> Tuple[int, int]:
     """Return ``(n_rows, embedding_dim)`` of the ClinVec ATC vocabulary.
 
     ``CLINVEC_INDEX`` is the 0-based row index of a drug's ATC code in
-    this file (``prepare_RMT23345_PIN.R:75-77``), so ``n_rows`` is the pad
-    index ``V`` of section 4.4 and the table C4 builds is
-    ``(V+1, embedding_dim)``.
+    this file, so ``n_rows`` is the pad index ``V`` and the table
+    ``embed.py`` builds is ``(V + 1, embedding_dim)``.
     """
     header = pd.read_csv(clinvec_path, nrows=0).columns
     n_rows = sum(1 for _ in open(clinvec_path, 'rb')) - 1
@@ -1286,8 +1301,8 @@ def _allocate_output_arrays(dims: TensorDimensions) -> Dict[str, np.ndarray]:
     """
     Pre-allocate output arrays as numpy (not torch).
 
-    Categorical and ordinal values start at -1, not 0: section 4.3's
-    sentinel means "observed, out of domain", and zero is a real category.
+    Categorical and ordinal values start at -1, not 0: the sentinel
+    means "observed, out of domain", and zero is a real category.
     """
     arrays = {}
 
@@ -1322,7 +1337,7 @@ def _allocate_output_arrays(dims: TensorDimensions) -> Dict[str, np.ndarray]:
     ]
 
     # Multi-hot rows are stored dense: unlike categorical/ordinal, a
-    # multi-hot cannot be expressed as a single index (section 4.3).
+    # multi-hot cannot be expressed as a single index.
     arrays['val_multilabel_indicators'] = np.zeros(
         (n, ts, dims.n_multilabel_feats), dtype=np.float32
     )
@@ -1342,7 +1357,7 @@ def _allocate_output_arrays(dims: TensorDimensions) -> Dict[str, np.ndarray]:
     # concatenated in canonical order at the end. Holding whole
     # EpisodeData objects until every patient was done would instead keep
     # the dense per-episode arrays alive beside the output arrays -- the
-    # dataset twice over, and section 4.5 puts one copy at ~75 GB.
+    # dataset twice over, and one copy of this cohort is tens of GB.
     arrays['_lookup_entries'] = [
         [[] for _ in range(n)] for _ in range(dims.n_lookup_feats)
     ]
@@ -1370,10 +1385,10 @@ def _finalize_sparse_lookup(
     """
     Convert the per-row lookup buckets to CSR arrays, one dict each.
 
-    One writer serves both members of the family (section 4.3). A
+    One writer serves both members of the family. A
     single-slot feature gets no ``doses`` or ``masks`` key -- its weight
-    is 1 by definition, so both arrays would be constant and section 4.4
-    lists neither -- and its values array is rank 1.
+    is 1 by definition, so both arrays would be constant -- and its
+    values array is rank 1.
 
     Rows are walked in order, which is where a text string earns its
     index into ``text_embeddings.npy``: first appearance in canonical row
@@ -1382,7 +1397,7 @@ def _finalize_sparse_lookup(
 
     Returns:
         ``(csr_per_feature, strings)``, ``strings`` being the table's key
-        order for C4 to embed.
+        order for ``embed.py`` to embed.
     """
     finalized = []
     text_table: Dict[str, int] = {}
@@ -1443,21 +1458,20 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     MixedTensorDataset format expected by the model. The lookup family
     arrives as one feature axis at
     ``batch['val_data']['lookup']['indicators']`` beside per-feature
-    lists of slot values, doses and masks (section 5.1). The
+    lists of slot values, doses and masks. The
     dose-weighted pool that reduces a feature to one
     ``(batch_size, max_ts_len, D_f)`` tensor is part of the forward
     pass, not of collation, so that a gradient survives to an individual
-    slot and therefore to an individual DIN (section 4.3).
+    slot and therefore to an individual DIN.
 
-    Section 4.2 removes the history region, so the history-masking
-    arguments this took are gone with it.
+    Episodes are right-aligned windows with no separate history region,
+    so the history-masking arguments this took are gone with it.
 
     Everything a member of the lookup family contributes is keyed by
     presence rather than by a feature count, the way ``episode_id``
     already is: with both ``TEXT_FEATS`` and ``DRUG_FEATS`` empty the
-    ``lookup`` key is simply absent, which is what keeps section 5.1's
-    regression gate -- run with ``DRUG_FEATS: []`` -- a statement about
-    text alone.
+    ``lookup`` key is simply absent, which is what lets a run with
+    ``DRUG_FEATS: []`` be a statement about text alone.
 
     Args:
         batch: List of episode dicts from MixedDataset.__getitem__.
@@ -1500,7 +1514,7 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     ]
 
     # The lookup family batches per feature, not into one
-    # [batch, max_ts, n_lookup_feats, embed_dim] tensor (section 5.1):
+    # [batch, max_ts, n_lookup_feats, embed_dim] tensor:
     # the widths are ragged -- text is 4096 or 8192 beside ClinVec's 128
     # -- so there is no common width to stack along.
     #
@@ -1511,8 +1525,8 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
     # Records in the family are rare against the timestep axis, so
     # assembling the dense form here would put almost the whole batch
     # through the worker boundary and a host-side copy to carry zeros:
-    # about 4.8 GB per batch at section 4.5's T = 500 and a batch of
-    # 200, against about 7 MB of content. A single-slot feature's dose
+    # about 4.8 GB per batch at 500 timesteps and a batch of 200,
+    # against about 7 MB of content. A single-slot feature's dose
     # and mask entries are None, which is the family's degenerate case
     # rather than missing data.
     def concat_lookup(f: int) -> dict:
@@ -1574,9 +1588,9 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
         },
     }
 
-    # Absent under section A.3's empty STATIC_FEATS. models.py:339 and
-    # :521 both read it defensively, so omitting the key is the case they
-    # already handle; a (batch, 0) tensor is not.
+    # Absent while STATIC_FEATS is empty. models.py:339 and :521 both
+    # read it defensively, so omitting the key is the case they already
+    # handle; a (batch, 0) tensor is not.
     if 'static_data' in batch[0]:
         result['static_data'] = torch.stack(
             [b['static_data'] for b in batch], dim=0
@@ -1616,7 +1630,7 @@ def save_extracted(
     base_path: str
 ) -> None:
     """
-    Write section 4.4's on-disk contract as memory-mappable .npy files.
+    Write the cohort arrays as memory-mappable .npy files.
 
     Two things the table asks for that are easy to miss: no
     ``static_data.npy`` when ``STATIC_FEATS`` is empty, since the array
@@ -1629,14 +1643,14 @@ def save_extracted(
     # Clear this directory's own artifacts first. Feature counts and
     # families come from the config, so a re-run with one feature removed
     # would otherwise leave the previous run's files beside a
-    # metadata.pkl that no longer mentions them -- section 5.1's
-    # regression gate does exactly that, re-running with DRUG_FEATS: [],
-    # and section 4.3 says the webapp finds drugs by filename. Only the
-    # three extensions this function and extract_data write are removed,
-    # and only at the top level, so nothing outside our own output is
-    # touched. Section 4.4's global lookup tables are safe from this by
-    # construction rather than by exception: C4 puts them in the
-    # ``lookup_tables/`` sibling, not here (``lookup_tables_path``).
+    # metadata.pkl that no longer mentions them -- re-running with
+    # DRUG_FEATS: [] does exactly that, and a downstream viewer finds
+    # drugs by filename. Only the three extensions this function and
+    # extract_data write are removed, and only at the top level, so
+    # nothing outside our own output is touched. The global lookup
+    # tables are safe from this by construction rather than by
+    # exception: they are in the ``lookup_tables/`` sibling, not here
+    # (``lookup_tables_path``).
     for stale in os.listdir(base_path):
         if stale.endswith(('.npy', '.pkl', '.npz')):
             os.remove(os.path.join(base_path, stale))
@@ -1672,7 +1686,7 @@ def save_extracted(
         save_array(f'val_multilabel_values_{i}', arr)
 
     # One dense indicator array per lookup *type*, and CSR files named by
-    # type with an index within that type (section 4.4).
+    # type with an index within that type.
     per_type: Counter = Counter()
     for f, feat_type in enumerate(metadata['lookup_feat_types']):
         j = per_type[feat_type]
@@ -1696,13 +1710,13 @@ def save_extracted(
 
 
 def lookup_tables_path(base_path: str) -> str:
-    """``lookup_tables/``, the sibling of ``extracted/`` (C4).
+    """``lookup_tables/``, the sibling of ``extracted/``.
 
-    Section 4.4's global tables sit beside the per-episode arrays rather
-    than among them (decided 2026 September 2). ``save_extracted`` clears
-    every ``.npy``, ``.pkl`` and ``.npz`` in its own directory, so a
-    64.8 GB ``text_embeddings.npy`` kept there would be deleted by the
-    next extraction run; and ``drug_embeddings.npy`` is a pure function
+    The global embedding tables sit beside the per-episode arrays rather
+    than among them. ``save_extracted`` clears every ``.npy``, ``.pkl``
+    and ``.npz`` in its own directory, so a ``text_embeddings.npy`` of
+    tens of gigabytes kept there would be deleted by the next extraction
+    run; and ``drug_embeddings.npy`` is a pure function
     of ``ClinVec_atc.csv``, cohort-independent and not invalidated by a
     re-extraction, so it does not belong to any extraction's output.
     """
@@ -1715,28 +1729,28 @@ def _load_lookup_family(
     base_path: str,
     metadata: dict
 ) -> Tuple[Dict[str, LazyArray], List[Dict[str, LazyArray]], List[LazyArray]]:
-    """Open section 4.4's lookup arrays and the global tables they index.
+    """Open the lookup family's arrays and the global tables they index.
 
     The CSR filenames carry the feature's *type* and its index within
     that type, which is how ``save_extracted`` writes them and how the
-    webapp finds drugs; the embedding table is per type, since section
-    4.4 names two files rather than one per feature. The CSR arrays are
+    webapp finds drugs; the embedding table is per type rather than per
+    feature, so both text features would share one table. The CSR arrays are
     in ``base_path``; the tables are in its ``lookup_tables/`` sibling.
 
     A missing table is refused rather than worked around. Both tables are
-    C4's, so this is the state of a tree in which C4 has not run -- but a
-    text feature has no declared width until C4 fills
-    ``lookup_table_dims``, so there is no shape to fall back to, and a
-    lookup feature silently dropped from the batch would train a
-    ``USE_TEXT`` model on no text at all. The row-count checks catch the
+    built by ``embed.py``, so this is the state of a tree in which that
+    has not been run -- but a text feature has no declared width until the
+    table exists, so there is no shape to fall back to, and a lookup
+    feature silently dropped from the batch would train a ``USE_TEXT``
+    model on no text at all. The row-count checks catch the
     other half of the same problem: extraction re-interns the strings on
     every run, so a table left over from an earlier extraction indexes a
     vocabulary that no longer exists.
 
     Three checks run here rather than at build time, because this is
-    where the pairing is used: the row-count agreement above, invariant 8
-    (every CSR index is a row of its table) and invariant 9 (the table
-    matches its ``manifest.csv`` checksum *at use*). Each reads its file
+    where the pairing is used: the row-count agreement above, that every
+    stored index is a row of its table, and that the table still matches
+    the checksum ``manifest.csv`` recorded for it. Each reads its file
     once and streams it, which is the price of not training on a table
     that copied wrong -- the tables are order-sensitive, so neither shape
     nor dtype would notice.
@@ -1763,10 +1777,10 @@ def _load_lookup_family(
         if not os.path.exists(table_path):
             raise FileNotFoundError(
                 f"{table_path} not found. The global {feat_type} lookup "
-                f"table is built by C4 (embed.py, from the LLM for text "
-                f"and from ClinVec for drugs); section 4.4's int32 "
-                f"values are row indices into it, so the feature cannot "
-                f"be gathered without it."
+                f"table is built by embed.py (from the LLM for text "
+                f"and from ClinVec for drugs). The stored values are "
+                f"row indices into it, so the feature cannot be gathered "
+                f"without it."
             )
         verify_manifest_checksum(table_path)
         tables[feat_type] = LazyArray(table_path)
@@ -1780,7 +1794,7 @@ def _load_lookup_family(
                 f"text_embeddings.npy has {rows} row(s) but "
                 f"text_strings.pkl has {n_strings} string(s). The table "
                 f"predates this extraction, which reassigned the string "
-                f"indices (section 4.4); rebuild it with embed.py."
+                f"indices; rebuild it with embed.py."
             )
 
     csr = []
@@ -1794,7 +1808,7 @@ def _load_lookup_family(
         }
         if slot_dims[f] > 1:
             # A single-slot feature has no dose or mask array by
-            # definition (section 4.3), so neither is looked for.
+            # definition, so neither is looked for.
             entry['doses'] = LazyArray(path(f'{feat_type}_doses_{j}'))
             entry['masks'] = LazyArray(path(f'{feat_type}_masks_{j}'))
         csr.append(entry)
@@ -1806,7 +1820,7 @@ def _load_lookup_family(
                 f"but '{metadata['lookup_feats'][f]}' pads unused slots "
                 f"with index {pad_indices[f]}, so the table must have "
                 f"{pad_indices[f] + 1} rows -- the vocabulary's, plus the "
-                f"all-zero pad row (section 4.4)."
+                f"all-zero pad row."
             )
         if table_dims[f] is not None and table.shape[1] != table_dims[f]:
             raise ValueError(
@@ -1828,7 +1842,7 @@ def _check_indices_in_range(
     feat: str,
     feat_type: str
 ) -> None:
-    """Invariant 8: every CSR index is a row of its table.
+    """Check that every stored index is a row of its table.
 
     Checked here rather than left to the gather, because ``__getitem__``
     would only catch half of it: a fancy index past the end raises, but a
@@ -1845,9 +1859,9 @@ def _check_indices_in_range(
         raise ValueError(
             f"'{feat}' indexes rows {low}..{high} of "
             f"{feat_type}_embeddings.npy, which has {n_rows} row(s) "
-            f"(invariant 8). The table and the extraction disagree; "
-            f"rebuild the table with embed.py against this extraction's "
-            f"text_strings.pkl, or re-extract."
+            f"The table and the extraction disagree; rebuild the table "
+            f"with embed.py against this extraction's text_strings.pkl, "
+            f"or re-extract."
         )
 
 
@@ -1861,7 +1875,7 @@ def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:
     and the alternatives.
 
     Args:
-        base_path: ``{DATA_DIR}/extracted``, section 4.4's directory.
+        base_path: ``{DATA_DIR}/extracted``, the extractor's output.
         fold: The fold whose training statistics standardize the numeric
             values, e.g. ``'fold0'``; its
             ``summary_statistics_{fold}.npz`` must be in ``base_path``.
@@ -1870,8 +1884,8 @@ def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:
             model on inputs from a different distribution than it saw.
 
     Returns:
-        A ``MixedDataset`` over every row of ``labels.csv``. Section 3's
-        folds are row indices into it, applied by a ``Subset``.
+        A ``MixedDataset`` over every row of ``labels.csv``. Folds are
+        row indices into it, applied by a ``Subset``.
     """
     with open(os.path.join(base_path, 'metadata.pkl'), 'rb') as f:
         metadata = pickle.load(f)
@@ -1896,7 +1910,7 @@ def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:
             raise FileNotFoundError(
                 f"{stats_path} not found. Standardization statistics are "
                 f"written per fold by extract_data.py, over that fold's "
-                f"training rows alone (section 5); re-run extraction with "
+                f"training rows alone; re-run extraction with "
                 f"{fold}/{fold}_train_rows.npy in place."
             )
         numeric_stats = dict(np.load(stats_path))
@@ -1909,7 +1923,7 @@ def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:
         base_path, metadata
     )
 
-    # Absent by design when STATIC_FEATS is empty (section 4.4).
+    # Absent by design when STATIC_FEATS is empty.
     static_data = None
     if os.path.exists(os.path.join(base_path, 'static_data.npy')):
         static_data = load_mmap('static_data')
@@ -1960,10 +1974,10 @@ def standardize_feats(
 ) -> None:
     """Compute and save one fold's numeric standardization statistics.
 
-    **The values are no longer scaled in place** (section 5). Extraction
-    now runs once for the cohort while standardization is per fold, so a
-    single array cannot carry one fold's scaling; ``__getitem__`` applies
-    the statistics at load time instead (C2).
+    **The values are not scaled in place.** Extraction runs once for the
+    cohort while standardization is per fold, so a single array cannot
+    carry one fold's scaling; ``__getitem__`` applies the statistics at
+    load time instead.
 
     Statistics are computed over the observed values (indicator == 1.0) of
     the given rows only, which must be that fold's *training* rows --
@@ -2038,15 +2052,15 @@ def extract_data(
     fold_train_rows: Optional[Dict[str, np.ndarray]] = None
 ) -> None:
     """
-    Extract the cohort's episodes into section 4.4's on-disk contract.
+    Extract the cohort's episodes into ``data/extracted``.
 
     Runs **once for the cohort**, not once per fold and not once per
     partition: the row order is ``labels.csv``'s, and folds are row
-    indices into the result (section 3). There is no ``suffix`` argument
+    indices into the result. There is no ``suffix`` argument
     and no per-fold standardization pass over the values.
 
     The pipeline is two passes:
-        1. **Extraction**, parallel by patient (section 4.1) -- one CSV
+        1. **Extraction**, parallel by patient -- one CSV
            read and one typing pass serve all of that patient's episodes.
         2. **Insertion**, in ``labels.csv`` order, which is where text
            strings are interned into their table row indices.
@@ -2055,14 +2069,15 @@ def extract_data(
         reader: A patient-indexed EHRDataReader.
         output_dir: Where ``extracted/`` and its siblings are written.
         var_properties_path: Path to variable_properties.yaml.
-        max_episode_len_steps: Timesteps per episode, T of section 4.4.
+        max_episode_len_steps: Timesteps per episode -- the T of every
+            dense array's ``(n, T, ...)`` shape.
         clinvec_path: ``ClinVec_atc.csv``; required when a drug feature is
-            configured, for the pad index of section 4.4.
+            configured, since its row count is the drug pad index.
         min_episode_len_steps: Episodes below this are *reported*, never
             dropped -- the fold row indices fix the row count.
         n_workers: Parallel worker processes.
         fold_train_rows: ``{fold_name: row indices}`` for the per-fold
-            standardization statistics C2 loads.
+            standardization statistics ``__getitem__`` applies.
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -2071,7 +2086,7 @@ def extract_data(
     n_episodes = reader.n_episodes
     lookup_feats = list(reader.text_feats) + list(reader.drug_feats)
 
-    # Fold rows are positions in labels.csv (section 3), so a fold that
+    # Fold rows are positions in labels.csv, so a fold that
     # indexes past this cohort is either a stale fold directory or a
     # truncated run. Checked before any work, because the failure used to
     # surface as an IndexError from standardize_feats *after* the whole
@@ -2162,9 +2177,9 @@ def extract_data(
             print(f"  {error}")
         raise RuntimeError(
             f"{int((~inserted).sum())} of {n_episodes} episode(s) produced "
-            f"no data ({len(errors)} patient(s) failed). Section 3's fold "
-            f"row indices are positions in labels.csv, so extraction "
-            f"cannot skip a row."
+            f"no data ({len(errors)} patient(s) failed). Fold row "
+            f"indices are positions in labels.csv, so extraction cannot "
+            f"skip a row."
         )
 
     lookup_csr, strings = _finalize_sparse_lookup(arrays, dims)
@@ -2200,8 +2215,9 @@ def extract_data(
         ],
         'static_feat_dims': dims.static_feat_dims,
         'static_total_dim': dims.static_total_dim,
-        # Section 4.4 also asks for the resolved pad_token_id; C4 adds it,
-        # since that is where the tokenizer is loaded.
+        # embed.py adds the resolved pad_token_id alongside these, since
+        # that is where the tokenizer is actually loaded. Together they
+        # make a tokenizer change detectable rather than silent.
         'LLM_NAME': LLM_NAME,
         'TOKENIZER_PAD_TOKEN': TOKENIZER_PAD_TOKEN,
         'MAX_TOKEN_LENGTH': MAX_TOKEN_LENGTH,
@@ -2213,8 +2229,8 @@ def extract_data(
     with open(os.path.join(output_path, 'episode_ids.pkl'), 'wb') as f:
         pickle.dump(episode_ids, f)
 
-    # The unique-string table's key order. C4 embeds this list in this
-    # order; ``text_values`` are positions in it.
+    # The unique-string table's key order. embed.py embeds this list in
+    # this order; ``text_values`` are positions in it.
     with open(os.path.join(output_path, 'text_strings.pkl'), 'wb') as f:
         pickle.dump(strings, f)
 
@@ -2239,9 +2255,9 @@ def _insert_episode(
 ) -> None:
     """Place one episode into the pre-allocated arrays, right-aligned.
 
-    Section 4.2 puts ``t = 0`` -- the index time, and the last record --
-    in the final column of the row, so an episode of length L occupies
-    ``[T - L, T)`` and the left of the row stays zero padding.
+    ``t = 0`` -- the index time, and the last record -- goes in the final
+    column of the row, so an episode of length L occupies ``[T - L, T)``
+    and the left of the row stays zero padding.
     """
     row = episode.row
     ts = dims.max_ts_len
@@ -2321,13 +2337,12 @@ def _report_extraction(
     ordinal_feats: List[str],
     ord_misses: np.ndarray
 ) -> None:
-    """Print the per-feature miss report section 4.3 asks for.
+    """Print the per-feature count of out-of-domain values.
 
     A miss is otherwise invisible: the timestep keeps indicator 1 and
-    stores -1, so nothing raises. Section A.2's enforcement pass
-    guarantees every LAB result is one of its declared levels, so a
-    nonzero count on a LAB feature is a bug by construction rather than
-    data drift. Do not raise on one: ``INST``, ``CMG`` and ``SCU`` are
+    stores -1, so nothing raises. The data-prep step forces every lab
+    result into one of its declared levels, so a nonzero count on a lab
+    feature is a bug by construction rather than data drift. Do not raise on one: ``INST``, ``CMG`` and ``SCU`` are
     hand-curated against a single extract, and a new institution name
     should not kill a multi-hour run.
     """
@@ -2338,8 +2353,9 @@ def _report_extraction(
         print(f"\n{short_episodes} episode(s) have fewer than "
               f"{min_episode_len_steps} timestep(s). They are written "
               f"anyway -- the fold row indices are positions in "
-              f"labels.csv -- but invariant 4 says every INDEX_TIME "
-              f"names a timeseries.csv row, so this should be zero.")
+              f"labels.csv -- but every INDEX_TIME is guaranteed "
+              f"upstream to name a timeseries.csv row, so this should "
+              f"be zero.")
 
     misses = [
         (feat, int(count))
@@ -2357,7 +2373,7 @@ def _report_extraction(
         print(f"  {feat:<24} {count:>10}")
     print("  A value not in the feature's category_map. Not an error for "
           "INST, CMG or SCU,\n  which are hand-curated; on a LAB feature "
-          "it is a bug (section 4.3).")
+          "it is a bug.")
 
 
 def prepare_dataloaders(
@@ -2373,9 +2389,9 @@ def prepare_dataloaders(
 ) -> List[DataLoader]:
     """Prepare training, (validation) and test DataLoaders for one fold.
 
-    Section 2's second decision -- extract once for the whole cohort --
-    makes a fold a set of *row indices* rather than a directory of its own
-    arrays, so this opens ``{data_dir}/extracted`` once and wraps it in one
+    Extraction runs once for the whole cohort, which makes a fold a set
+    of *row indices* rather than a directory of its own arrays, so this
+    opens ``{data_dir}/extracted`` once and wraps it in one
     ``torch.utils.data.Subset`` per partition. One set of mappings serves
     all three partitions and every worker, which is the point of the
     memory mapping; ``MixedDataset`` itself stays cohort-wide and knows
@@ -2386,8 +2402,8 @@ def prepare_dataloaders(
     resolve against the canonical order without a second mapping.
 
     Args:
-        data_dir (str): ``DATA_DIR``, holding ``extracted/`` (section 4.4)
-            and ``fold{i}/`` (section 3).
+        data_dir (str): ``DATA_DIR``, holding ``extracted/``
+            and ``fold{i}/``.
         fold_name (str): Which fold, e.g. ``'fold0'``. Selects both the
             row-index arrays and the standardization statistics.
         batch_size (int): Number of samples per batch (per GPU in distributed
@@ -2448,8 +2464,8 @@ def prepare_dataloaders(
                 continue
             else:
                 raise FileNotFoundError(
-                    f'{rows_path} not found. Section 3 writes '
-                    f'{fold_name}_{{train,val,test}}_rows.npy into '
+                    f'{rows_path} not found. The fold arrays '
+                    f'{fold_name}_{{train,val,test}}_rows.npy belong in '
                     f"{fold_dir}; run IBDdataprep's split.py."
                 )
 

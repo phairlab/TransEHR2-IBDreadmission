@@ -48,8 +48,8 @@ Output is ``{DATA_DIR}/extracted/``:
         metadata.pkl, episode_ids.pkl, text_strings.pkl,
         summary_statistics_fold{i}.npz
 
-There is **no** ``static_data.npy``: ``STATIC_FEATS`` is empty under
-section A.3, so the array would be ``(n, 0)``.
+There is **no** ``static_data.npy``: ``STATIC_FEATS`` is empty for this
+study, so the array would be ``(n, 0)``.
 
 The global text and drug embedding tables are **not** written here and
 are not in this directory: they are ``{DATA_DIR}/lookup_tables/``, built

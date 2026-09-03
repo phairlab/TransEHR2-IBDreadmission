@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Build section 4.4's global lookup tables into ``lookup_tables/`` (C4).
+"""Build the global text and drug lookup tables into ``lookup_tables/``.
 
 Three tables, built **once for the study** rather than once per fold or
 once per episode:
@@ -8,55 +8,62 @@ once per episode:
     {DATA_DIR}/lookup_tables/text_tokens.npy       (U, 1024)  int32
     {DATA_DIR}/lookup_tables/drug_embeddings.npy   (V+1, 128) float32
 
-``U`` is the number of unique ``TEXT_SUPERFEATURE`` strings the cohort
-contains, and the row order is ``extracted/text_strings.pkl``'s -- the
-order ``extract_data.py`` interned them in, which is what makes section
-4.4's ``text_values`` valid indices. ``V`` is the row count of
-``ClinVec_atc.csv``, the vocabulary Stage A indexed against, so
-``drug_embeddings.npy`` is that file plus one all-zero pad row at index
-``V``.
+``U`` is the number of unique text strings the cohort contains, and the
+row order is ``extracted/text_strings.pkl``'s -- the order
+``extract_data.py`` interned them in, which is what makes the extracted
+``text_values`` valid indices into the table. ``V`` is the row count of
+``ClinVec_atc.csv``, the vocabulary the drug preparation step indexed
+against, so ``drug_embeddings.npy`` is that file plus one all-zero pad
+row at index ``V``.
+
+Embedding once per unique string rather than once per timestep per fold
+is what makes text feasible at all: it is a few million forward passes
+for the whole study against a couple of hundred million otherwise.
 
 Usage:
     python embed.py TransEHR2/configs/datasets/RMT23345.yaml
     python embed.py <config> --tables drug     # no LLM is loaded
     python embed.py <config> --tables text --batch-size 32
 
-Readings this parcel commits to
--------------------------------
+Design decisions this script commits to
+---------------------------------------
 
 * **The tables live in ``{DATA_DIR}/lookup_tables/``, beside
-  ``extracted/`` rather than inside it** (decided 2026 September 2; C1
-  raised it, since ``save_extracted`` clears every ``.npy``, ``.pkl`` and
-  ``.npz`` in its own directory and would take a 64.8 GB
-  ``text_embeddings.npy`` with it). A sibling directory settles it by
-  construction rather than by a rule the clearing has to remember, and it
-  gives ``drug_embeddings.npy`` -- a pure function of
+  ``extracted/`` rather than inside it.** ``extract_data.py`` clears every
+  ``.npy``, ``.pkl`` and ``.npz`` in its own directory before writing, so
+  a text embedding table kept there -- tens of gigabytes and hours of GPU
+  time -- would not survive the next extraction. A sibling directory
+  settles that by construction rather than by a rule the clearing has to
+  remember, and it gives ``drug_embeddings.npy`` -- a pure function of
   ``ClinVec_atc.csv``, cohort-independent, and not invalidated by a
   re-extraction -- a home that no extraction owns.
 * **Tokenizing and embedding are one pass, so the attention mask never
-  reaches disk** (section 4.4). The mask is needed only to embed each
-  string; ``mask == (ids != pad_id)`` recovers it exactly from
-  ``text_tokens.npy``, and storing it would cost 4.05 GB as ``uint8`` for
-  one read that never happens. Invariant 13 checks the derivation against
-  every row of the real corpus while both are in hand, which is also the
-  only check that ``'[PAD]'`` never occurs as literal content.
-* **A blank string in ``text_strings.pkl`` is refused, not skipped.**
-  Section 4.4 keeps blanks out of the table, and extraction already does:
-  a textless timestep carries indicator 0 and no CSR entry (section 2.6),
-  so nothing blank is ever interned. Dropping one *here* would shift every
-  later row of the table out from under the indices extraction already
-  assigned, so the case is an upstream bug to report rather than a filter
-  to apply.
-* **The LLM's own tokenizer is used, not a second ``TextProcessor``.**
+  reaches disk.** The mask is needed only to embed each string;
+  ``mask == (ids != pad_id)`` recovers it exactly from
+  ``text_tokens.npy``, and storing it would cost gigabytes for a read
+  that never happens. That derivation is checked against every row of the
+  corpus while both are in hand, which is also the only check that the
+  pad token never occurs as literal content.
+* **A blank string in ``text_strings.pkl`` is refused, not skipped.** The
+  extractor already keeps blanks out: a textless timestep carries
+  indicator 0 and no sparse entry, so nothing blank is ever interned.
+  Dropping one *here* would shift every later row of the table out from
+  under the indices the extractor already assigned, so the case is an
+  upstream bug to report rather than a filter to apply.
+* **The LLM's own tokenizer is used, not a second one.**
   ``GradientTraceableLLM`` resizes its embedding matrix to the vocabulary
-  that ``add_special_tokens`` produced, so ``pad_token_id`` has to be the
-  one that resize was done against. It is the resolved id section 4.4
-  asks ``metadata.pkl`` to record, and this is where it is established --
-  extraction loads no tokenizer.
-* **Checksums are recorded here and verified at load** (invariant 9,
-  ``TransEHR2.data.manifest``). Rows are updated, never added:
-  ``manifest.csv`` gets new entries by hand, so that data which cannot be
-  shared is not registered for distribution by a script.
+  that adding the pad token produced, so ``pad_token_id`` has to be the
+  one that resize was done against. It is the resolved id recorded in
+  ``metadata.pkl``, and this is where it is established -- extraction
+  loads no tokenizer.
+* **Checksums are recorded here and verified when the tables are loaded**
+  (``TransEHR2.data.manifest``). Both tables are order-sensitive: a row is
+  meaningful only as the embedding of the string or drug at that
+  position, so a table that copied wrong keeps its shape and its dtype
+  and gathers the wrong rows. Nothing but a checksum notices. Rows in
+  ``manifest.csv`` are updated, never added: new entries go in by hand, so
+  that data which cannot be shared is not registered for distribution by
+  a script.
 """
 
 import argparse
@@ -83,8 +90,8 @@ def build_drug_table(clinvec_path: str, out_dir: str) -> str:
     ``CLINVEC_INDEX`` is the 0-based row of ``ClinVec_atc.csv``
     (``prepare_RMT23345_PIN.R:75-77``), so the table is that file's
     vectors in that order with one all-zero row appended at index ``V``
-    -- the pad index section 4.4 fills unused drug slots with. There is
-    no UNK row: every dispensation Stage A kept mapped to a vocabulary
+    -- the pad index unused drug slots are filled with. There is no UNK
+    row: every dispensation Stage A kept mapped to a vocabulary
     entry, and an unmapped one is dropped upstream rather than pooled
     into a shared vector here.
 
@@ -122,8 +129,8 @@ def load_text_strings(extracted_dir: str) -> List[str]:
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"{path} not found. It is written by extract_data.py and is "
-            f"the row order of text_embeddings.npy (section 4.4); the "
-            f"table cannot be built without it."
+            f"the row order of text_embeddings.npy; the table cannot be "
+            f"built without it."
         )
     with open(path, 'rb') as f:
         strings = pickle.load(f)
@@ -136,11 +143,11 @@ def load_text_strings(extracted_dir: str) -> List[str]:
         raise ValueError(
             f"text_strings.pkl has {len(blank)} blank string(s), at "
             f"row(s) {blank[:5]}{' ...' if len(blank) > 5 else ''}. "
-            f"Section 4.4 keeps blanks out of the table, and extraction "
-            f"already does -- a textless timestep carries indicator 0 "
-            f"and no CSR entry (section 2.6) -- so this is an upstream "
-            f"bug. Skipping the row here would shift every later row out "
-            f"from under the indices extraction assigned."
+            f"Blanks are kept out of the table, and extraction already "
+            f"does that -- a textless timestep carries indicator 0 and no "
+            f"sparse entry -- so this is an upstream bug. Skipping the "
+            f"row here would shift every later row out from under the "
+            f"indices extraction assigned."
         )
     return [str(s) for s in strings]
 
@@ -157,10 +164,10 @@ def build_text_tables(
     """Write ``text_tokens.npy`` and ``text_embeddings.npy`` in one pass.
 
     Both arrays are opened as ``.npy`` memory maps and filled a batch at
-    a time: at the study's dedup ratio they are 16.2 GB and 64.8 GB
-    (section 4.5), so neither is held whole. The attention mask stays a
-    local variable and is checked against ``ids != pad_id`` on every row
-    (invariant 13) before it is discarded.
+    a time: at a few million unique strings they run to tens of
+    gigabytes, so neither is held whole. The attention mask stays a local
+    variable and is checked against ``ids != pad_id`` on every row before
+    it is discarded.
 
     Args:
         strings: The table's key order, from ``text_strings.pkl``.
@@ -169,7 +176,7 @@ def build_text_tables(
             float32. Injected so the pass can be tested without the LLM.
         out_dir: ``{DATA_DIR}/lookup_tables``.
         embed_dim: ``D``, the LLM's hidden size.
-        max_length: Token sequence length, section 4.4's 1024.
+        max_length: Token sequence length; 1024 for this study.
         batch_size: Strings per tokenizer and LLM call.
 
     Returns:
@@ -202,22 +209,22 @@ def build_text_tables(
             ids = np.asarray(encoded['input_ids'])
             mask = np.asarray(encoded['attention_mask'])
 
-            # Invariant 13, checked here because this is the one moment
+            # No mask is stored, so this is the sole guard on deriving
+            # it, and it is checked here because this is the one moment
             # both are in hand. It is also the only check that '[PAD]'
             # never appears as literal content: HuggingFace splits added
             # tokens out of input text, so a string containing those five
-            # characters would emit pad_id mid-sequence and break the
-            # derivation section 4.4 relies on.
+            # characters would emit pad_id mid-sequence and make the
+            # derivation wrong.
             derived = (ids != pad_id).astype(mask.dtype)
             if not np.array_equal(mask, derived):
                 row = int(np.flatnonzero((mask != derived).any(axis=1))[0])
                 raise AssertionError(
-                    f"Invariant 13 failed on string {start + row}: the "
-                    f"tokenizer's attention mask is not (ids != "
-                    f"{pad_id}). Section 4.4 stores no mask and derives "
-                    f"it, so this string cannot be embedded as it "
-                    f"stands. Store a uint8 mask instead and record why "
-                    f"in section 4.4.\n"
+                    f"String {start + row}: the tokenizer's attention "
+                    f"mask is not (ids != {pad_id}). No mask is stored -- "
+                    f"it is derived from the tokens -- so this string "
+                    f"cannot be embedded as it stands. Store a uint8 mask "
+                    f"beside the tokens instead, and record why here.\n"
                     f"The string itself is not printed: this runs over "
                     f"real records, and the row index locates it in "
                     f"text_strings.pkl."
@@ -241,10 +248,10 @@ def build_text_tables(
 def record_pad_token_id(extracted_dir: str, pad_token_id: int) -> None:
     """Add the resolved ``pad_token_id`` to ``metadata.pkl``.
 
-    Section 4.4 wants ``LLM_NAME``, ``TOKENIZER_PAD_TOKEN``, the resolved
-    id and ``MAX_TOKEN_LENGTH`` recorded together, so that a tokenizer
-    change which would invalidate both ``text_tokens.npy`` and the mask
-    derivation is detectable rather than silent. Extraction writes the
+    ``LLM_NAME``, ``TOKENIZER_PAD_TOKEN``, the resolved id and
+    ``MAX_TOKEN_LENGTH`` are recorded together so that a tokenizer change
+    -- which would invalidate both ``text_tokens.npy`` and the mask
+    derivation -- is detectable rather than silent. Extraction writes the
     other three and loads no tokenizer; the id is established here.
     """
     path = os.path.join(extracted_dir, 'metadata.pkl')
@@ -258,7 +265,7 @@ def record_pad_token_id(extracted_dir: str, pad_token_id: int) -> None:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Build section 4.4's global lookup tables (C4)"
+        description="Build the global text and drug lookup tables"
     )
     parser.add_argument(
         'dataset_config',
@@ -305,8 +312,8 @@ def main(argv=None) -> int:
         if not clinvec_path:
             print("CLINVEC_PATH is not in the dataset config; it is the "
                   "vocabulary Stage A indexed against and fixes both the "
-                  "pad index and the width of drug_embeddings.npy "
-                  "(section 4.4).", file=sys.stderr)
+                  "pad index and the width of drug_embeddings.npy.",
+                  file=sys.stderr)
             return 1
         written.append(build_drug_table(clinvec_path, out_dir))
 
@@ -351,7 +358,7 @@ def main(argv=None) -> int:
         ))
         record_pad_token_id(extracted_dir, llm.tokenizer.pad_token_id)
 
-    print("Recording checksums (invariant 9):")
+    print("Recording checksums in manifest.csv:")
     for path in written:
         checksum = record_checksum(path)
         if checksum is not None:

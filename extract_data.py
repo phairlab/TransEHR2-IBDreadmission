@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""Extract the cohort's episodes into ``data/extracted/`` (section 4).
+"""Extract the cohort's episodes into ``data/extracted/``.
 
 Runs **once for the cohort**, not once per fold and not once per
 partition. The row order is ``labels.csv``'s -- patient directories
-lexicographically, then ``STAY_INDEX`` -- and section 3's folds are
-``int64`` row indices into the arrays this writes, so the row count is
+lexicographically, then ``STAY_INDEX`` -- and the folds are ``int64``
+row indices into the arrays this writes, so the row count is
 fixed by ``labels.csv`` and no episode may be filtered out.
 
 Inputs, all named by the dataset config:
@@ -14,7 +14,7 @@ Inputs, all named by the dataset config:
     {DATA_DIR}/fold{i}/fold{i}_train_rows.npy              split.py
     VARIABLE_PROPERTIES_PATH, CLINVEC_PATH
 
-Output is ``{DATA_DIR}/extracted/``, whose contract is section 4.4:
+Output is ``{DATA_DIR}/extracted/``:
 
     Dense, per episode (n episodes, T = MAX_EPISODE_LEN_STEPS):
         val_times.npy                (n, T)      int32, minutes <= 0
@@ -51,15 +51,15 @@ Output is ``{DATA_DIR}/extracted/``, whose contract is section 4.4:
 There is **no** ``static_data.npy``: ``STATIC_FEATS`` is empty under
 section A.3, so the array would be ``(n, 0)``.
 
-Section 4.4's global lookup tables are **not** written here and are not
-in this directory: they are ``{DATA_DIR}/lookup_tables/``, built once for
-the study by ``embed.py`` (C4). This directory is cleared on every run,
-which is exactly why they are not in it.
+The global text and drug embedding tables are **not** written here and
+are not in this directory: they are ``{DATA_DIR}/lookup_tables/``, built
+once for the study by ``embed.py``. This directory is cleared on every
+run, which is exactly why they are not in it.
 
 ``text_strings.pkl`` is the unique-string table's key order, assigned here
-because section 9 makes neither C1 nor C4 depend on the other; C4's
-``embed.py`` embeds that list *in that order*, which is what makes
-``text_values`` valid indices into ``text_embeddings.npy``.
+because the extractor is what walks the rows. ``embed.py`` embeds that
+list *in that order*, which is what makes ``text_values`` valid indices
+into ``text_embeddings.npy``.
 """
 
 import argparse
@@ -80,7 +80,7 @@ def find_fold_train_rows(data_dir: str) -> dict:
 
     One set of standardization statistics per fold, computed over that
     fold's *training* rows alone -- statistics over the whole cohort would
-    leak val and test into the scaling (section 5).
+    leak val and test into the scaling.
     """
     fold_train_rows = {}
     if not os.path.isdir(data_dir):
@@ -99,7 +99,7 @@ def find_fold_train_rows(data_dir: str) -> dict:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="Extract the cohort into data/extracted/ (section 4)"
+        description="Extract the cohort into data/extracted/"
     )
     parser.add_argument(
         'dataset_config',
@@ -143,12 +143,12 @@ def main(argv=None) -> int:
     with open(VAR_PROPERTIES_PATH, 'r') as f:
         var_properties = yaml.safe_load(f)
 
-    # Invariant 12, before a single patient file is opened (section 6).
-    # The category_map clause used to fire mid-extraction, on real data,
-    # hours in (section A.3).
+    # The config and variable_properties.yaml must agree, and that is
+    # checked before a single patient file is opened. The category_map
+    # clause used to fire mid-extraction, on real data, hours in.
     failures = check_feature_contract(config, var_properties)
     if failures:
-        print("FAIL -- the feature contract does not hold (invariant 12):")
+        print("FAIL -- the feature contract does not hold:")
         for failure in failures:
             print(f"  {failure}")
         return 1
@@ -166,7 +166,7 @@ def main(argv=None) -> int:
     # Every categorical, ordinal and text column is read as a string.
     # category_map is keyed on the YAML's values and BLDUA's levels are
     # numeric-looking strings, so a column pandas typed as numeric would
-    # miss every one of them, silently and per patient (section 5).
+    # miss every one of them, silently and per patient.
     string_feats = categorical_feats + ordinal_feats + TEXT_FEATS
 
     labels_path = os.path.join(DATA_DIR, 'labels.csv')

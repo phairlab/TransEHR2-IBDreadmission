@@ -1,38 +1,32 @@
-"""Shapes the extractor and the model pass between them (section 5).
+"""Shapes the extractor and the model pass between them.
 
-Readings this module commits to
--------------------------------
+Design decisions this module commits to
+---------------------------------------
 
-* **``lookup`` replaces the text internals rather than sitting beside
-  them** (escalated in section 9, decided 2026 August 23, C1). Section 4.3
-  makes text and drugs one family -- "one CSR writer, one CSR reader and one
-  weighted-mean-pool op", text being the degenerate case with one slot and
-  weight 1 -- so ``TensorDimensions`` carries ``n_lookup_feats`` /
-  ``lookup_slot_dims`` / ``lookup_table_dims`` and no longer carries
-  ``n_text_feats`` / ``text_feat_dims``, and ``EpisodeData`` carries one
-  ``val_lookup_sparse`` list over the family. Section 5's "add
-  ``val_drug_sparse``" bullet predates section 4.3's unification of the
-  storage side and is not followed. On-disk names stay ``text_*`` /
-  ``drug_*`` per section 4.4; only the internals are one path.
-* **``lookup_pad_indices`` is a field section 5 does not list.** Section 4.4
-  pads ``drug_values`` "with ``V``", the row index of ``drug_embeddings``'s
-  all-zero pad row, so the number has to reach the CSR builder somehow. It
-  is per-feature data, so it is a per-feature list like the other two.
-* **A single-slot lookup feature carries no dose or mask array.** Section
-  4.4 lists ``drug_doses`` / ``drug_masks`` and no ``text_`` counterpart,
-  and section 4.3 fixes the degenerate case's weight at 1, so both arrays
-  would be constant. The entries in ``val_lookup_sparse`` hold ``None``
-  there and the writer emits no file.
+* **Text and drugs are one "lookup" family, not two.** They share one
+  sparse writer, one sparse reader and one weighted-mean-pool op, text
+  being the degenerate case with one slot and weight 1 -- so
+  ``TensorDimensions`` carries ``n_lookup_feats`` / ``lookup_slot_dims``
+  / ``lookup_table_dims`` rather than a text-only set, and ``EpisodeData``
+  carries one ``val_lookup_sparse`` list over the family. On-disk names
+  stay ``text_*`` / ``drug_*``, because the webapp finds drugs by
+  filename; only the internals are one path.
+* **``lookup_pad_indices`` is per-feature data like the other two lists.**
+  Unused drug slots are padded with ``V``, the row index of
+  ``drug_embeddings``'s all-zero pad row, so that number has to reach the
+  sparse builder somehow.
+* **A single-slot feature writes no doses and no masks.** Its weight is 1
+  by definition, so both arrays would be constant. The entries in
+  ``val_lookup_sparse`` hold ``None`` there and the writer emits no file.
 * **A text lookup entry carries the string, not an index.** The row index
-  into ``text_embeddings.npy`` is assigned by
+  into ``text_embeddings.npy`` is assigned later, in
   ``preprocessing._finalize_sparse_lookup``, the only place that sees
-  every episode in canonical row order (decided 2026 August 23, C1).
-  Workers cannot share the intern table, so they hand back the string
-  itself.
-* **``static_data`` and its two dimension fields are kept** (section A.3),
-  even though ``STATIC_FEATS`` is empty and ``static_total_dim == 0``.
-  Section 4.4 omits the zero-width *file*; the code path stays so that
-  restoring a static feature does not reach into ``models.py``.
+  every episode in canonical row order. Workers cannot share the intern
+  table, so they hand back the string itself.
+* **``static_data`` and its two dimension fields are kept**, even though
+  ``STATIC_FEATS`` is empty and ``static_total_dim == 0``. The zero-width
+  *file* is not written; the code path stays so that restoring a static
+  feature does not reach into ``models.py``.
 """
 
 import numpy as np
@@ -66,15 +60,15 @@ class TensorDimensions:
 
     These dimensions are derived from the dataset configuration and variable
     properties, allowing pre-allocation of output tensors before processing
-    begins. Nothing here may be hard-coded: section 4.4's 94 / 37 / 16 are
-    counts of ``VALUED_FEATS`` entries by ``type``, read from the two config
-    files at extraction time.
+    begins. Nothing here may be hard-coded: the per-family feature counts
+    are counts of ``VALUED_FEATS`` entries by ``type``, read from the two
+    config files at extraction time.
 
     Attributes:
         n_episodes: Number of episodes, i.e. rows of ``labels.csv``
         max_ts_len: Maximum timesteps per episode. One value, not one per
-            stream: section 4.2 gives value- and event-associated data the
-            same right-aligned window, so the old ``max_ts_len_event``
+            stream: value- and event-associated data share the same
+            right-aligned window, so the old ``max_ts_len_event``
             duplicate said nothing ``max_ts_len_val`` did not.
         n_numeric_feats: Number of numeric features
         n_categorical_feats: Number of categorical features
@@ -90,7 +84,8 @@ class TensorDimensions:
             30 for drugs (``size`` in variable_properties.yaml)
         lookup_table_dims: Per-feature width of the embedding table row,
             or None where the table is not built yet. Drugs are 128 from
-            ClinVec; text is the LLM's hidden size and is filled in by C4.
+            ClinVec; text is the LLM's hidden size and is filled in when
+            ``embed.py`` builds the table.
         lookup_pad_indices: Per-feature row used to pad unused slots, or
             None for a single-slot feature, which never pads
         static_feat_dims: List of dimensions for each static feature
@@ -123,31 +118,31 @@ class EpisodeData(NamedTuple):
     parallel extraction. Data is stored as numpy arrays with minimal
     padding, then inserted into pre-allocated tensors by the main process.
 
-    Section 4.2 removes the history/episode distinction the old layout
-    reserved a left region for: an episode is every record at or before its
+    There is no history/episode distinction, and no left region reserved
+    for one: an episode is every record at or before its
     ``INDEX_TIME``, the most recent ``max_episode_len_steps`` of them, and
     the series is right-aligned so that ``t = 0`` -- the index time, and the
     last record -- lands in the final column of every row.
 
     Attributes:
         row: Row in ``labels.csv``, which is the canonical episode order
-            (section 3) and therefore this episode's output row
+            and therefore this episode's output row
         val_len: Number of value-associated timesteps (before padding)
         event_len: Number of event timesteps (before padding)
         val_times: Minutes before ``INDEX_TIME``, shape (val_len,), int32
-            and <= 0 (section 4.2)
+            and <= 0
         val_numeric_indicators: Array of shape (val_len, n_numeric_feats)
         val_numeric_values: List of arrays, each shape (val_len, feat_dim)
         val_categorical_indicators: (val_len, n_categorical_feats)
         val_categorical_values: List of (val_len,) int16 category indices,
-            -1 where the value is not in ``category_map`` (section 4.3)
+            -1 where the value is not in ``category_map``
         val_ordinal_indicators: (val_len, n_ordinal_feats)
         val_ordinal_values: List of (val_len,) int16 level indices
         val_multilabel_indicators: (val_len, n_multilabel_feats)
         val_multilabel_values: List of (val_len, n_classes) multi-hot rows
         val_lookup_indicators: (val_len, n_lookup_feats)
         val_categorical_misses: (n_categorical_feats,) int64 count of
-            out-of-domain values, for the per-feature report (section 4.3)
+            out-of-domain values, for the per-feature report
         val_ordinal_misses: (n_ordinal_feats,) int64, likewise
         val_lookup_sparse: Per-feature list of ``(timestep, values, doses,
             masks)`` for the non-empty timesteps only. ``values`` is an
@@ -159,7 +154,7 @@ class EpisodeData(NamedTuple):
         event_indicators: Array of shape (event_len, n_event_feats)
         static_data: Array of shape (static_total_dim,)
         time_to_event: Minutes from ``INDEX_TIME`` to the event or to
-            censoring, from ``labels.csv`` (section 3)
+            censoring, from ``labels.csv``
         event_type: 0 censored, 1 unplanned readmission, 2 death,
             3 out-migration
         index_time: The prediction origin as a numpy datetime64, saved for

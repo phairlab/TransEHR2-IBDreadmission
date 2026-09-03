@@ -74,6 +74,10 @@ mimic4dataprep/
 # Bash scripts in root directory
 /*.sh
 
+# SLURM batch scripts
+slurm_*.sh
+SLURM/
+
 # Fold directories within data/
 data/fold*/
 

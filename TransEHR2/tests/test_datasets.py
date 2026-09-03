@@ -1,10 +1,11 @@
-"""One test per claim C2 makes (blueprint sections 4.2, 4.3, 5, 5.1).
+"""One test per claim ``MixedDataset`` and the loaders make.
 
 Every test names the reading it defends, so a future change that breaks
 one can tell whether it is breaking a decision or a bug. The inputs are
-C1's output: each test runs the extractor over a root the suite writes
-itself, then writes the two global lookup tables C4 will build, which is
-the parcel boundary -- C2 reads the format C1 produced and nothing else.
+the extractor's output: each test runs the extractor over a root the
+suite writes itself, then stands in for the two global lookup tables
+``embed.py`` builds, so what is under test reads only the on-disk format
+and nothing else.
 """
 
 import numpy as np
@@ -23,8 +24,8 @@ from extract_data import main as extract_main
 
 from .conftest import CLINVEC_DIM, CLINVEC_ROWS, collate_for_model
 
-# Deliberately not CLINVEC_DIM: section 5.1 makes the embedding width
-# per-feature, text being 4096 or 8192 beside ClinVec's 128.
+# Deliberately not CLINVEC_DIM: the embedding width is per-feature, text
+# being 4096 or 8192 beside ClinVec's 128.
 TEXT_EMBED_DIM = 5
 
 
@@ -35,7 +36,7 @@ def run(mini):
 
 
 def write_tables(mini, text_dim=TEXT_EMBED_DIM, dtype=np.float32):
-    """Write the global lookup tables of section 4.4, as C4 will.
+    """Write the global lookup tables, as ``embed.py`` will.
 
     Row *r* of each table is filled with ``r + 1``, so a gathered vector
     names the row it came from; the drug table's final row is the
@@ -71,10 +72,10 @@ def dataset(one_patient):
     return extracted(one_patient)
 
 
-# --- the one-hot expansion and the -1 sentinel (section 4.3) ---------
+# --- the one-hot expansion and the -1 sentinel ---------
 
 def test_one_hot_width_is_the_declared_category_size(dataset):
-    """Section 4.3: ``size`` is the number of categories for a
+    """``size`` is the number of categories for a
     categorical feature and the number of levels for an ordinal one, and
     that is the width __getitem__ expands an index to."""
     item = dataset[0]
@@ -86,7 +87,7 @@ def test_one_hot_width_is_the_declared_category_size(dataset):
 def test_category_index_becomes_a_one_hot_row(dataset):
     """An in-domain index k sets column k and nothing else."""
     item = dataset[0]
-    # Section 4.2 right-aligns, so the index time is the final column.
+    # The series is right-aligned, so the index time is the final column.
     # one_patient's last row is CAT 'L' (category 0) and ORD '1-24'
     # (level 1).
     assert item['val_categorical_values'][0][-1].tolist() == [1.0, 0.0]
@@ -94,7 +95,7 @@ def test_category_index_becomes_a_one_hot_row(dataset):
 
 
 def test_unobserved_index_expands_to_an_all_zero_row(dataset):
-    """Section 4.3's table, row ``(0, -1)``: not observed. The one-hot
+    """Code ``(0, -1)``: not observed. The one-hot
     row is all zero, which np.zeros storage could not have expressed --
     it would have said category 0."""
     item = dataset[0]
@@ -107,7 +108,7 @@ def test_unobserved_index_expands_to_an_all_zero_row(dataset):
 
 
 def test_out_of_domain_index_expands_to_an_all_zero_row(mini):
-    """Section 4.3's table, row ``(1, -1)``: observed, but the value is
+    """Code ``(1, -1)``: observed, but the value is
     not in ``category_map``. The indicator stays 1 -- the timestep is
     still a real observation, and the indicator loss still trains on it
     -- while the value row is all zero."""
@@ -128,7 +129,7 @@ def test_out_of_domain_index_expands_to_an_all_zero_row(mini):
 
 
 def test_the_losses_guard_still_fires_on_a_zero_row(mini):
-    """Section 4.3's reason for all of the above: ``losses.py``'s four
+    """The reason for all of the above: ``losses.py``'s four
     ``target.sum(dim=-1) > 0`` guards (``:183``, ``:222``, ``:398``,
     ``:443``) exist because softmax cannot emit an all-zero
     distribution, so cross-entropy has no defined target there. This is
@@ -159,10 +160,10 @@ def test_the_losses_guard_still_fires_on_a_zero_row(mini):
     ]
 
 
-# --- time (section 4.2) ----------------------------------------------
+# --- time ----------------------------------------------
 
 def test_minutes_become_days(dataset):
-    """Section 4.2: minutes are canonical on disk and days are what the
+    """Minutes are canonical on disk and days are what the
     model gets, 'where magnitudes are small and the THP wants a sanely
     scaled input'."""
     item = dataset[0]
@@ -177,7 +178,7 @@ def test_minutes_become_days(dataset):
 
 
 def test_the_index_time_is_the_final_column(dataset):
-    """Section 4.2: t = 0, the index time and the last record all sit in
+    """t = 0, the index time and the last record all sit in
     the final column. Nothing here normalizes that to left-aligned."""
     item = dataset[0]
     assert item['val_times'][-1] == 0.0
@@ -186,21 +187,21 @@ def test_the_index_time_is_the_final_column(dataset):
 
 
 def test_time_to_event_stays_in_minutes(dataset):
-    """A target, not a record timestamp. Section 4.2's conversion is
+    """A target, not a record timestamp. The minutes-to-days conversion is
     about model input; the target's scaling belongs with the prediction
-    head, which is section 8 item 3 and still open."""
+    head, which is not settled yet."""
     item = dataset[0]
     assert item['time_to_event'].item() == pytest.approx(1000.0)
     assert item['time_to_event'].dtype == torch.float32
     assert item['event_type'].dtype == torch.long
 
 
-# --- fold standardization (section 5) --------------------------------
+# --- fold standardization --------------------------------
 
 def test_fold_statistics_are_applied_from_the_npz(one_patient):
-    """Section 5 moves standardization out of extraction and into
+    """Standardization happens here rather than in extraction, in
     __getitem__, reading ``summary_statistics_fold{i}.npz``. The rule is
-    the pre-C1 one verbatim: subtract the mean, divide by the p95-p5
+    the earlier in-place one verbatim: subtract the mean, divide by the p95-p5
     span, over the whole row."""
     dataset = extracted(one_patient)
     stats = np.load(one_patient.extracted / 'summary_statistics_fold0.npz')
@@ -216,7 +217,7 @@ def test_fold_statistics_are_applied_from_the_npz(one_patient):
 
 def test_scaling_reaches_unobserved_timesteps(one_patient):
     """The same rule's second surprising half, preserved deliberately:
-    the pre-C1 code scaled the array in place, so an unobserved or padded
+    the earlier code scaled the array in place, so an unobserved or padded
     position became ``-mean / span`` rather than staying at zero."""
     dataset = extracted(one_patient)
     item = dataset[0]
@@ -293,14 +294,14 @@ def test_a_missing_fold_npz_is_refused(one_patient):
 # --- the lookup family's gather (sections 4.3, 4.4, 5.1) -------------
 
 def test_text_gathers_the_table_row_of_each_timestep_that_has_one(dataset):
-    """Section 4.4: ``text_values`` is an int32 row index into the global
+    """``text_values`` is an int32 row index into the global
     table, and __getitem__ is the only consumer of the CSR arrays. The
     item carries one entry per timestep that holds a record rather than
-    the whole timestep axis (section 5.1) -- a single-slot feature's
+    the whole timestep axis -- a single-slot feature's
     entry is (D,), its weight being 1 by definition, so there is nothing
     to slot."""
     item = dataset[0]
-    # TXT is lookup feature 0; DRG follows it (section 4.3's ordering,
+    # TXT is lookup feature 0; DRG follows it (the family's order is
     # ``TEXT_FEATS + DRUG_FEATS``).
     text = item['val_lookup_sparse'][0]
     # one_patient carries the same note at two timesteps, interned once,
@@ -313,7 +314,7 @@ def test_text_gathers_the_table_row_of_each_timestep_that_has_one(dataset):
     # form means it is simply not named.
     assert 2 not in text['timestep_index'].tolist()
     # One feature axis over the whole family, whatever the on-disk
-    # split by type (section 5.1). A single-slot feature carries no
+    # split by type. A single-slot feature carries no
     # dose or mask array: its weight is 1 by definition.
     assert item['val_lookup_indicators'].shape == (4, 2)
     assert text['doses'] is None
@@ -343,7 +344,7 @@ def test_drugs_gather_slotted_and_unpooled(dataset):
 
 
 def test_an_unused_slot_gathers_the_all_zero_pad_row(dataset):
-    """Section 4.4 pads with V, the final row of a (V+1, D) table, and
+    """Unused slots pad with V, the final row of a (V+1, D) table, and
     that row is all zero -- so a padded slot contributes nothing whether
     or not the mask is applied."""
     item = dataset[0]
@@ -351,7 +352,7 @@ def test_an_unused_slot_gathers_the_all_zero_pad_row(dataset):
 
 
 def test_the_gather_casts_to_float32(one_patient):
-    """Section 5.1: 'cast at the gather, not mid-model'. torch.cat wants
+    """Cast at the gather, not mid-model. torch.cat wants
     one dtype across its inputs, and a mismatch introduced later
     surfaces deep in the encoder instead of at the boundary."""
     dataset = extracted(one_patient, dtype=np.float64)
@@ -362,8 +363,8 @@ def test_the_gather_casts_to_float32(one_patient):
 
 
 def test_a_missing_table_is_refused(one_patient):
-    """Both tables are C4's. A text feature has no declared width until
-    then, so there is no shape to fall back to, and dropping the feature
+    """Both tables are built by ``embed.py``. A text feature has no
+    declared width until then, so there is no shape to fall back to, and dropping the feature
     would train a USE_TEXT model on no text at all."""
     one_patient.add_fold('fold0', train=[0])
     assert run(one_patient) == 0
@@ -372,7 +373,7 @@ def test_a_missing_table_is_refused(one_patient):
 
 
 def test_a_stale_text_table_is_refused(one_patient):
-    """Extraction re-interns the strings on every run (section 4.4), so
+    """Extraction re-interns the strings on every run, so
     a table built against an earlier extraction indexes a vocabulary
     that no longer exists. The row count is what ties the two."""
     one_patient.add_fold('fold0', train=[0])
@@ -385,7 +386,7 @@ def test_a_stale_text_table_is_refused(one_patient):
 
 
 def test_a_drug_table_must_have_the_pad_row(one_patient):
-    """Section 4.4: the table is (V+1, D) where V is the vocabulary's row
+    """The table is (V+1, D) where V is the vocabulary's row
     count, not the cohort's. A table of exactly V rows would leave the
     pad index colliding with a real drug."""
     one_patient.add_fold('fold0', train=[0])
@@ -402,7 +403,7 @@ def test_a_drug_table_must_have_the_pad_row(one_patient):
 def test_the_batch_collates_with_the_expected_shapes(dataset):
     """The model's input format is unchanged by any of this: one
     indicator tensor per family, a per-feature list of values, and the
-    stacked (B, T, n_feats, D) text tensor section 5.1 replaces in C3."""
+    stacked (B, T, n_feats, D) text tensor this replaced."""
     batch = collate_for_model([dataset[0], dataset[0]])
     val = batch['val_data']
 
@@ -448,7 +449,7 @@ def test_every_collated_value_is_float32(dataset):
 
 
 def test_static_data_is_absent_from_the_item_and_the_batch(dataset):
-    """Section A.3 empties ``STATIC_FEATS`` and section 4.4 omits the
+    """``STATIC_FEATS`` is empty for this study, so nothing writes the
     zero-width file, so ``datasets.py:190``'s unconditional index had
     nothing to index. ``models.py:339`` and ``:521`` both already read
     the key defensively, so absence is the case they handle -- a
@@ -466,7 +467,7 @@ def test_the_episode_id_reaches_the_batch(dataset):
     assert batch['episode_id'].tolist() == [[1001, 0]]
 
 
-# --- the loaders (sections 2, 3) -------------------------------------
+# --- the loaders -------------------------------------
 
 @pytest.fixture
 def cohort(mini):
@@ -488,7 +489,7 @@ def cohort(mini):
 
 
 def test_prepare_dataloaders_partitions_by_row_index(cohort):
-    """Section 2's second decision: a fold is row indices into one
+    """A fold is row indices into one
     cohort-wide set of arrays, so the three partitions are Subsets of
     one dataset rather than three directories."""
     train, val, test = prepare_dataloaders(
@@ -511,7 +512,7 @@ def test_idx_is_the_cohort_row(cohort):
 
 
 def test_a_fold_without_val_rows_yields_two_loaders(mini):
-    """Section 3 carves val out of train, but a fold written without it
+    """A fold normally carves val out of train, but one written without it
     is a two-partition fold rather than an error."""
     mini.add_patient(
         1001,
@@ -577,7 +578,7 @@ def test_the_dataset_pickles_without_copying_its_arrays(dataset):
     """The reason ``LazyArray`` exists: a ``np.memmap`` pickles *by
     value*, and the loaders start their workers with ``spawn``, so open
     memmaps in the dataset would give every worker a private copy of
-    every array. Section 4.5 puts the cohort at ~75 GB."""
+    every array, and the cohort runs to tens of gigabytes."""
     blob = pickle.dumps(dataset, protocol=pickle.HIGHEST_PROTOCOL)
     # A path and a little metadata per array. An open memmap would put
     # every byte of every array in here instead.
@@ -608,11 +609,11 @@ def test_a_lazy_array_behaves_like_the_array(tmp_path):
     assert lazy[1].tolist() == [2, 3]
 
 
-# --- the model's input format (section 5) ----------------------------
+# --- the model's input format ----------------------------
 
 def test_a_batch_is_accepted_by_the_generator_unchanged(dataset):
-    """Section 5's claim about all of the above: "the model's input
-    format is unchanged by all of this, and neither is losses.py".
+    """The claim behind all of the above: the model's input format is
+    unchanged by any of it, and so is losses.py.
 
     The oracle is the real encoder rather than an assertion about
     shapes: a collated batch goes through ``generate_record_masks`` and

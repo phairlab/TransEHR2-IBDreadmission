@@ -1,33 +1,33 @@
-"""``manifest.csv`` lookup and checksum verification (invariant 9).
+"""``manifest.csv`` lookup and checksum verification.
 
-Section 4.4's global lookup tables are *order-sensitive*: a row of
+The global lookup tables are *order-sensitive*: a row of
 ``text_embeddings.npy`` is meaningful only as the embedding of the string
 at that position of ``text_strings.pkl``, and a row of
-``drug_embeddings.npy`` only as the ClinVec vector Stage A indexed
-against. Neither shape nor dtype can catch a table that copied wrong, so
-invariant 9 asks for the checksum to be verified **at use** rather than
-only at download, and this module is what the loader and ``embed.py``
-share to do it.
+``drug_embeddings.npy`` only as the ClinVec vector the drug preparation
+step indexed against. Neither shape nor dtype can catch a table that
+copied wrong, so the checksum is verified **when the table is opened**
+rather than only when it is fetched, and this module is what the loader
+and ``embed.py`` share to do it.
 
-Readings this module commits to
--------------------------------
+Design decisions this module commits to
+---------------------------------------
 
 * **``update_manifest.sh``'s rule holds here too: a row is updated, never
   added.** The shell script refuses to add entries so that data which
   cannot legally be shared is not registered for distribution by
   accident; a Python path into the same file that added rows freely would
-  walk straight around that. ``record_checksum`` therefore raises when
-  the path is not already a row, and the three C4 tables were added to
+  walk straight around that. ``record_checksum`` therefore declines a
+  path that is not already a row, and the lookup-table rows were added to
   ``manifest.csv`` by hand.
 * **``DATA_ROOT`` is resolved the way the shell scripts resolve it** --
   ``SHARED_DATA_ROOT`` if set, else ``<project root>/../data`` -- because
   the manifest's paths are relative to it and a second convention would
   make the same file mean two things.
 * **A table outside ``DATA_ROOT``, or inside it but unregistered, is
-  reported and not verified.** Fixtures and tmp-dir cohorts are not
-  distributed artifacts and have no manifest row; refusing them would
-  make every test carry a checksum of a file it just wrote. The report
-  goes to stdout so that an unregistered table in a *real* run is
+  reported and not verified.** Fixtures and temporary-directory cohorts
+  are not distributed artifacts and have no manifest row; refusing them
+  would make every test carry a checksum of a file it just wrote. The
+  report goes to stdout so that an unregistered table in a *real* run is
   visible rather than silently unchecked.
 """
 
@@ -86,7 +86,7 @@ def sha256_of(path: str) -> str:
     """Stream ``path`` through SHA-256.
 
     Streamed rather than read whole: ``text_embeddings.npy`` is tens of
-    gigabytes at the study's dedup ratio (section 4.5).
+    gigabytes once the cohort's unique strings are embedded.
     """
     digest = hashlib.sha256()
     with open(path, 'rb') as f:
@@ -96,7 +96,7 @@ def sha256_of(path: str) -> str:
 
 
 def verify(path: str) -> None:
-    """Check ``path`` against its ``manifest.csv`` row (invariant 9).
+    """Check ``path`` against its ``manifest.csv`` row.
 
     Raises:
         ValueError: The file is registered and its checksum disagrees.
@@ -119,12 +119,13 @@ def verify(path: str) -> None:
     actual = sha256_of(path)
     if actual != expected:
         raise ValueError(
-            f"{key} does not match {MANIFEST_PATH} (invariant 9).\n"
+            f"{key} does not match its checksum in "
+            f"{MANIFEST_PATH}.\n"
             f"  expected: {expected}\n"
             f"  actual:   {actual}\n"
-            f"Section 4.4's lookup tables are order-sensitive, so a "
-            f"table that copied wrong gathers the wrong rows without "
-            f"changing shape. Re-fetch it with setup_data.sh, or rebuild "
+            f"The lookup tables are order-sensitive, so a table that "
+            f"copied wrong gathers the wrong rows without changing "
+            f"shape. Re-fetch it with setup_data.sh, or rebuild "
             f"it with embed.py and re-run update_manifest.sh."
         )
 
@@ -145,7 +146,7 @@ def record_checksum(path: str) -> Optional[str]:
     if not os.path.exists(MANIFEST_PATH):
         raise FileNotFoundError(
             f"{MANIFEST_PATH} not found, but {key} is under DATA_ROOT "
-            f"and invariant 9 verifies it against the manifest at use."
+            f"and is verified against the manifest when it is opened."
         )
     with open(MANIFEST_PATH, newline='') as f:
         reader = csv.DictReader(f)

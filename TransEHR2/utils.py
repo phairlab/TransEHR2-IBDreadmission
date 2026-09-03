@@ -262,7 +262,7 @@ def _densify_lookup_entry(lookup: Dict[str, Any]) -> Dict[str, Any]:
             entries = block[source]
             if entries is None:
                 # A single-slot feature's weight is 1 by definition, so
-                # it has no dose or mask tensor to build (section 4.3).
+                # it has no dose or mask tensor to build.
                 lookup[key].append(None)
                 continue
             # The trailing dimensions come from the entries themselves --
@@ -287,8 +287,8 @@ def densify_lookup_slots(batch: MixedTensorDataset) -> MixedTensorDataset:
     episode index, timestep index, and the entries -- rather than the
     dense ``(batch, ts_len, ...)`` tensors the model consumes. Records in
     the family are rare against the timestep axis, so the dense form is
-    almost entirely zeros: about 4.8 GB per batch at section 4.5's
-    ``T = 500`` and a batch of 200, carrying about 7 MB of content.
+    almost entirely zeros: about 4.8 GB per batch at ``T = 500`` and a
+    batch of 200, carrying about 7 MB of content.
 
     This runs inside ``move_batch_to_device``, so it builds the dense
     tensors wherever the batch has just landed. VRAM is unchanged --
@@ -387,12 +387,12 @@ def pool_lookup_slots(
     """Reduce one lookup feature's slots to a single vector per timestep.
 
     The one drug-specific step in the family, and it sits *before* the family rather than
-    inside it (section 5.1): dose-scale, zero the unused slots, sum, and divide by the mask
+    inside it: dose-scale, zero the unused slots, sum, and divide by the mask
     sum. Text passes through as a no-op -- one slot, weight 1 -- so this is a single
     parameterized step and not a fork.
 
     Doing it here, in the forward pass, rather than in ``__getitem__`` is what leaves a
-    gradient on an individual slot and therefore on an individual DIN (section 4.3). Pooling
+    gradient on an individual slot and therefore on an individual DIN. Pooling
     earlier destroys that attribution irrecoverably.
 
     Args:
@@ -411,8 +411,8 @@ def pool_lookup_slots(
         # One slot, weight 1: the values are already what the encoder consumes. Returned
         # rather than copied, so a single-slot feature's pooled tensor *is* its slot tensor;
         # the ELECTRA forward's in-place substitution of generated values therefore reaches
-        # both, which is the behaviour the stacked text tensor had before section 5.1 and
-        # nothing in a forward pass reads the slots again after it.
+        # both, which is the behaviour the stacked text tensor had before, and nothing in a
+        # forward pass reads the slots again after it.
         return slot_values
     weights = (doses * masks).unsqueeze(-1)
     pooled = (slot_values * weights).sum(dim=-2)
@@ -456,7 +456,7 @@ def combine_value_and_lookup_data(
     ) -> Tuple[Tensor, Tensor]:
         """Concatenate the lookup family's embeddings with the value-associated data.
 
-        Text and drugs are one family (section 5.1): a drug feature is a lookup feature with
+        Text and drugs are one family: a drug feature is a lookup feature with
         dose-weighted slots, a text feature is the same thing with one unweighted slot, and both
         arrive here already reduced to one `(batch_size, max_timeseries_length, D_f)` tensor per
         feature. The per-feature list is what lets `D_f` differ between features -- text is 4096 or
@@ -489,7 +489,7 @@ def combine_value_and_lookup_data(
         # Concatenate value- and lookup-associated indicators
         indicators = torch.cat([value_assoc_indicators, lookup_assoc_indicators], dim=-1)
         # One concatenation, not two: `cat(embeds)` followed by `cat([values, embeds_cat])` would
-        # materialize an intermediate the size of the whole embedded block (section 5.1).
+        # materialize an intermediate the size of the whole embedded block.
         values = torch.cat([value_assoc_values, *lookup_embeddings], dim=-1)
 
         return indicators, values
@@ -535,7 +535,7 @@ def generate_record_masks(
             },
             'lookup': {
                 'indicators': tensor(batch_size, max_ts_len, n_lookup_feats)  # Mask indicators for lookup features
-                'embedded_values': [  # List of lookup features; widths are per-feature (section 5.1)
+                'embedded_values': [  # List of lookup features; widths are per-feature
                     tensor(batch_size, max_ts_len, D_1),  # Mask indicators for Feature 1 components
                     tensor(batch_size, max_ts_len, D_2),  # Mask indicators for Feature 2 components
                     ...  # More features
@@ -571,8 +571,8 @@ def generate_record_masks(
             # Initialize indicator mask tensor
             indicator_mask = torch.zeros_like(feature_data['indicators'], device=batch_device)
             if feature_type == 'lookup':
-                # Lookup features carry pre-computed embeddings whose width is per-feature
-                # (section 5.1), so each mask is sized from its own feature's tensor. The masks
+                # Lookup features carry pre-computed embeddings whose width is per-feature,
+                # so each mask is sized from its own feature's tensor. The masks
                 # are drawn before the model pools, so the width comes from the slot values,
                 # whose last dimension is D_f whether or not there is a slot axis in front of it.
                 val_masks[feature_type] = {

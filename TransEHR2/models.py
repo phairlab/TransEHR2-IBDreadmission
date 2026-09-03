@@ -227,7 +227,7 @@ class ELECTRA(torch.nn.Module):
 
             elif feat_type == 'lookup':
                 # Replace masked lookup embeddings with generator predictions in-place.
-                # Per feature, since the widths are ragged (section 5.1).
+                # Per feature, since the widths are ragged.
                 for i, pred_embeddings in enumerate(gen_output[feat_type]['embedded_values']):
                     # value_mask shape: (batch_size, max_ts_len, D_f)
                     value_mask = record_masks[feat_type]['embedded_values'][i].bool()
@@ -333,8 +333,8 @@ class ELECTRA(torch.nn.Module):
                 }
             
         value_data = batch['val_data']  # Extract the ValueAssociatedTensorData from the batch
-        # Reduce the lookup family's slots to one vector per feature per timestep, once and here
-        # (section 5.1). It has to happen before the targets are extracted, because the pooled
+        # Reduce the lookup family's slots to one vector per feature per timestep, once and here.
+        # It has to happen before the targets are extracted, because the pooled
         # vector is what the generator reconstructs, and before the generator's predictions
         # replace the masked positions, because that substitution is the discriminator's input.
         if 'lookup' in value_data:
@@ -512,7 +512,7 @@ class MixedClassifier(torch.nn.Module):
                 # is what makes per-DIN attribution possible (sections 4.3, 5.1).
                 lookup_inds = val_data['lookup']['indicators']
                 inds_to_concat.append(lookup_inds)
-                # A per-feature list, so extend rather than append (section 5.1).
+                # A per-feature list, so extend rather than append.
                 vals_to_concat.extend(resolve_lookup_embeddings(val_data['lookup']))
         
             if inds_to_concat and vals_to_concat:

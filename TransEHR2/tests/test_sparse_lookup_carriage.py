@@ -4,9 +4,9 @@
 ``(T, D)`` or ``(T, S, D)`` extent before collation, and every byte of
 that crossed the worker boundary and one host-side copy before reaching
 the device. Records in the family are rare against the timestep axis --
-section 4.5 measures ~1.2 KB of text and ~36 KB of drugs per episode
+about 1.2 KB of text and 36 KB of drugs per episode
 against ~1.1 KB per timestep of everything else -- so the dense form is
-almost entirely zeros. At section 4.5's ``T = 500`` and a batch of 200 it
+almost entirely zeros. At ``T = 500`` and a batch of 200 it
 is about 4.8 GB per batch carrying about 7 MB of content.
 
 The item now carries the CSR slice itself and ``densify_lookup_slots``

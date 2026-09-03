@@ -1,8 +1,13 @@
-"""Section 5.1's regression gate, and one test per claim C3 makes.
+"""The regression gate for the lookup family, and one test per claim it
+makes.
 
-The gate is the hard condition the section states: **with
-``DRUG_FEATS: []``, the refactored model must produce outputs
-bitwise-identical to the current one on a fixed batch and seed.**
+Text and drugs are one embedded-feature family: a drug feature is a
+lookup feature with dose-weighted slots, a text feature the same thing
+with one unweighted slot. That generalization edited the working text
+path rather than adding a parallel drug one, so the gate is a hard
+condition: **with ``DRUG_FEATS: []``, the generalized model must produce
+outputs bitwise-identical to the text-only one it replaced, on a fixed
+batch and seed.**
 ``fixtures/lookup_family_baseline.npz`` holds those outputs, captured
 from the tree as it stood before the refactor, and the ``gate`` fixture
 below rebuilds their inputs deterministically -- the fixture root, the
@@ -39,7 +44,7 @@ from .conftest import MiniRoot, collate_for_model
 
 BASELINE = Path(__file__).parent / 'fixtures' / 'lookup_family_baseline.npz'
 
-# Deliberately not ClinVec's 128: section 5.1 makes the embedding width
+# Deliberately not ClinVec's 128: the embedding width
 # per-feature precisely because they differ.
 TEXT_EMBED_DIM = 5
 D_MODEL = 16
@@ -77,7 +82,7 @@ def build_root(tmp_path):
 
 
 def extract_and_load(mini):
-    """Extract, write C4's lookup tables, and load the result."""
+    """Extract, stand in for the global lookup tables, and load."""
     from .conftest import CLINVEC_DIM, CLINVEC_ROWS
 
     config_path = mini.finish()
@@ -227,17 +232,17 @@ def gate(tmp_path):
     }
 
 
-# --- the regression gate (section 5.1) -------------------------------
+# --- the regression gate -------------------------------
 
 def test_the_refactored_path_reproduces_the_baseline_bitwise(gate, tmp_path):
-    """Section 5.1's hard condition. Every tensor the family's rename
-    and un-stacking could have moved -- the record masks, the
+    """The hard condition. Every tensor the family's rename and
+    un-stacking could have moved -- the record masks, the
     generator's and discriminator's outputs, the masked targets, both
     pretraining losses and the finetuning logits -- against the same
     quantity from the pre-refactor tree.
 
-    ``torch.equal``, not ``allclose``: the section asks for bitwise, and
-    the two formulations are meant to be the same arithmetic in the same
+    ``torch.equal``, not ``allclose``: bitwise is the condition, and the
+    two formulations are meant to be the same arithmetic in the same
     order. A concatenation of per-feature tensors reproduces a stacked
     tensor's ``flatten(start_dim=2)`` exactly, and an elementwise
     multiply per feature reproduces one over the stack.
@@ -295,11 +300,11 @@ def test_the_gate_masks_a_text_record(gate):
     assert torch.norm(targets, p=2, dim=-1).min() > 1e-8
 
 
-# --- the shape of the generalization (section 5.1) -------------------
+# --- the shape of the generalization -------------------
 
 def test_the_family_reaches_the_model_as_a_per_feature_list(gate):
-    """Section 5.1: 'replace the stacked tensor with a list of
-    (B, T, D_f), one per lookup feature'. A stacked
+    """The stacked tensor is replaced by a list of (B, T, D_f), one per
+    lookup feature. A stacked
     ``(B, T, n_feats, D)`` forces one shared width, which is the one
     thing that genuinely blocks the generalization."""
     from TransEHR2.utils import resolve_lookup_embeddings
@@ -316,8 +321,8 @@ def test_ragged_widths_reach_the_encoder(gate):
     widths concatenate into one encoder input, which
     ``torch.stack(..., dim=2)`` could not have represented at all.
 
-    The second feature is synthesised rather than extracted -- C4 builds
-    the drug table, and this is about the model path, not the store.
+    The second feature is synthesised rather than extracted: this is
+    about the model path, not the store.
     """
     from TransEHR2.utils import combine_value_and_lookup_data
 
@@ -346,9 +351,9 @@ def test_ragged_widths_reach_the_encoder(gate):
 
 
 def test_one_head_per_lookup_feature_at_its_own_width(gate):
-    """Section 5.1's table: ``ModuleList([Linear(d_model, text_embed_dim)]
-    * n_text)`` becomes one ``Linear(d_model, D_f)`` per lookup feature,
-    ``D_f`` per-feature."""
+    """``ModuleList([Linear(d_model, text_embed_dim)] * n_text)`` becomes
+    one ``Linear(d_model, D_f)`` per lookup feature, ``D_f``
+    per-feature."""
     generator = MaskedTokenGenerator(
         encoder=value_encoder(gate['dims']),
         d_model=D_MODEL,
@@ -364,7 +369,7 @@ def test_one_head_per_lookup_feature_at_its_own_width(gate):
     assert generator.predict_lookup_feats
 
 
-# --- the drug feature joins the family (sections 4.3, 5.1) -----------
+# --- the drug feature joins the family -----------
 
 @pytest.fixture
 def drug_gate(tmp_path):
@@ -434,8 +439,8 @@ def test_both_members_reach_the_encoder_at_their_own_widths(drug_gate):
 
 
 def test_the_pool_is_the_dose_weighted_mean(drug_gate):
-    """Section 5.1: 'dose-scale by ``drug_doses``, zero by
-    ``drug_masks``, sum, divide by the mask sum'.
+    """The pool: dose-scale by ``drug_doses``, zero by
+    ``drug_masks``, sum, divide by the mask sum.
 
     Patient 1001's first timestep dispenses ClinVec rows 2 and 3 at
     doses 1.0 and 0.5; the table fills row r with r + 1, so the slots
@@ -456,7 +461,7 @@ def test_the_pool_is_the_dose_weighted_mean(drug_gate):
 
 
 def test_the_pool_divides_by_a_clamped_mask_sum(drug_gate):
-    """Section 5.1's first numerical detail: a timestep reaching the
+    """The first numerical detail: a timestep reaching the
     pool with no unmasked slot would otherwise produce 0/0. Patient
     1001's later timesteps carry no dispensation at all, so they are
     that case."""
@@ -472,7 +477,7 @@ def test_the_pool_divides_by_a_clamped_mask_sum(drug_gate):
 
 
 def test_a_zero_dose_timestep_pools_to_the_zero_vector(drug_gate):
-    """Section 5.1's second: a timestep whose real slots all carry
+    """The second: a timestep whose real slots all carry
     ``REL_DAILY_QTY == 0`` pools to zero even though its indicator is 1,
     and ``losses.py``'s eps guard then drops it from the reconstruction
     loss. Recorded here as expected behaviour, not a bug."""
@@ -487,7 +492,7 @@ def test_a_zero_dose_timestep_pools_to_the_zero_vector(drug_gate):
 
 
 def test_the_values_are_concatenated_in_a_single_cat(drug_gate):
-    """Section 5.1's 'concatenate once, not twice': the nested form
+    """Concatenate once, not twice: the nested form
     materializes an intermediate the size of the whole embedded block.
     The oracle is the arithmetic, checked against the nested form."""
     from TransEHR2.utils import (
@@ -510,9 +515,9 @@ def test_the_values_are_concatenated_in_a_single_cat(drug_gate):
 
 
 def test_a_gradient_reaches_an_individual_drug_slot(drug_gate):
-    """The XAI requirement of section 4.3, tested directly: 'the
-    dose-weighted mean is applied at the encoder input, which is what
-    preserves per-slot gradients'. A gradient that stops at the pooled
+    """The attribution requirement, tested directly: the dose-weighted
+    mean is applied at the encoder input, which is what preserves
+    per-slot gradients. A gradient that stops at the pooled
     vector cannot attribute a prediction to one DIN.
 
     The two dispensed slots must receive gradient and the padded third
@@ -536,7 +541,7 @@ def test_a_gradient_reaches_an_individual_drug_slot(drug_gate):
 
 
 def test_the_family_trains_end_to_end_with_a_drug_feature(drug_gate):
-    """Section 9's second done-when: forward and backward complete on a
+    """Forward and backward complete on a
     fixture batch once the drug feature is in the family."""
     out = drug_gate['electra'](
         drug_gate['batch'], drug_gate['record_masks'], device='cpu',
@@ -564,8 +569,8 @@ def test_the_family_trains_end_to_end_with_a_drug_feature(drug_gate):
 
 
 def test_the_generator_reconstructs_the_pooled_drug_vector(drug_gate):
-    """Section 5.1: 'pretraining reconstructs the pooled 128-dim drug
-    vector by cosine similarity -- the same treatment text gets'. Not
+    """Pretraining reconstructs the pooled 128-dim drug vector by cosine
+    similarity -- the same treatment text gets. Not
     the 30 slots individually: the pooled vector is what the encoder
     consumes, and per-slot reconstruction would force an ordering on an
     unordered set."""

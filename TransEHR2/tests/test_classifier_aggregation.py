@@ -4,9 +4,9 @@ Padding embeddings are zeroed before aggregation, so a plain `torch.max` over
 the time axis returns 0 for any channel whose observed values are all negative
 -- a value no record produced, and one that depends on how much padding the
 episode happens to carry. Under this fork's layout that is not a corner case:
-series are right-aligned at the prediction origin and zero-padded on the left
-(blueprint 4.2), so a short episode inside `MAX_EPISODE_LEN_STEPS: 500` is
-mostly padding.
+series are right-aligned at the prediction origin and zero-padded on the
+left, so a short episode inside `MAX_EPISODE_LEN_STEPS: 500` is mostly
+padding.
 
 `aggr` defaults to `'max'` in `MixedClassifier.__init__` and is read straight
 from `PREDICTOR_AGGREGATION_METHOD` with no validation, so this path is one

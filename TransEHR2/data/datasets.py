@@ -1,7 +1,7 @@
-"""One episode as the model sees it (sections 4.2, 4.3, 5, 5.1).
+"""One episode as the model sees it.
 
 The extractor writes a cohort-wide, compact, integer-coded image of the
-data (section 4.4); this module turns one row of it into the tensors the
+data; this module turns one row of it into the tensors the
 model already consumes. Everything that is cheap per episode and
 expensive per cohort happens here rather than on disk: the one-hot
 expansion, the embedding gather, the fold's standardization and the
@@ -10,55 +10,58 @@ minutes-to-days conversion.
 Readings this module commits to
 -------------------------------
 
-* **The series stays right-aligned.** Section 4.2 puts ``t = 0`` -- the
-  index time, and the last record -- in the final column, with padding on
-  the left, and C1 verified that both encoders are indifferent to the
-  alignment: ``TemporalPositionEncoding`` is a function of the timestamp
-  value and never of the array index, and the aggregation in ``models.py``
+* **The series stays right-aligned.** ``t = 0`` -- the index time, and
+  the last record -- is in the final column, with padding on the left,
+  and both encoders were checked to be indifferent to the alignment:
+  ``TemporalPositionEncoding`` is a function of the timestamp value and
+  never of the array index, and the aggregation in ``models.py``
   is a masked max or mean over the time axis. Nothing here normalizes it
   back to left-aligned.
-* **Minutes become days for the record timestamps only.** Section 4.2
-  converts ``val_times`` and ``event_times`` here, where "magnitudes are
-  small and the THP wants a sanely-scaled input". ``time_to_event`` is a
-  *target* and stays in the minutes ``labels.csv`` records (section 3):
-  its scaling belongs with the prediction head, which is section 8 item 3
-  and still open, and rescaling it here would silently change the loss.
+* **Minutes become days for the record timestamps only.** ``val_times``
+  and ``event_times`` are converted here, where magnitudes are small and
+  the Hawkes process wants a sanely scaled input. Times are stored as
+  integer minutes on disk precisely so this conversion is the only place
+  resolution is spent. ``time_to_event`` is a *target* and stays in the
+  minutes ``labels.csv`` records: its scaling belongs with the prediction
+  head, and rescaling it here would silently change the loss.
 * **``(indicator, index)`` is a two-bit code, and both ``-1`` cases
-  expand to an all-zero one-hot row** (section 4.3). ``(0, -1)`` is not
+  expand to an all-zero one-hot row**. ``(0, -1)`` is not
   observed, ``(1, -1)`` is observed but out of domain, ``(1, k)`` is
   category *k*. The zero row is a state a one-hot can express and an index
   cannot, and it is what keeps the four ``target.sum(dim=-1) > 0`` guards
   in ``losses.py`` (``:183``, ``:222``, ``:398``, ``:443``) firing with
-  that file untouched -- worth real money against C3's regression gate.
+  that file untouched. Those guards exist because softmax cannot emit an
+  all-zero distribution, so cross-entropy has no defined target there.
   The row is a *representation*, not a discard: the timestep still carries
   its indicator bit, so the indicator loss still trains on it.
-* **Standardization reproduces the pre-C1 rule exactly**, including its
-  two surprising parts: a feature whose p5 equals its p95 is zeroed
-  outright, and the scaling is applied to the whole row rather than to the
-  observed timesteps alone, so an unobserved or padded position becomes
-  ``-mean / (p95 - p5)`` rather than staying at zero. Both are what
-  ``standardize_feats`` did in place at extraction time before section 5
-  moved it here, and the subtract-then-divide order is preserved so the
-  result is bitwise what it was.
-* **Nothing is pooled here** (sections 4.3, 5.1). A drug timestep leaves
+* **Standardization reproduces the earlier in-place rule exactly**,
+  including its two surprising parts: a feature whose p5 equals its p95
+  is zeroed outright, and the scaling is applied to the whole row
+  rather than to the observed timesteps alone, so an unobserved or
+  padded position becomes ``-mean / (p95 - p5)`` rather than staying at
+  zero. Both are what
+  ``standardize_feats`` did in place at extraction time before the move
+  here, and the subtract-then-divide order is preserved so the result is
+  bitwise what it was.
+* **Nothing is pooled here**. A drug timestep leaves
   as ``(T, 30, D)`` beside its doses and masks; the encoder input is where
   the dose-weighted mean happens, which is what leaves a gradient on an
   individual slot and therefore on an individual DIN. Pooling earlier
   destroys that attribution irrecoverably.
-* **Cast at the gather** (section 5.1). Every lookup family gather is
+* **Cast at the gather**. Every lookup family gather is
   ``float32``, whatever the table's own dtype, so the ``torch.cat`` in the
   encoder sees one dtype. A mismatch introduced later surfaces deep in the
   encoder instead of at the boundary where it originated.
 * **A lookup table is per *type*, and its own shape is authoritative.**
-  Section 4.4 names two files, ``text_embeddings.npy`` and
+  There are two files, ``text_embeddings.npy`` and
   ``drug_embeddings.npy``, not one per feature, so features of a type
   share a table and therefore a width. That width is read from the table
   rather than from ``metadata.pkl``: the text entry of
-  ``lookup_table_dims`` is ``None`` until C4 builds the table, and section
-  5.1 makes the dimension per-feature in any case.
-* **``static_data = None`` is a real case, not an accident** (section
-  A.3). ``STATIC_FEATS`` is empty, section 4.4 omits the zero-width file,
-  and the key is omitted from the item rather than carried as a
+  ``lookup_table_dims`` is ``None`` until ``embed.py`` builds the table,
+  and the dimension is per-feature in any case.
+* **``static_data = None`` is a real case, not an accident.**
+  ``STATIC_FEATS`` is empty for this study, the zero-width file is not
+  written, and the key is omitted from the item rather than carried as a
   ``(batch, 0)`` tensor -- ``models.py:339`` and ``:521`` both already
   treat its absence correctly.
 
@@ -67,21 +70,21 @@ Why the arrays are opened per process
 
 ``MixedDataset`` holds ``LazyArray`` path descriptors rather than open
 memmaps, and each process opens its own read-only mapping on first touch.
-This is the one piece of machinery here that is not asked for by the
-blueprint, so the reasoning is recorded in full -- if throughput or memory
-behaviour ever looks wrong, start here.
+This is the least obvious piece of machinery here, so the reasoning is
+recorded in full -- if throughput or memory behaviour ever looks wrong,
+start here.
 
-Measured 2026 August 25, C2: **a ``np.memmap`` pickles by value.** A
+Measured: **a ``np.memmap`` pickles by value.** A
 32 MB array produces a 32 MB pickle, and inside a DataLoader worker
 started with ``multiprocessing_context='spawn'`` the array is a ``memmap``
 in name only -- ``filename`` is ``None`` and its base is ``bytes``, i.e.
 the whole thing was copied into the worker's private memory. Under
 ``fork`` it stays a genuine file mapping. ``prepare_dataloaders`` asks for
 ``spawn``, so passing open memmaps to the dataset would give every worker
-a private copy of every array it holds; section 4.5 puts the cohort at
-~75 GB, and section 2's decision to extract once for the whole cohort
-means one dataset now spans all five folds' worth of rows rather than one
-partition's. A path descriptor pickles to a few hundred bytes, and the
+a private copy of every array it holds. The cohort runs to tens of
+gigabytes, and extracting once for the whole cohort means one dataset
+spans every fold's rows rather than one partition's. A path descriptor
+pickles to a few hundred bytes, and the
 mapping each worker then opens is backed by the shared page cache, which
 is what "workers share one read-only mapping" has to mean to be true.
 
@@ -92,8 +95,7 @@ dataset per partition instead of one per cohort bounds the damage to a
 partition's rows without removing it, at the cost of three memmap sets
 over the same files. Nothing in the distributed path depends on this
 choice -- ``TextBalancedDistributedSampler`` reads only ``len(dataset)``,
-so per-rank sample counts are unchanged, and section 5.1's
-distributed-training subsection is untouched.
+so per-rank sample counts are unchanged.
 """
 
 import numpy as np
@@ -104,7 +106,7 @@ from torch.utils.data import Dataset
 from typing import Dict, List, Optional
 
 
-# Section 4.2 stores integer minutes; the model is handed days.
+# Times are stored as integer minutes; the model is handed days.
 MINUTES_PER_DAY = 1440.0
 
 
@@ -152,10 +154,10 @@ class LazyArray:
 
 
 class MixedDataset(Dataset):
-    """A cohort of episodes, in section 4.4's on-disk representation.
+    """A cohort of episodes, in the extractor's on-disk representation.
 
     Row order is ``labels.csv``'s and spans the whole cohort; a fold is a
-    set of row indices into it (section 3), applied by a ``Subset`` around
+    set of row indices into it, applied by a ``Subset`` around
     this dataset rather than by the dataset itself. Every array may be a
     ``LazyArray``, an ``np.memmap`` or an ordinary ``ndarray``.
 
@@ -177,8 +179,8 @@ class MixedDataset(Dataset):
             one-hot width ``__getitem__`` expands to.
         ordinal_feat_dims: Per-feature number of levels, likewise.
         lookup_indicators: ``{feature type: (n, T, n_feats_of_type)}``.
-            Split by type because section 4.4 keeps ``text_*`` and
-            ``drug_*`` distinct on disk for the webapp's benefit.
+            Split by type because ``text_*`` and ``drug_*`` are kept
+            distinct on disk for the webapp's benefit.
         lookup_csr: Per lookup feature, the CSR arrays ``offsets``,
             ``timesteps`` and ``values``, plus ``doses`` and ``masks``
             for a multi-slot feature.
@@ -193,13 +195,14 @@ class MixedDataset(Dataset):
         time_to_event: (n,) float32 minutes to the event or censoring.
         event_type: (n,) int8 -- 0 censored, 1 readmission, 2 death,
             3 out-migration.
-        max_ts_len: T of section 4.4.
+        max_ts_len: Timesteps per episode -- the T of every dense
+            array's ``(n, T, ...)`` shape.
         numeric_stats: ``{'means', 'p5', 'p95'}`` for one fold's training
             rows, or None to return the values unscaled. None is for
             inspection and for tests; a model trained on standardized
             input must not be evaluated on raw input.
         static_data: (n, static_total_dim) or None. None is the live case
-            (section A.3) and omits the key from the item.
+            and omits the key from the item.
         episode_ids: Row -> ``(PATID, STAY_INDEX)``, for mapping model
             output back to a source episode.
     """
@@ -255,17 +258,17 @@ class MixedDataset(Dataset):
         self.lookup_slot_dims = lookup_slot_dims
         self.lookup_feat_types = lookup_feat_types
         # The family's canonical feature order is ``lookup_feat_types``'s
-        # (section 4.4). The dense indicators are split by type on disk
+        #. The dense indicators are split by type on disk
         # and only there, so each feature's column within its own type's
         # array is recorded here and the item carries one feature axis
-        # (section 5.1).
+        #.
         self._lookup_columns = []
         seen: Counter = Counter()
         for feat_type in lookup_feat_types:
             self._lookup_columns.append((feat_type, seen[feat_type]))
             seen[feat_type] += 1
         # The table's own width, not metadata's: text has no declared
-        # width until C4 builds the table (section 4.4).
+        # width until embed.py builds the table.
         self.lookup_table_dims = [t.shape[1] for t in lookup_tables]
 
         self.event_indicators = event_indicators
@@ -291,7 +294,7 @@ class MixedDataset(Dataset):
         return self.n_episodes
 
     def _days(self, minutes: np.ndarray) -> torch.Tensor:
-        """Section 4.2's conversion, at the one place it belongs."""
+        """Minutes to days, at the one place the conversion belongs."""
         return torch.from_numpy(
             np.asarray(minutes, dtype=np.float32) / MINUTES_PER_DAY
         )
@@ -299,9 +302,9 @@ class MixedDataset(Dataset):
     def _numeric_values(self, f: int, idx: int) -> torch.Tensor:
         """One numeric feature's row, scaled by the fold's statistics.
 
-        The pre-C1 rule verbatim: zero the feature outright where p5 and
-        p95 coincide, otherwise subtract the mean and divide by the span,
-        in that order and over the whole row.
+        The earlier in-place rule verbatim: zero the feature outright
+        where p5 and p95 coincide, otherwise subtract the mean and divide
+        by the span, in that order and over the whole row.
         """
         values = np.array(self.val_numeric_values[f][idx], dtype=np.float32)
         if self._span is None:
@@ -315,7 +318,7 @@ class MixedDataset(Dataset):
 
     @staticmethod
     def _one_hot(indices: np.ndarray, width: int) -> torch.Tensor:
-        """Expand section 4.3's index codes to one-hot rows.
+        """Expand the stored index codes to one-hot rows.
 
         A negative index -- the ``-1`` sentinel, whether the timestep was
         unobserved or its value was out of domain -- leaves an all-zero
@@ -331,14 +334,14 @@ class MixedDataset(Dataset):
         """Gather one lookup feature's CSR slice for one episode.
 
         Only the timesteps that hold a record. The family's records are
-        rare against the timestep axis -- section 4.5 measures ~1.2 KB
-        of text and ~36 KB of drugs per episode -- so the dense extent
+        rare against the timestep axis -- about 1.2 KB of text and 36 KB
+        of drugs per episode -- so the dense extent
         is almost all zeros, and it is built by
         ``densify_lookup_slots`` on the device the batch lands on rather
         than here, where every byte of it would cross the worker
         boundary and one host-side copy first.
 
-        One code path for both members of the family (section 4.3),
+        One code path for both members of the family,
         branching only on slot count: a single-slot feature's values are
         rank 1 on disk and it carries no dose or mask array, so an entry
         is ``(D,)``; a multi-slot feature's entry is ``(S, D)`` with
@@ -363,7 +366,7 @@ class MixedDataset(Dataset):
         # is the point of carrying records rather than the axis.
         timesteps = np.array(csr['timesteps'][start:end], dtype=np.int64)
         if end > start:
-            # Section 5.1's cast at the gather: whatever the table's
+            # Cast at the gather: whatever the table's
             # dtype, the model's torch.cat sees float32.
             embeddings = self.lookup_tables[f][
                 np.asarray(csr['values'][start:end])
@@ -431,9 +434,9 @@ class MixedDataset(Dataset):
             for values in self.val_multilabel_values
         ]
 
-        # Section 5.1's per-feature lists, over the whole family, and
+        # Per-feature lists, over the whole family, and
         # sparse: the dense extent is rebuilt on the device the batch
-        # lands on. A multi-slot feature leaves unpooled (section 4.3):
+        # lands on. A multi-slot feature leaves unpooled:
         # the dose-weighted mean is part of the forward pass, which is
         # what leaves a gradient on an individual slot. A single-slot
         # feature has no dose or mask array -- its weight is 1 by
@@ -467,7 +470,7 @@ class MixedDataset(Dataset):
         )
 
         # Minutes, not days: this is a target, and its scaling belongs
-        # with the prediction head (section 8 item 3).
+        # with the prediction head.
         item['time_to_event'] = torch.tensor(
             float(self.time_to_event[idx]), dtype=torch.float32
         )

@@ -610,7 +610,7 @@ class MaskedTokenGenerator(torch.nn.Module):
                 the number of classes for that feature. Defaults to None (no multilabel features).
             lookup_dims (List[int], optional): Embedding width of each lookup (text or drug) feature, in the
                 family's feature order. Defaults to None (no lookup features). The width is per-feature rather
-                than shared because text is 4096 or 8192 wide beside ClinVec's 128 (section 5.1).
+                than shared because text is 4096 or 8192 wide beside ClinVec's 128.
             predict_indicators (bool): Whether to predict feature presence indicators
             dim_feedforward (int, optional): Used when predict_indicators is True. The dimensionality of the hidden
                 layer in the MLP that predicts indicators. Defaults to 128.
@@ -770,11 +770,11 @@ class MaskedTokenGenerator(torch.nn.Module):
             #   lookup_embeddings: [(batch_size, max_timeseries_length, D_f) x n_lookup_features]
             lookup_indicators = batch['lookup']['indicators']
             # The dose-weighted pool, memoized: the ELECTRA forward has already run it, and a
-            # generator called on its own has not (section 5.1).
+            # generator called on its own has not.
             lookup_embeddings = resolve_lookup_embeddings(batch['lookup'])
             # Zero out masked lookup feature embedding components. The masks are already a
             # per-feature list, so this is an elementwise multiply per feature rather than a
-            # torch.stack the ragged widths could not take (section 5.1).
+            # torch.stack the ragged widths could not take.
             masked_lookup_indicators = lookup_indicators * (1 - record_masks['lookup']['indicators'])
             masked_lookup_embeddings = [
                 embeddings * (1 - value_mask) for embeddings, value_mask
@@ -980,7 +980,7 @@ class MaskedTokenDiscriminator(torch.nn.Module):
         if self.predict_lookup_feats:
             inds_to_concat.append(batch['lookup']['indicators'])
             # A per-feature list, so extend rather than append: the concatenation below
-            # produces the layout the stacked tensor's flatten used to (section 5.1). The
+            # produces the layout the stacked tensor's flatten used to. The
             # embeddings the generator substituted into are already resolved by this point;
             # resolve_lookup_embeddings returns them rather than pooling the slots again.
             vals_to_concat.extend(resolve_lookup_embeddings(batch['lookup']))

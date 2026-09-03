@@ -2,7 +2,7 @@
 
 The end-to-end test in ``test_extract_data.py`` runs against
 IBDdataprep's real fixture and the live config, which is what pins
-section 4.4's 94 / 37 / 16. Everything else is checked here against a
+the per-family indicator widths. Everything else is checked here against a
 six-feature cohort the test writes itself, because the claims below need
 values the real fixture does not contain -- an out-of-domain category, a
 declared level that collides with pandas' NA strings, a drug dispensed at
@@ -115,7 +115,7 @@ class MiniRoot:
                       DRUGS_COLUMNS)
 
     def add_fold(self, fold_name, train, val=None, test=None):
-        """Write section 3's row-index arrays for one fold.
+        """Write the row-index arrays for one fold.
 
         A fold is ``int64`` positions in ``labels.csv``, not a directory
         of its own arrays, so this is all a fold is on disk. Extraction
@@ -160,11 +160,11 @@ class MiniRoot:
 
     @property
     def lookup_tables(self) -> Path:
-        """Section 4.4's global tables, the *sibling* of ``extracted/``.
+        """The global lookup tables, the *sibling* of ``extracted/``.
 
-        C4 puts them here rather than among the per-episode arrays,
-        because ``save_extracted`` clears its own directory and would
-        otherwise delete a table that cost GPU-hours to build.
+        They live here rather than among the per-episode arrays, because
+        ``save_extracted`` clears its own directory and would otherwise
+        delete a table that cost GPU-hours to build.
         """
         path = self.data_dir / 'lookup_tables'
         path.mkdir(exist_ok=True)
@@ -185,7 +185,7 @@ def one_patient(mini):
     """A single patient with four timesteps and one episode.
 
     Row 3 is the index time. Row 0 carries a drug dispensation and no
-    valued feature at all, which section 2.7 requires to still be a
+    valued feature at all, which still has to be a
     timestep.
     """
     mini.add_patient(

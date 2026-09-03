@@ -1,17 +1,17 @@
-"""C4: the global lookup tables and the checks that pair them (section 4.4).
+"""The global lookup tables and the checks that pair them to an extraction.
 
 The claims here are about the *pairing* between a table and the
 extraction that indexes it, which is what nothing else can catch: both
 tables are order-sensitive, so a table built against a different
 extraction has the right shape and the right dtype and gathers the wrong
-rows. Invariants 8, 9 and 13 are each tested by the failure they exist
-to catch, not only by a passing build.
+rows. Each guard is tested by the failure it exists to catch, not only by
+a passing build -- a checker that only ever passes proves nothing.
 
-The text pass is exercised with a stub tokenizer and a stub embedder.
-The real ones are a 70B-parameter download; what this parcel is
-responsible for is the pass around them -- the row order, the streaming
-write, the mask derivation and the refusals -- and every one of those is
-independent of which model is loaded.
+The text pass is exercised with a stub tokenizer and a stub embedder. The
+real ones are a 70B-parameter download; what ``embed.py`` is responsible
+for is the pass around them -- the row order, the streaming write, the
+mask derivation and the refusals -- and every one of those is independent
+of which model is loaded.
 """
 
 import numpy as np
@@ -45,7 +45,7 @@ class StubTokenizer:
     """One character per token, right-padded -- enough to be a tokenizer.
 
     The mask is set from the content, exactly as HuggingFace sets it, so
-    ``mask == (ids != pad_id)`` holds and invariant 13 passes.
+    ``mask == (ids != pad_id)`` holds and the derivation check passes.
     """
 
     pad_token_id = PAD_ID
@@ -113,9 +113,10 @@ def write_clinvec(path: Path, n_rows: int, dim: int) -> np.ndarray:
 # --- the drug table ---------------------------------------------------
 
 def test_the_drug_table_is_the_vocabulary_plus_an_all_zero_pad_row(tmp_path):
-    """Section 4.4: ``(V + 1, 128)``, where V is the *vocabulary's* row
-    count. Deriving V from the cohort would leave the pad colliding with
-    a drug no patient in this cohort happened to receive."""
+    """``(V + 1, D)``, where V is the *vocabulary's* row count.
+
+    Deriving V from the cohort would leave the pad colliding with a drug
+    no patient in this cohort happened to receive."""
     vectors = write_clinvec(tmp_path / 'ClinVec_atc.csv', 5, 4)
     path = build_drug_table(
         str(tmp_path / 'ClinVec_atc.csv'), str(tmp_path / TABLES_DIRNAME)
@@ -125,13 +126,13 @@ def test_the_drug_table_is_the_vocabulary_plus_an_all_zero_pad_row(tmp_path):
     assert table.shape == (6, 4)
     assert table.dtype == np.float32
     assert np.array_equal(table[:-1], vectors)
-    assert not table[-1].any(), "the pad row is all zero (section 4.4)"
+    assert not table[-1].any(), "the pad row is all zero"
 
 
 def test_the_drug_table_needs_no_llm(tmp_path, monkeypatch):
     """``--tables drug`` must not import the LLM stack: the table is a
     read of a CSV, and requiring a 70B download to rebuild it would make
-    the cheap half of C4 as expensive as the dear half. Poisoning the
+    the cheap table as expensive as the dear one. Poisoning the
     module is what makes this a test rather than a claim -- the import
     is inside the text branch, so only running the drug branch proves
     the branch is where it is.
@@ -154,7 +155,7 @@ def test_the_drug_table_needs_no_llm(tmp_path, monkeypatch):
 
 def test_the_text_tables_follow_text_strings_order(tmp_path):
     """The row order is ``text_strings.pkl``'s and nothing else's: that
-    correspondence is the whole of what makes section 4.4's ``int32``
+    correspondence is the whole of what makes the extracted ``int32``
     values valid indices."""
     strings = ['aa', 'b', 'ccc', 'd', 'ee']
     out_dir = build(tmp_path, strings)
@@ -183,8 +184,8 @@ def test_the_batch_boundary_does_not_reorder_the_table(tmp_path):
 
 
 def test_no_attention_mask_reaches_disk(tmp_path):
-    """Section 4.4's decision: the mask is a local variable of this pass.
-    It has one consumer, once, and is exactly ``ids != pad_id``."""
+    """The mask is a local variable of this pass. It has one consumer,
+    once, and is exactly ``ids != pad_id``."""
     out_dir = build(tmp_path, ['aa', 'bb'])
     assert sorted(p.name for p in out_dir.iterdir()) == [
         'text_embeddings.npy', 'text_tokens.npy'
@@ -192,20 +193,20 @@ def test_no_attention_mask_reaches_disk(tmp_path):
 
 
 def test_the_mask_is_derivable_from_the_tokens(tmp_path):
-    """Invariant 13's positive half, on the artifact that survives: the
-    stored tokens alone recover the mask the embedding was pooled with."""
+    """The positive half, on the artifact that survives: the stored
+    tokens alone recover the mask the embedding was pooled with."""
     strings = ['aa', 'bbbb']
     tokens = np.load(build(tmp_path, strings) / 'text_tokens.npy')
     derived = tokens != PAD_ID
     assert derived.sum(axis=1).tolist() == [len(s) for s in strings]
 
 
-def test_invariant_13_fires_when_a_pad_id_appears_in_content(tmp_path):
-    """The one assumption section 4.4 makes about *content* rather than
-    about the vocabulary. No mask is stored, so this is its sole guard --
-    it has to fail the build rather than embed a string whose mask cannot
-    be recovered."""
-    with pytest.raises(AssertionError, match='Invariant 13'):
+def test_the_build_fails_when_a_pad_id_appears_in_content(tmp_path):
+    """The one assumption the derivation makes about *content* rather
+    than about the vocabulary. No mask is stored, so this is its sole
+    guard -- it has to fail the build rather than embed a string whose
+    mask cannot be recovered."""
+    with pytest.raises(AssertionError, match='attention mask'):
         build(tmp_path, ['aa', 'bb'], tokenizer=PadInContentTokenizer())
 
 
@@ -221,8 +222,8 @@ def test_an_empty_table_still_names_its_width(tmp_path):
 # --- what the pass refuses --------------------------------------------
 
 def test_a_blank_string_is_refused_rather_than_skipped(tmp_path):
-    """Section 4.4 keeps blanks out of the table, and extraction already
-    does. Skipping one *here* would shift every later row out from under
+    """Blanks are kept out of the table, and extraction already does
+    that. Skipping one *here* would shift every later row out from under
     indices extraction has already assigned, so the case is an upstream
     bug to report."""
     with open(tmp_path / 'text_strings.pkl', 'wb') as f:
@@ -237,10 +238,10 @@ def test_a_missing_string_table_is_refused(tmp_path):
 
 
 def test_the_resolved_pad_token_id_reaches_metadata(tmp_path):
-    """C1 records ``LLM_NAME``, ``TOKENIZER_PAD_TOKEN`` and
+    """Extraction records ``LLM_NAME``, ``TOKENIZER_PAD_TOKEN`` and
     ``MAX_TOKEN_LENGTH`` but loads no tokenizer, so the resolved id is
-    established here -- the fourth member of the coupling group section
-    4.4 wants recorded together."""
+    established here -- the fourth fact that has to be recorded with the
+    other three for a tokenizer change to be detectable."""
     with open(tmp_path / 'metadata.pkl', 'wb') as f:
         pickle.dump({'max_ts_len': 4}, f)
     record_pad_token_id(str(tmp_path), PAD_ID)
@@ -253,10 +254,10 @@ def test_the_resolved_pad_token_id_reaches_metadata(tmp_path):
 # --- where the tables live --------------------------------------------
 
 def test_a_re_extraction_does_not_delete_the_tables(one_patient):
-    """The decision this parcel had to settle. ``save_extracted`` clears
-    every ``.npy``, ``.pkl`` and ``.npz`` in its own directory, so a
-    64.8 GB ``text_embeddings.npy`` kept there would not survive the next
-    extraction run; in ``lookup_tables/`` it survives by construction."""
+    """``save_extracted`` clears every ``.npy``, ``.pkl`` and ``.npz``
+    in its own directory, so a text table kept there -- tens of gigabytes
+    and hours of GPU time -- would not survive the next extraction run.
+    In ``lookup_tables/`` it survives by construction."""
     one_patient.add_fold('fold0', train=[0])
     assert run(one_patient) == 0
     write_tables(one_patient)
@@ -282,7 +283,7 @@ def test_a_table_left_in_extracted_is_not_found(one_patient):
         load_dataset(str(one_patient.extracted), fold='fold0')
 
 
-# --- invariant 8 ------------------------------------------------------
+# --- every stored index is a row of its table -------------------------
 
 def test_an_index_past_the_end_of_the_table_is_refused(one_patient):
     one_patient.add_fold('fold0', train=[0])
@@ -291,7 +292,7 @@ def test_an_index_past_the_end_of_the_table_is_refused(one_patient):
     values = np.load(one_patient.extracted / 'text_values_0.npy')
     values[0] = 99
     np.save(one_patient.extracted / 'text_values_0.npy', values)
-    with pytest.raises(ValueError, match='invariant 8'):
+    with pytest.raises(ValueError, match='The table and the extraction'):
         load_dataset(str(one_patient.extracted), fold='fold0')
 
 
@@ -305,14 +306,14 @@ def test_a_negative_index_is_refused(one_patient):
     values = np.load(one_patient.extracted / 'text_values_0.npy')
     values[0] = -1
     np.save(one_patient.extracted / 'text_values_0.npy', values)
-    with pytest.raises(ValueError, match='invariant 8'):
+    with pytest.raises(ValueError, match='table and the extraction'):
         load_dataset(str(one_patient.extracted), fold='fold0')
 
 
 def test_the_drug_pad_index_is_in_range(one_patient):
-    """The pad index is ``V``, the table's last row, so invariant 8 must
-    accept it -- a check written as ``< V`` would reject every padded
-    slot in the cohort."""
+    """The pad index is ``V``, the table's last row, so the range check
+    must accept it -- a check written as ``< V`` would reject every
+    padded slot in the cohort."""
     one_patient.add_fold('fold0', train=[0])
     assert run(one_patient) == 0
     write_tables(one_patient)
@@ -321,7 +322,7 @@ def test_the_drug_pad_index_is_in_range(one_patient):
     load_dataset(str(one_patient.extracted), fold='fold0')
 
 
-# --- invariant 9 ------------------------------------------------------
+# --- the checksum in manifest.csv -------------------------------------
 
 @pytest.fixture
 def registered(tmp_path, monkeypatch):
@@ -345,14 +346,14 @@ def test_a_checksum_is_recorded_and_then_verifies(registered):
 
 
 def test_a_table_that_disagrees_with_the_manifest_is_refused(registered):
-    """Invariant 9's point: the tables are order-sensitive, so a table
-    that copied wrong keeps its shape and its dtype and gathers the wrong
-    rows. Only the checksum notices."""
+    """The tables are order-sensitive, so a table that copied wrong
+    keeps its shape and its dtype and gathers the wrong rows. Only the
+    checksum notices."""
     manifest.record_checksum(registered)
     table = np.load(registered)
     table[0] += 1.0
     np.save(registered, table)
-    with pytest.raises(ValueError, match='invariant 9'):
+    with pytest.raises(ValueError, match='does not match'):
         manifest.verify(registered)
 
 
@@ -393,8 +394,9 @@ def test_a_table_outside_data_root_is_reported_not_refused(
 def test_the_loader_verifies_the_checksum_at_use(
     one_patient, tmp_path_factory, monkeypatch
 ):
-    """Invariant 9 says *at use*, not just at download, and this is the
-    only test that the call site is on the path a training run takes.
+    """The checksum is verified when the tables are opened, not only
+    when they are fetched, and this is the only test that the call site
+    is on the path a training run takes.
     The cohort is made to sit under a DATA_ROOT this test owns, which is
     what gives its tables a manifest row at all."""
     one_patient.add_fold('fold0', train=[0])
@@ -415,12 +417,12 @@ def test_the_loader_verifies_the_checksum_at_use(
     load_dataset(str(one_patient.extracted), fold='fold0')
 
     np.save(table, np.load(table) + 1.0)
-    with pytest.raises(ValueError, match='invariant 9'):
+    with pytest.raises(ValueError, match='does not match'):
         load_dataset(str(one_patient.extracted), fold='fold0')
 
 
 def test_the_tables_embed_this_extraction_and_load_back(one_patient):
-    """C4's headline: the loop closes. The strings come from an
+    """The loop closes. The strings come from an
     extraction, ``embed.py`` builds both tables from them and from that
     extraction's own ClinVec file, and the loader accepts the pair --
     row counts, widths, pad row and every index in range."""

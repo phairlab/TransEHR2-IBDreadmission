@@ -1966,6 +1966,72 @@ def load_dataset(base_path: str, fold: Optional[str]) -> MixedDataset:
     )
 
 
+def feature_scale(norms: np.ndarray) -> float:
+    """A non-degenerate scale for one numeric feature's observed magnitudes.
+
+    The 5th-95th percentile range is the estimator of record: robust, and wide enough that a
+    typical value standardizes to order one. It collapses to zero for a feature whose
+    distribution is concentrated enough that both percentiles land on the same value, which is
+    ordinary for a laboratory result reported at a detection limit, or for an assessment coded
+    0 and abnormal in a few percent of cases. Dividing by that zero is what the caller's guard
+    prevents, but zeroing the feature in its place discards every value it holds and leaves the
+    occurrence indicator behind -- which is exactly the state a feature is moved onto the value
+    stream to escape.
+
+    So the range widens until it is non-degenerate, and only a feature that is genuinely
+    constant is given no scale at all. Widening in this order matters: the outermost
+    percentiles are tried before the full span, because for a heavy-tailed feature the span is
+    set by the largest outlier and would compress every typical value to near zero.
+
+    Args:
+        norms: (n_observed,) magnitudes of one feature's observed values.
+
+    Returns:
+        A positive scale, or 0.0 when the feature takes one value throughout.
+    """
+    if norms.size == 0:
+        return 0.0
+    for low, high in ((5, 95), (1, 99)):
+        lower, upper = np.percentile(norms, [low, high])
+        if upper > lower:
+            return float(upper - lower)
+    span = float(norms.max() - norms.min())
+    return span if span > 0.0 else 0.0
+
+
+def feature_scale(norms: np.ndarray) -> float:
+    """A non-degenerate scale for one numeric feature's observed magnitudes.
+
+    The 5th-95th percentile range is the estimator of record: robust, and wide enough that a
+    typical value standardizes to order one. It collapses to zero for a feature whose
+    distribution is concentrated enough that both percentiles land on the same value, which is
+    ordinary for a laboratory result reported at a detection limit, or for an assessment coded
+    0 and abnormal in a few percent of cases. Dividing by that zero is what the caller's guard
+    prevents, but zeroing the feature in its place discards every value it holds and leaves the
+    occurrence indicator behind -- which is exactly the state a feature is moved onto the value
+    stream to escape.
+
+    So the range widens until it is non-degenerate, and only a feature that is genuinely
+    constant is given no scale at all. Widening in this order matters: the outermost
+    percentiles are tried before the full span, because for a heavy-tailed feature the span is
+    set by the largest outlier and would compress every typical value to near zero.
+
+    Args:
+        norms: (n_observed,) magnitudes of one feature's observed values.
+
+    Returns:
+        A positive scale, or 0.0 when the feature takes one value throughout.
+    """
+    if norms.size == 0:
+        return 0.0
+    for low, high in ((5, 95), (1, 99)):
+        lower, upper = np.percentile(norms, [low, high])
+        if upper > lower:
+            return float(upper - lower)
+    span = float(norms.max() - norms.min())
+    return span if span > 0.0 else 0.0
+
+
 def standardize_feats(
     arrays: Dict[str, Union[np.ndarray, List[np.ndarray]]],
     dims: TensorDimensions,
@@ -1987,7 +2053,11 @@ def standardize_feats(
         arrays: The pre-allocated output arrays.
         dims: Tensor dimensions, for ``n_numeric_feats``.
         rows: int64 row indices of the fold's training episodes.
-        save_path: ``summary_statistics_fold{i}.npz`` to write.
+        save_path: ``summary_statistics_fold{i}.npz`` to write. It carries
+            ``scale`` beside the percentiles: the 5th-to-95th range is
+            degenerate for a feature reported at a detection limit, and
+            ``feature_scale`` widens it rather than leaving the caller to
+            zero the feature.
 
     Returns:
         None. Nothing in ``arrays`` is modified.
@@ -1997,6 +2067,7 @@ def standardize_feats(
     means = np.zeros(n_feats, dtype=np.float32)
     p5 = np.zeros(n_feats, dtype=np.float32)
     p95 = np.zeros(n_feats, dtype=np.float32)
+    scale = np.zeros(n_feats, dtype=np.float32)
 
     # Indexed one feature at a time: ``indicators[rows]`` would
     # materialize a (len(rows), T, 94) copy, which at cohort scale is
@@ -2013,8 +2084,12 @@ def standardize_feats(
             norms = np.linalg.norm(observed, ord=2, axis=-1)
             p5[f] = np.percentile(norms, 5)
             p95[f] = np.percentile(norms, 95)
+            scale[f] = feature_scale(norms)
 
-    np.savez(save_path, means=means, p5=p5, p95=p95)
+    # ``p5`` and ``p95`` are kept beside ``scale`` because they are what the
+    # outlier calibration reports against, and because a reader comparing two
+    # folds wants the percentiles, not only the divisor they usually imply.
+    np.savez(save_path, means=means, p5=p5, p95=p95, scale=scale)
 
 
 def get_text_counts_from_dataset_vectorized(dataset) -> np.ndarray:

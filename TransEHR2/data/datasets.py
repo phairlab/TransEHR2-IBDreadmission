@@ -285,9 +285,17 @@ class MixedDataset(Dataset):
             self._means = self._span = self._degenerate = None
         else:
             self._means = np.asarray(numeric_stats['means'], np.float32)
-            p5 = np.asarray(numeric_stats['p5'], np.float32)
-            p95 = np.asarray(numeric_stats['p95'], np.float32)
-            self._span = p95 - p5
+            # ``scale`` is what the values are divided by. It is the 5th-to-95th
+            # range where that is non-degenerate and a wider one where it is not,
+            # so a feature reported at a detection limit keeps its values instead
+            # of being reduced to its occurrence indicator. Statistics written
+            # before it was recorded fall back to the range it replaced, which is
+            # what that computation was.
+            if 'scale' in numeric_stats:
+                self._span = np.asarray(numeric_stats['scale'], np.float32)
+            else:
+                self._span = (np.asarray(numeric_stats['p95'], np.float32)
+                              - np.asarray(numeric_stats['p5'], np.float32))
             self._degenerate = self._span == 0
 
     def __len__(self) -> int:
@@ -302,9 +310,10 @@ class MixedDataset(Dataset):
     def _numeric_values(self, f: int, idx: int) -> torch.Tensor:
         """One numeric feature's row, scaled by the fold's statistics.
 
-        The earlier in-place rule verbatim: zero the feature outright
-        where p5 and p95 coincide, otherwise subtract the mean and divide
-        by the span, in that order and over the whole row.
+        Subtract the mean and divide by the scale, in that order and over
+        the whole row. A zero scale means the feature is constant wherever
+        it is observed, so it carries nothing beyond its own occurrence and
+        the indicator already says that; the row is zeroed there.
         """
         values = np.array(self.val_numeric_values[f][idx], dtype=np.float32)
         if self._span is None:

@@ -200,13 +200,18 @@ def test_time_to_event_stays_in_minutes(dataset):
 
 def test_fold_statistics_are_applied_from_the_npz(one_patient):
     """Standardization happens here rather than in extraction, in
-    __getitem__, reading ``summary_statistics_fold{i}.npz``. The rule is
-    the earlier in-place one verbatim: subtract the mean, divide by the p95-p5
-    span, over the whole row."""
+    __getitem__, reading ``summary_statistics_fold{i}.npz``: subtract the mean,
+    divide by ``scale``, over the whole row.
+
+    ``scale`` rather than the p95-p5 range it replaced. The two agree wherever
+    that range is non-degenerate, as it is here, but the divisor the loader
+    reads is the one this has to assert -- otherwise a feature reported at a
+    detection limit would pass this probe while being zeroed in practice."""
     dataset = extracted(one_patient)
     stats = np.load(one_patient.extracted / 'summary_statistics_fold0.npz')
-    span = stats['p95'][0] - stats['p5'][0]
+    span = stats['scale'][0]
     assert span > 0
+    assert span == pytest.approx(stats['p95'][0] - stats['p5'][0])
 
     raw = np.asarray(dataset.val_numeric_values[0][0], dtype=np.float32)
     expected = (raw - stats['means'][0]) / span

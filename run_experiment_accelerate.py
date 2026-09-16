@@ -201,7 +201,22 @@ if __name__ == "__main__":
     PREDICTOR_AGGREGATION_METHOD = experiment_config['PREDICTOR_AGGREGATION_METHOD']
     MODEL_DIR = experiment_config['MODEL_DIR']
     PRETRAIN_LEARNING_RATE = experiment_config.get('PRETRAIN_LEARNING_RATE', 2e-3)
-    PRETRAIN_LEARNING_RATE_DECAY = experiment_config.get('PRETRAIN_LEARNING_RATE_DECAY', 0.9)
+
+    # The decay factor was applied on a fixed multi-epoch cadence, so the same value means a
+    # different schedule now that the scheduler steps every epoch. Refuse it rather than
+    # silently reinterpret it -- an ignored key would leave the rate constant for the whole
+    # run without saying so.
+    stale_decay = [key for key in ('PRETRAIN_LEARNING_RATE_DECAY', 'FINETUNE_LEARNING_RATE_DECAY')
+                   if key in experiment_config]
+    if stale_decay:
+        raise ValueError(
+            f"{args['experiment_config']} carries {', '.join(stale_decay)}, which no longer "
+            f"has an effect. The learning rate schedule is set by PRETRAIN_LR_HALF_LIFE and "
+            f"FINETUNE_LR_HALF_LIFE, in epochs, applied as lr(e) = lr0 * 0.5 ** (e / H). A "
+            f"factor g formerly applied every I epochs is a half-life of I * ln(0.5) / ln(g)."
+        )
+
+    PRETRAIN_LR_HALF_LIFE = experiment_config.get('PRETRAIN_LR_HALF_LIFE', None)
     PRETRAIN_TOTAL_EPOCH = experiment_config.get('PRETRAIN_TOTAL_EPOCH', 1000)
     DISC_LOSS_WEIGHT = experiment_config.get('DISC_LOSS_WEIGHT', 1.0)
     THP_LOSS_NLL_WEIGHT = experiment_config.get('THP_LOSS_NLL_WEIGHT', 1e-2)
@@ -214,7 +229,7 @@ if __name__ == "__main__":
     CMPNT_MASK_RATIO = experiment_config.get('CMPNT_MASK_RATIO', 0.25)
     FINETUNE_LEARNING_RATE = experiment_config.get('FINETUNE_LEARNING_RATE', 2e-4)
     FINETUNE_TOTAL_EPOCH = experiment_config.get('FINETUNE_TOTAL_EPOCH', 500)
-    FINETUNE_LEARNING_RATE_DECAY = experiment_config.get('FINETUNE_LEARNING_RATE_DECAY', 0.9)
+    FINETUNE_LR_HALF_LIFE = experiment_config.get('FINETUNE_LR_HALF_LIFE', None)
 
     # Create a Timer object for tracking the time it takes to train and evaluate the models
     timer = create_timer(
@@ -436,7 +451,7 @@ if __name__ == "__main__":
                     loaders=dataloader_list,  # Training set dataloader
                     writer=writer,
                     learning_rate=PRETRAIN_LEARNING_RATE,
-                    learning_rate_decay=PRETRAIN_LEARNING_RATE_DECAY,
+                    lr_half_life=PRETRAIN_LR_HALF_LIFE,
                     total_epoch=PRETRAIN_TOTAL_EPOCH,
                     disc_loss_weight=DISC_LOSS_WEIGHT,
                     thp_loss_nll_weight=THP_LOSS_NLL_WEIGHT,
@@ -630,7 +645,7 @@ if __name__ == "__main__":
                         task=task,
                         writer=writer,
                         learning_rate=FINETUNE_LEARNING_RATE,
-                        learning_rate_decay=FINETUNE_LEARNING_RATE_DECAY,
+                        lr_half_life=FINETUNE_LR_HALF_LIFE,
                         total_epoch=FINETUNE_TOTAL_EPOCH,
                         checkpoint_dir=checkpoint_dir,
                         accelerator=accelerator,

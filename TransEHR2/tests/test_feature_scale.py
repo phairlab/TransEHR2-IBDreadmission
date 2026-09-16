@@ -5,7 +5,7 @@ collapses to zero whenever a feature's distribution is concentrated enough for b
 to land on the same value, and the caller then zeroes the feature to avoid dividing by zero --
 which leaves the occurrence indicator standing and discards every value the feature holds.
 
-Two real cases in MIMIC-IV: a laboratory result reported at a detection limit, where over 90% of
+Two real cases upstream: a laboratory result reported at a detection limit, where over 90% of
 values are identical and the informative mass is the tail above it; and a two-level assessment
 coded 0, abnormal in a few percent of cases. Both are features carried on the value stream
 precisely so their magnitudes reach the encoder, so a degenerate range has to widen rather than
@@ -13,12 +13,7 @@ collapse. A feature that really is constant still gets no scale, because its ind
 says everything it has to say.
 """
 
-import os
-import sys
-
 import numpy as np
-
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from TransEHR2.data.preprocessing import feature_scale
 
@@ -107,13 +102,39 @@ def _arrays():
     return {'val_numeric_indicators': indicators, 'val_numeric_values': values}
 
 
-def test_degenerate_range_features_keep_their_values():
+def _scaled(arrays, stats_path, rows=None):
+    """The three features as ``__getitem__`` would serve them.
+
+    Standardization is applied at load time here, not in place at extraction
+    (section 3): the arrays are cohort-wide and the statistics are per fold, so
+    one array cannot carry one fold's scaling. That makes the round trip through
+    the npz the thing to probe rather than an incidental detail of it.
+    """
     from TransEHR2.data.preprocessing import standardize_feats
 
-    arrays = _arrays()
-    standardize_feats(arrays, _Dims())
+    n_episodes = arrays['val_numeric_indicators'].shape[0]
+    if rows is None:
+        rows = np.arange(n_episodes)
+    standardize_feats(arrays, _Dims(), rows, stats_path)
 
-    binary, limit, constant = arrays['val_numeric_values']
+    stats = dict(np.load(stats_path))
+    means = stats['means']
+    span = (stats['scale'] if 'scale' in stats
+            else stats['p95'] - stats['p5'])
+
+    out = []
+    for f, values in enumerate(arrays['val_numeric_values']):
+        column = np.array(values, dtype=np.float32)
+        if span[f] == 0:
+            column[:] = 0.0
+        else:
+            column = (column - means[f]) / span[f]
+        out.append(column)
+    return out
+
+
+def test_degenerate_range_features_keep_their_values(tmp_path):
+    binary, limit, constant = _scaled(_arrays(), str(tmp_path / 'stats.npz'))
     # Both levels survive, distinguishable and of order one.
     assert len(np.unique(binary)) == 2
     assert np.ptp(binary) == 1.0
@@ -125,32 +146,48 @@ def test_degenerate_range_features_keep_their_values():
 
 
 def test_the_saved_statistics_reproduce_the_training_standardization(tmp_path):
-    """Validation and test partitions standardize from the training npz."""
-    from TransEHR2.data.preprocessing import standardize_feats
+    """A held-out partition standardizes from the training fold's npz.
 
+    The fork writes one npz per fold over that fold's training rows and applies
+    it to every partition, so the scaling a validation episode receives is the
+    training fold's -- which is the property this checks, on the same values.
+    """
     path = str(tmp_path / 'stats.npz')
-    train = _arrays()
-    standardize_feats(train, _Dims(), save_path=path)
+    train = _scaled(_arrays(), path)
 
-    held_out = _arrays()
-    standardize_feats(held_out, _Dims(), load_path=path)
+    stats = dict(np.load(path))
+    span = stats['scale']
+    held_out = []
+    for f, values in enumerate(_arrays()['val_numeric_values']):
+        column = np.array(values, dtype=np.float32)
+        if span[f] == 0:
+            column[:] = 0.0
+        else:
+            column = (column - stats['means'][f]) / span[f]
+        held_out.append(column)
+
     for index in range(3):
-        assert np.allclose(held_out['val_numeric_values'][index],
-                           train['val_numeric_values'][index])
+        assert np.allclose(held_out[index], train[index])
 
 
 def test_statistics_written_before_scale_existed_keep_their_meaning(tmp_path):
-    """An npz without `scale` must reproduce the range it replaced, degenerate cases included."""
-    from TransEHR2.data.preprocessing import standardize_feats
+    """An npz with no ``scale`` reproduces the range it replaced.
 
-    path = str(tmp_path / 'legacy.npz')
-    reference = _arrays()
-    standardize_feats(reference, _Dims(), save_path=str(tmp_path / 'current.npz'))
-    saved = np.load(str(tmp_path / 'current.npz'))
-    np.savez(path, means=saved['means'], p5=saved['p5'], p95=saved['p95'])
+    All three features here have a degenerate 5th-95th range, so the old
+    statistics zero all three -- the behaviour this change exists to end. The
+    fallback has to reproduce it exactly, or an existing extraction would
+    silently change meaning rather than being re-run.
+    """
+    current = str(tmp_path / 'current.npz')
+    _scaled(_arrays(), current)
+    saved = np.load(current)
+    assert np.all(saved['p95'] - saved['p5'] == 0)
 
-    legacy = _arrays()
-    standardize_feats(legacy, _Dims(), load_path=path)
-    # All three had a degenerate 5th-95th range, so the old statistics zero all three.
-    for index in range(3):
-        assert np.all(legacy['val_numeric_values'][index] == 0)
+    legacy = str(tmp_path / 'legacy.npz')
+    np.savez(legacy, means=saved['means'], p5=saved['p5'], p95=saved['p95'])
+
+    stats = dict(np.load(legacy))
+    assert 'scale' not in stats
+    span = stats['p95'] - stats['p5']
+    for f in range(3):
+        assert span[f] == 0

@@ -664,7 +664,7 @@ class DataProcessor:
             'position': positions,
             'slot': drug_data['SLOT'].to_numpy(dtype=int),
             'index': drug_data['CLINVEC_INDEX'].to_numpy(dtype=np.int32),
-            'dose': drug_data['REL_DAILY_QTY'].to_numpy(dtype=np.float32),
+            'dose': drug_data['REL_DAILY_DOSE_EQV'].to_numpy(dtype=np.float32),
         }).groupby('position'):
             values = np.full(n_slots, pad_index, dtype=np.int32)
             doses = np.zeros(n_slots, dtype=np.float32)

@@ -255,7 +255,7 @@ class EHRDataReader(Sequence):
         them. An absent file means the patient was dispensed nothing.
         """
         path = self.patient_dir(patid) / DRUGS_FILE
-        columns = ['TIMESTAMP', 'SLOT', 'CLINVEC_INDEX', 'REL_DAILY_QTY']
+        columns = ['TIMESTAMP', 'SLOT', 'CLINVEC_INDEX', 'REL_DAILY_DOSE_EQV']
         if not path.exists():
             return pd.DataFrame(
                 {c: pd.Series(dtype='float64') for c in columns}

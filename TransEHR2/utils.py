@@ -399,7 +399,7 @@ def pool_lookup_slots(
         slot_values: Tensor of shape (batch_size, max_timeseries_length, n_slots, D_f), or
             (batch_size, max_timeseries_length, D_f) for a single-slot feature.
         doses: Tensor of shape (batch_size, max_timeseries_length, n_slots) of relative daily
-            quantities, or None for a single-slot feature.
+            dose equivalents, or None for a single-slot feature.
         masks: Tensor of shape (batch_size, max_timeseries_length, n_slots), 1 on a slot a
             record actually filled, or None for a single-slot feature.
 

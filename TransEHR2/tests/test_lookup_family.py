@@ -478,7 +478,7 @@ def test_the_pool_divides_by_a_clamped_mask_sum(drug_gate):
 
 def test_a_zero_dose_timestep_pools_to_the_zero_vector(drug_gate):
     """The second: a timestep whose real slots all carry
-    ``REL_DAILY_QTY == 0`` pools to zero even though its indicator is 1,
+    ``REL_DAILY_DOSE_EQV == 0`` pools to zero even though its indicator is 1,
     and ``losses.py``'s eps guard then drops it from the reconstruction
     loss. Recorded here as expected behaviour, not a bug."""
     from TransEHR2.utils import pool_lookup_slots

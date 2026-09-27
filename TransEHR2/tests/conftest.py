@@ -66,7 +66,7 @@ STAYS_COLUMNS = ['PATID', 'STAY_INDEX', 'DATA_SOURCE', 'ADMITDATE',
                  'DISDATE', 'INDEX_TIME', 'ADMITCAT', 'ABSTRACT_TYPE',
                  'IBD_RELATED', 'DEATH_DT', 'OBS_END_DT']
 DRUGS_COLUMNS = ['PATID', 'TIMESTAMP', 'SLOT', 'DRUG_DIN', 'CLINVEC_INDEX',
-                 'CLINVEC_ATC_CODE', 'CLINVEC_ATC_NAME', 'REL_DAILY_QTY',
+                 'CLINVEC_ATC_CODE', 'CLINVEC_ATC_NAME', 'REL_DAILY_DOSE_EQV',
                  'MAINTENANCE', 'STRD_FLARE_DOSE']
 
 # Four vocabulary rows, so the pad index is 4.

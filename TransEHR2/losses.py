@@ -6,6 +6,9 @@ from torch import Tensor
 from typing import Dict, List, Optional, Tuple, Union
 
 from TransEHR2.data.custom_types import EventAssociatedTensorData, MixedTensorDataset, ValueAssociatedTensorData
+from TransEHR2.survival import (
+    cif_from_pmf, deephit_distribution, survival_from_pmf
+)
 from TransEHR2.utils import calc_time_diff
 
 
@@ -883,3 +886,153 @@ class TransformerHawkesLoss(torch.nn.Module):
 
         return overall_loss, (nll_loss, type_loss, time_loss)
     
+
+class DeepHitLoss(torch.nn.Module):
+    """DeepHit's objective for discrete-time competing risks.
+
+    Two terms, after Lee et al. (2018). The likelihood term asks the model
+    to put mass on the (cause, bin) that actually happened, and on surviving
+    the grid for those who did. The ranking term asks, for each cause
+    separately, that a patient who failed of it carry a higher cumulative
+    incidence at their own failure time than anyone who outlasted them --
+    the likelihood alone is indifferent to that ordering, and the ordering
+    is what a risk score is for.
+
+    The likelihood is defined on a single softmax over the whole
+    ``(cause, bin)`` grid, so the mass a patient does not spend is their
+    probability of surviving the horizon. Per-cause softmaxes would let
+    every cause claim near-certainty at once.
+
+    This is the loss that replaces the per-task cross-entropy the MIMIC
+    fork used: readmission and death are not two independent binary
+    questions, because a patient who dies cannot be readmitted.
+    """
+
+    def __init__(
+        self,
+        n_causes: int,
+        n_bins: int,
+        sigma: float = 0.1,
+        rank_weight: float = 1.0,
+        cause_weights: Optional[List[float]] = None
+    ):
+        """
+        Args:
+            n_causes (int): Number of competing causes the head predicts.
+            n_bins (int): Number of bins on the discrete time grid.
+            sigma (float): Scale of the ranking term's exponential. Smaller
+                values punish a mis-ordered pair more sharply and saturate
+                sooner. Defaults to 0.1, the value Lee et al. use.
+            rank_weight (float): Weight on the ranking term. 0 leaves the
+                likelihood alone, which is the ablation worth having.
+            cause_weights (List[float], optional): Per-cause weight inside
+                the ranking term, in cause order. Defaults to 1.0 each.
+                Raising a rare cause's weight buys its ordering at the cost
+                of the other's; it does not change the likelihood.
+        """
+        super().__init__()
+        self.n_causes = n_causes
+        self.n_bins = n_bins
+        self.sigma = sigma
+        self.rank_weight = rank_weight
+        if cause_weights is None:
+            cause_weights = [1.0] * n_causes
+        if len(cause_weights) != n_causes:
+            raise ValueError(f'cause_weights must have {n_causes} entries, '
+                             f'got {len(cause_weights)}')
+        self.register_buffer('cause_weights',
+                             torch.tensor(cause_weights, dtype=torch.float32))
+
+    def _likelihood(
+        self,
+        pmf: Tensor,
+        survival: Tensor,
+        bin_index: Tensor,
+        cause_index: Tensor,
+        is_event: Tensor
+    ) -> Tensor:
+        """Negative log-likelihood, averaged over the batch.
+
+        A censored episode contributes the probability of surviving past
+        the bin it was censored in, which is the most the discretization
+        knows about it: within-bin follow-up is not recoverable once the
+        time axis is binned.
+        """
+        eps = 1e-8
+        rows = torch.arange(pmf.size(0), device=pmf.device)
+
+        # clamp(min=0) only guards the gather index for censored rows, whose
+        # cause_index is -1; the value taken there is discarded by the where.
+        p_event = pmf[rows, cause_index.clamp(min=0), bin_index]
+        p_censored = survival[rows, bin_index].clamp(min=0.0)
+        likelihood = torch.where(is_event, p_event, p_censored)
+        return -torch.log(likelihood + eps).mean()
+
+    def _ranking(
+        self,
+        cif: Tensor,
+        bin_index: Tensor,
+        cause_index: Tensor,
+        is_event: Tensor
+    ) -> Tensor:
+        """Pairwise ranking penalty, summed over causes.
+
+        For cause ``k`` the acceptable pairs are ``(i, j)`` with ``i``
+        failing of ``k`` at bin ``t_i`` and ``j`` still event-free after
+        ``t_i``. Both incidences are read at ``t_i``: comparing a patient's
+        risk at their own failure time against another's risk at that same
+        time is what makes the comparison fair, and it is why the measure
+        is time-dependent rather than a single global ranking.
+        """
+        total = cif.new_zeros(())
+        for k in range(self.n_causes):
+            # risk[i, j] = F_k(t_i | x_j): each column a patient, each row
+            # the failure time being asked about.
+            risk = cif[:, k, :][:, bin_index].t()
+            own = risk.diagonal().unsqueeze(1)                 # (batch, 1)
+
+            cases = is_event & (cause_index == k)              # (batch,)
+            outlasts = bin_index.unsqueeze(0) > bin_index.unsqueeze(1)
+            acceptable = cases.unsqueeze(1) & outlasts
+            n_pairs = acceptable.sum()
+            if n_pairs == 0:
+                continue
+
+            penalty = torch.exp(-(own - risk) / self.sigma)
+            total = total + self.cause_weights[k] * (
+                (penalty * acceptable).sum() / n_pairs
+            )
+        return total
+
+    def forward(
+        self,
+        logits: Tensor,
+        bin_index: Tensor,
+        cause_index: Tensor,
+        is_event: Tensor
+    ) -> Tuple[Tensor, Tuple[Tensor, Tensor]]:
+        """
+        Args:
+            logits (Tensor): (batch, n_causes * n_bins) head output.
+            bin_index (Tensor): (batch,) bin the episode ends in.
+            cause_index (Tensor): (batch,) position in ``survival.CAUSES``,
+                or -1 for a censored episode.
+            is_event (Tensor): (batch,) bool, True where an outcome was
+                observed inside the grid.
+
+        Returns:
+            Tuple of the weighted total and its two parts,
+            ``(total, (nll, ranking))``.
+        """
+        pmf, p_survive = deephit_distribution(logits, self.n_causes,
+                                              self.n_bins)
+        cif = cif_from_pmf(pmf)
+        survival = survival_from_pmf(pmf, p_survive)
+
+        nll = self._likelihood(pmf, survival, bin_index, cause_index,
+                               is_event)
+        if self.rank_weight == 0:
+            ranking = pmf.new_zeros(())
+        else:
+            ranking = self._ranking(cif, bin_index, cause_index, is_event)
+        return nll + self.rank_weight * ranking, (nll, ranking)

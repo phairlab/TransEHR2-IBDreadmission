@@ -51,8 +51,7 @@ def _build_model(aggr='max') -> MixedClassifier:
         aggr=aggr,
     )
     # Read the aggregated embedding directly, not a learned projection of it.
-    model.linear = torch.nn.Identity()
-    model.linear1 = torch.nn.Identity()
+    model.head = torch.nn.Identity()
     model.eval()
     return model
 
@@ -72,8 +71,10 @@ def _aggregated(model, masks) -> torch.Tensor:
     return out[:, 0]
 
 
-def _gelu(values) -> torch.Tensor:
-    return torch.nn.functional.gelu(torch.tensor(values, dtype=torch.float32))
+def _raw(values) -> torch.Tensor:
+    """The aggregation itself. ``model.head`` is stubbed out, so no
+    activation stands between the pooled embedding and the return."""
+    return torch.tensor(values, dtype=torch.float32)
 
 
 def test_max_ignores_left_padding_instead_of_taking_it():
@@ -83,7 +84,7 @@ def test_max_ignores_left_padding_instead_of_taking_it():
     masks[1, 1:] = 1.0   # observed at t=1..4  -> values -2..-5   -> max -2
 
     got = _aggregated(_build_model(), masks)
-    assert torch.allclose(got, _gelu([-3.0, -2.0]), atol=1e-6), (
+    assert torch.allclose(got, _raw([-3.0, -2.0]), atol=1e-6), (
         f'expected gelu([-3, -2]), got {got.tolist()}; zeroed padding won the '
         'max, so the readout depends on how much padding the episode carries'
     )
@@ -98,7 +99,7 @@ def test_max_does_not_depend_on_the_amount_of_padding():
 
     a = _aggregated(_build_model(), narrow)
     b = _aggregated(_build_model(), wide)
-    assert not torch.allclose(a, _gelu([0.0]), atol=1e-6), (
+    assert not torch.allclose(a, _raw([0.0]), atol=1e-6), (
         'the maximum came back 0, which no observed record produced'
     )
     # Both carry two observed records whose values are the two most negative
@@ -113,6 +114,6 @@ def test_all_padding_row_is_sent_to_zero():
 
     got = _aggregated(_build_model(), masks)
     assert torch.isfinite(got).all(), f'non-finite readout: {got.tolist()}'
-    assert torch.allclose(got[0], _gelu([0.0]), atol=1e-6), (
+    assert torch.allclose(got[0], _raw([0.0]), atol=1e-6), (
         f'an all-padding row should read zero, got {got[0].item()}'
     )

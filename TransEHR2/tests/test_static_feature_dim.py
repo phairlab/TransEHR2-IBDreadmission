@@ -26,10 +26,9 @@ REPO_ROOT = os.path.dirname(
 )
 
 ENTRY_POINTS = [
-    'run_experiment_accelerate.py',
-    'tune_hyperparameters_accelerate.py',
+    'run_experiment.py',
+    'tune_hyperparameters.py',
     'dump_finetuned_predictions.py',
-    os.path.join('TransEHR2', 'test_tune_hyperparameters.py'),
 ]
 
 

@@ -1218,3 +1218,68 @@ class TransformerHawkesProcess(torch.nn.Module):
         time_pred *= non_pad_mask[..., None]  # [batch_size, max_ts_len, 1]
 
         return enc_output, (type_pred, time_pred)
+
+
+class DeepHitHead(torch.nn.Module):
+    """DeepHit's output head: one shared stack, then one stack per cause.
+
+    The shared stack learns what readmission and death have in common --
+    most of the signal, since both follow from how sick the patient is --
+    and each cause's own stack learns what separates them. Each cause
+    subnetwork also sees the raw encoding alongside the shared
+    representation, the residual path from Lee et al. (2018), so a cause
+    is never restricted to what the shared bottleneck happened to keep.
+
+    The output is a flat ``(batch, n_causes * n_bins)`` block of logits, in
+    cause-major order. It is not a distribution yet: one softmax over the
+    whole block, with a slot appended for surviving the horizon, is taken
+    in ``survival.deephit_distribution``, because the causes have to share
+    a simplex for the competing-risks reading to hold.
+    """
+
+    def __init__(
+        self,
+        d_in: int,
+        n_causes: int,
+        n_bins: int,
+        d_shared: int = 128,
+        d_cause: int = 64,
+        dropout: float = 0.1
+    ):
+        """
+        Args:
+            d_in (int): Width of the encoding coming out of the trunk.
+            n_causes (int): Number of competing causes.
+            n_bins (int): Number of bins on the discrete time grid.
+            d_shared (int): Width of the shared subnetwork.
+            d_cause (int): Width of each cause-specific subnetwork.
+            dropout (float): Dropout applied after each hidden activation.
+        """
+        super().__init__()
+        self.n_causes = n_causes
+        self.n_bins = n_bins
+        self.shared = torch.nn.Sequential(
+            torch.nn.Linear(d_in, d_shared),
+            torch.nn.GELU(),
+            torch.nn.Dropout(dropout),
+        )
+        self.causes = torch.nn.ModuleList([
+            torch.nn.Sequential(
+                torch.nn.Linear(d_shared + d_in, d_cause),
+                torch.nn.GELU(),
+                torch.nn.Dropout(dropout),
+                torch.nn.Linear(d_cause, n_bins),
+            )
+            for _ in range(n_causes)
+        ])
+
+    def forward(self, enc: Tensor) -> Tensor:
+        """
+        Args:
+            enc (Tensor): (batch, d_in) encoding from the trunk.
+
+        Returns:
+            Tensor: (batch, n_causes * n_bins) logits, cause-major.
+        """
+        shared = torch.cat([self.shared(enc), enc], dim=1)
+        return torch.cat([stack(shared) for stack in self.causes], dim=1)

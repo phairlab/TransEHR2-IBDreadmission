@@ -124,15 +124,15 @@ longer matches, so rebuild it after any re-extraction.
 ## Running an experiment
 
 ```shell
-accelerate launch --config_file TransEHR2/configs/accelerate_config_ddp.yaml \
-    run_experiment_accelerate.py \
+python run_experiment.py \
     TransEHR2/configs/datasets/RMT23345.yaml \
     TransEHR2/configs/experiments/experiment1_baseline.yaml
 ```
 
 An experiment is pretraining, finetuning, and evaluation on a held-out test
-set, repeated per fold. [`tune_hyperparameters_accelerate.py`](tune_hyperparameters_accelerate.py)
-takes the same two config arguments and searches instead of training once.
+set, repeated per fold. [`tune_hyperparameters.py`](tune_hyperparameters.py)
+takes the same two config arguments and sweeps one pretraining
+hyperparameter at a time instead of training once.
 
 Parameters live in `TransEHR2/configs/`: one file per dataset under
 `datasets/`, one per experiment under `experiments/`. **The paths in the
@@ -140,11 +140,76 @@ shipped configs are absolute and point at the original author's machine** —
 edit `DATA_DIR`, `VARIABLE_PROPERTIES_PATH`, `CLINVEC_PATH` and `MODEL_DIR`
 before your first run.
 
-The experiment scripts require Accelerate to be configured for either
-multi-GPU DDP or FSDP, and refuse anything else;
-`accelerate_config_ddp.yaml` and `accelerate_config_fsdp.yaml` are starting
-points. Use FSDP when text features are enabled, which shards the LLM across
-GPUs to relieve memory pressure.
+### One GPU per process
+
+There is no data parallelism: a run occupies one GPU, and the way to use
+several is to give each one its own fold, which share nothing but the
+memory-mapped arrays.
+
+```shell
+for f in 0 1 2 3 4; do
+    CUDA_VISIBLE_DEVICES=$f python run_experiment.py \
+        TransEHR2/configs/datasets/RMT23345.yaml \
+        TransEHR2/configs/experiments/experiment1_baseline.yaml \
+        --folds fold$f &
+done; wait
+```
+
+`--device` picks the card directly when `CUDA_VISIBLE_DEVICES` is not how
+the scheduler hands them out.
+
+## What the model predicts
+
+One outcome, fitted as competing risks with DeepHit on a discrete grid of
+time bins: unplanned readmission, death, and out-migration. They compete
+because a patient who dies cannot be readmitted, so a model scoring them
+separately would describe a cohort that cannot exist.
+
+Out-migration is a cause rather than censoring because leaving the province
+is a period of missing data, not the end of the record, and this data is
+already incomplete — it holds no trace of most of a patient's contacts with
+the health system. Treating a departure as censoring would assume it says
+nothing about readmission risk. `EVENT_TYPE` 0, administrative censoring, is
+the only thing still treated as censoring.
+
+`MODELLED_CAUSES` in the experiment config decides which `EVENT_TYPE`s get a
+cause axis; anything left out of it falls back to censoring, so the
+two-cause arm costs a config line rather than a code change.
+
+The grid is `TIME_GRID_CUTS_DAYS` in the experiment config, six bins by
+default: 30, 60 and 90 days, then 1, 3 and 5 years. The last cut is the
+horizon; an event past it is an episode observed through the whole grid
+without one.
+
+The MIMIC fork's three tasks are gone. In-hospital mortality does not exist
+in data that follows patients after discharge, and length of stay and
+phenotyping were never IBD questions.
+
+### The Hawkes process is optional
+
+`USE_THP: False` removes the Transformer Hawkes process from pretraining.
+Its log-likelihood integrates an intensity over inter-event gaps, so a broad
+dynamic range of timestamps makes it diverge; that is the form of the loss,
+not its scale, and no reweighting fixes it. With the switch off the event
+stream still reaches the classifier — the event encoder simply learns during
+finetuning rather than being handed pretrained weights.
+
+## Scoring a trained model
+
+```shell
+python dump_finetuned_predictions.py \
+    TransEHR2/configs/datasets/RMT23345.yaml \
+    TransEHR2/configs/experiments/experiment1_baseline.yaml \
+    experiment1_baseline --model_dir ./models
+python evaluate_finetuned_predictions.py experiment1_baseline \
+    --model_dir ./models \
+    --experiment_config TransEHR2/configs/experiments/experiment1_baseline.yaml
+```
+
+The first writes each episode's cumulative incidence at every cut, per
+cause; the second reads those CSVs back and writes one YAML per split with
+the per-fold metrics. Scoring from files rather than from the training loop
+means a change of metric costs a re-read rather than a re-fit.
 
 ## Tests
 

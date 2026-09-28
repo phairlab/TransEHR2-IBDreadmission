@@ -786,6 +786,12 @@ class TextBalancedDistributedSampler(Sampler):
     """
     Distributed sampler that balances text density across ranks.
 
+    NOTE: nothing constructs this any more. Training runs one process per
+    GPU with no data parallelism, so there are no ranks to balance across
+    and ``prepare_dataloaders`` shuffles the loader itself. Kept because it
+    is the non-obvious half of a multi-GPU setup and would have to be
+    rewritten from scratch if one is ever wanted again.
+
     Within each meta-batch (batch_size * world_size samples), episodes are
     sorted by text density and assigned to ranks via round-robin, ensuring
     each rank gets a mix of text-heavy and text-light episodes.
@@ -2469,9 +2475,6 @@ def prepare_dataloaders(
     num_workers: int = 4,
     pin_memory: bool = True,
     prefetch_factor: int = 2,
-    balance_text: bool = False,
-    world_size: Optional[int] = None,
-    rank: Optional[int] = None
 ) -> List[DataLoader]:
     """Prepare training, (validation) and test DataLoaders for one fold.
 
@@ -2503,15 +2506,6 @@ def prepare_dataloaders(
             worker. Defaults to 2. Higher values increase memory usage but
             can improve throughput if batch processing by the model is
             slower than data loading. Only effective if num_workers > 0.
-        balance_text (bool, optional): If True and running distributed
-            (world_size > 1), use TextBalancedDistributedSampler to balance
-            text density across ranks for all partitions. Defaults to
-            False.
-        world_size (int, optional): Number of distributed processes.
-            Required if balance_text=True.
-        rank (int, optional): Current process rank. Required if
-            balance_text=True.
-
     Returns:
         List[DataLoader]: DataLoaders in order: [train_loader, val_loader
             (if available), test_loader]. If the fold has no validation
@@ -2520,21 +2514,10 @@ def prepare_dataloaders(
     Raises:
         FileNotFoundError: If the fold's train or test row array is not
             found, or the fold has no standardization statistics.
-        ValueError: If balance_text=True but world_size or rank is not
-            given, or if a row array indexes past the extracted cohort.
+        ValueError: If a row array indexes past the extracted cohort.
     """
-    if balance_text and (world_size is None or rank is None):
-        raise ValueError(
-            "world_size and rank are required when balance_text=True"
-        )
-
     dataset = load_dataset(
         os.path.join(data_dir, 'extracted'), fold=fold_name
-    )
-    # Counted once over the cohort, then indexed per partition.
-    cohort_text_counts = (
-        get_text_counts_from_dataset_vectorized(dataset)
-        if balance_text else None
     )
 
     fold_dir = os.path.join(data_dir, fold_name)
@@ -2565,28 +2548,15 @@ def prepare_dataloaders(
             )
         subset = Subset(dataset, rows.tolist())
 
-        # Determine sampler and shuffle behavior
-        sampler = None
+        # One process, so the loader shuffles for itself: text-density
+        # balancing existed to keep ranks from waiting on whichever one drew
+        # the text-heavy episodes, and there are no other ranks to wait for.
         shuffle = (partition == 'train')
-
-        # Only add balanced sampler if explicitly requested AND distributed
-        if balance_text and world_size is not None and world_size > 1:
-            sampler = TextBalancedDistributedSampler(
-                dataset=subset,
-                text_counts=cohort_text_counts[rows],
-                batch_size=batch_size,
-                num_replicas=world_size,
-                rank=rank,
-                shuffle=shuffle,  # True for train, False for val/test
-                drop_last=False
-            )
-            shuffle = False  # Sampler handles shuffling
 
         loader = DataLoader(
             subset,
             batch_size=batch_size,
-            shuffle=shuffle if sampler is None else False,
-            sampler=sampler,
+            shuffle=shuffle,
             collate_fn=collate_tensorized,
             num_workers=num_workers,
             pin_memory=pin_memory if num_workers > 0 else False,

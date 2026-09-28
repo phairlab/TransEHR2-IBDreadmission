@@ -80,6 +80,14 @@ PRETRAIN_TOTAL_EPOCH: 200
 
 DISC_LOSS_WEIGHT: 1.0
 
+# Whether the Transformer Hawkes process takes part in pretraining. Its
+# log-likelihood integrates an intensity over inter-event gaps, so a broad
+# dynamic range of timestamps makes it diverge; no reweighting fixes that,
+# because it is the form of the loss rather than its scale. False removes
+# the module, drops its term from the objective, and leaves the event
+# encoder unpretrained -- the classifier still reads the event stream, and
+# trains that encoder during finetuning instead.
+USE_THP: False
 USE_THP_PRED_LOSS: True
 THP_LOSS_MC_SAMPLES: 100
 THP_LOSS_NLL_WEIGHT: 0.01

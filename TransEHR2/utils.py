@@ -2,10 +2,8 @@ import numpy as np
 import os
 import time
 import torch
-import torch.distributed as dist
 import yaml
 
-from accelerate import Accelerator
 from datetime import timedelta
 from torch import Tensor
 from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Union
@@ -14,20 +12,18 @@ from TransEHR2.data.datasets import MixedDataset
 from TransEHR2.data.custom_types import MixedTensorDataset
 
 
-class DistributedTimer:
-    """Simplified timer for tracking pretraining times with checkpoint coordination."""
-    
+class Timer:
+    """Wall-clock accounting for a run, survivable across checkpoints.
+
+    One process, so a phase is timed by reading the clock twice. The
+    distributed version this replaces put a barrier at each end so that
+    every rank agreed on when a phase started; with no ranks there is
+    nothing to agree about.
+    """
+
     def __init__(self, results_path: str = None):
         self.results_path = results_path
-        self.world_size = 1
-        self.rank = 0
-        
-        # Initialize distributed info if available
-        if dist.is_available() and dist.is_initialized():
-            self.world_size = dist.get_world_size()
-            self.rank = dist.get_rank()
-            self.is_main_process = (self.rank == 0)
-        
+
         self.times = {
             'total_start_time': None,
             'pretrain_total_time': 0.0,
@@ -39,7 +35,6 @@ class DistributedTimer:
             'current_fold_start_time': None,
             'current_phase_start_time': None,
             'current_phase_elapsed': 0.0,
-            'world_size': self.world_size
         }
     
     def start_total_timing(self):
@@ -59,26 +54,19 @@ class DistributedTimer:
             }
         self.times['current_fold_start_time'] = time.time()
     
-    def start_phase(self, phase: str, is_main_process: bool):
+    def start_phase(self, phase: str):
         """Start timing a phase (pretrain/finetune)."""
-        if self.world_size > 1 and dist.is_available() and dist.is_initialized():
-            dist.barrier()
-        
         # If resuming from checkpoint, account for already elapsed time
         if self.times['current_phase_elapsed'] > 0:
             self.times['current_phase_start_time'] = time.time() - self.times['current_phase_elapsed']
-            if is_main_process:
-                print(f"Resuming {phase} phase with {self.times['current_phase_elapsed']:.1f}s already elapsed")
+            print(f"Resuming {phase} phase with {self.times['current_phase_elapsed']:.1f}s already elapsed")
         else:
             self.times['current_phase_start_time'] = time.time()
     
-    def end_phase(self, phase: str, is_main_process: bool):
+    def end_phase(self, phase: str):
         """End timing a phase and update totals."""
         if self.times['current_phase_start_time'] is None:
             return 0.0
-        
-        if self.world_size > 1 and dist.is_available() and dist.is_initialized():
-            dist.barrier()
         
         elapsed = time.time() - self.times['current_phase_start_time']
         
@@ -98,34 +86,29 @@ class DistributedTimer:
         self.times['current_phase_elapsed'] = 0.0
         
         # Save results immediately
-        if is_main_process:
-            self.save_results(is_main_process)
+        self.save_results()
         
         return elapsed
     
-    def end_fold(self, is_main_process: bool):
+    def end_fold(self):
         """End timing current fold."""
         if self.times['current_fold'] and self.times['current_fold_start_time']:
             fold_name = self.times['current_fold']
             total_fold_time = time.time() - self.times['current_fold_start_time']
             self.times['fold_times'][fold_name]['total_time'] = total_fold_time
             
-            if is_main_process:
-                print(f"\n{'='*60}")
-                print(f"FOLD {fold_name.upper()} COMPLETED")
-                print(f"{'='*60}")
-                print(f"Most recent pretraining time: {self._format_time(self.times['most_recent_pretrain_time'])}")
-                print(f"Most recent finetuning time: {self._format_time(self.times['most_recent_finetune_time'])}")
-                print(f"Total fold time: {self._format_time(total_fold_time)}")
-                if self.world_size > 1:
-                    print(f"World size: {self.world_size} GPUs")
-                print(f"{'='*60}\n")
+            print(f"\n{'='*60}")
+            print(f"FOLD {fold_name.upper()} COMPLETED")
+            print(f"{'='*60}")
+            print(f"Most recent pretraining time: {self._format_time(self.times['most_recent_pretrain_time'])}")
+            print(f"Most recent finetuning time: {self._format_time(self.times['most_recent_finetune_time'])}")
+            print(f"Total fold time: {self._format_time(total_fold_time)}")
+            print(f"{'='*60}\n")
         
         self.times['current_fold'] = None
         self.times['current_fold_start_time'] = None
         
-        if is_main_process:
-            self.save_results(is_main_process)
+        self.save_results()
     
     def get_timer_state_for_checkpoint(self) -> dict:
         """Get timer state to include in model checkpoints."""
@@ -139,7 +122,7 @@ class DistributedTimer:
             'current_phase_elapsed': current_elapsed
         }
     
-    def restore_from_checkpoint(self, checkpoint_data: dict, is_main_process: bool):
+    def restore_from_checkpoint(self, checkpoint_data: dict):
         """Restore timer state from model checkpoint."""
         if 'timer_state' in checkpoint_data:
             timer_state = checkpoint_data['timer_state']
@@ -148,10 +131,9 @@ class DistributedTimer:
             self.times.update(timer_state)
             self.times['current_phase_elapsed'] = current_elapsed
             
-            if is_main_process:
-                print(f"Restored timer state from checkpoint")
-                if current_elapsed > 0:
-                    print(f"Will resume with {current_elapsed:.1f}s already elapsed")
+            print(f"Restored timer state from checkpoint")
+            if current_elapsed > 0:
+                print(f"Will resume with {current_elapsed:.1f}s already elapsed")
     
     def get_total_time(self):
         """Get total experiment time."""
@@ -159,17 +141,12 @@ class DistributedTimer:
             return time.time() - self.times['total_start_time']
         return 0.0
     
-    def print_final_summary(self, is_main_process: bool):
+    def print_final_summary(self):
         """Print final timing summary."""
-        if not is_main_process:
-            return
-        
         total_time = self.get_total_time()
         
         print(f"\n{'='*80}")
         print(f"EXPERIMENT TIMING SUMMARY")
-        if self.world_size > 1:
-            print(f"Multi-GPU Training: {self.world_size} GPUs")
         print(f"{'='*80}")
         print(f"Total experiment time: {self._format_time(total_time)}")
         print(f"Total cumulative pretraining time: {self._format_time(self.times['pretrain_total_time'])}")
@@ -177,18 +154,6 @@ class DistributedTimer:
         print()
         print(f"Most recent model pretraining time: {self._format_time(self.times['most_recent_pretrain_time'])}")
         print(f"Most recent model finetuning time: {self._format_time(self.times['most_recent_finetune_time'])}")
-        
-        if self.world_size > 1:
-            recent_pretrain_gpu_hours = self.times['most_recent_pretrain_time'] * self.world_size
-            recent_finetune_gpu_hours = self.times['most_recent_finetune_time'] * self.world_size
-            total_pretrain_gpu_hours = self.times['pretrain_total_time'] * self.world_size
-            total_finetune_gpu_hours = self.times['finetune_total_time'] * self.world_size
-            
-            print(f"\nEffective compute time (GPU-hours):")
-            print(f"  Most recent model pretraining: {self._format_time(recent_pretrain_gpu_hours)}")
-            print(f"  Most recent model finetuning: {self._format_time(recent_finetune_gpu_hours)}")
-            print(f"  Total cumulative pretraining: {self._format_time(total_pretrain_gpu_hours)}")
-            print(f"  Total cumulative finetuning: {self._format_time(total_finetune_gpu_hours)}")
         
         if self.times['fold_times']:
             print(f"\nPer-fold breakdown:")
@@ -202,12 +167,11 @@ class DistributedTimer:
         print(f"{'='*80}\n")
         
         # Final save
-        if is_main_process:
-            self.save_results(is_main_process)
+        self.save_results()
     
-    def save_results(self, is_main_process: bool):
+    def save_results(self):
         """Save timing results to disk."""
-        if not is_main_process or not self.results_path:
+        if not self.results_path:
             return
             
         os.makedirs(os.path.dirname(self.results_path), exist_ok=True)
@@ -224,18 +188,14 @@ class DistributedTimer:
         """Format time in human-readable format."""
         return str(timedelta(seconds=int(seconds)))
 
-# Keep backward compatibility and add convenience function
-Timer = DistributedTimer
-
-
-def create_timer(results_dir: str = None, experiment_name: str = "experiment") -> DistributedTimer:
+def create_timer(results_dir: str = None, experiment_name: str = "experiment") -> Timer:
     """Create a timer with simplified settings."""
     
     results_path = None
     if results_dir:
         results_path = os.path.join(results_dir, f"{experiment_name}_timing_results.yaml")
     
-    return DistributedTimer(results_path=results_path)
+    return Timer(results_path=results_path)
 
 
 def _densify_lookup_entry(lookup: Dict[str, Any]) -> Dict[str, Any]:
@@ -315,12 +275,14 @@ def densify_lookup_slots(batch: MixedTensorDataset) -> MixedTensorDataset:
 def move_batch_to_device(batch: MixedTensorDataset, device: torch.device) -> MixedTensorDataset:
     """Recursively move all tensors in a batch to the specified device.
     
-    This is needed when using custom samplers that bypass accelerator.prepare_data_loader(),
-    which would otherwise handle automatic device transfer.
+    Every training and inference loop calls this on each batch: the DataLoader
+    hands back CPU tensors and nothing else moves them. It is also where the
+    lookup family's sparse blocks are densified, so a batch that has not been
+    through here is not the batch a model is ever handed.
     
     Args:
         batch: The batch dictionary from the dataloader
-        device: Target device (e.g., accelerator.device)
+        device: Target device
         
     Returns:
         The batch with all tensors moved to the specified device
@@ -846,88 +808,90 @@ def format_pretraining_performance_table(
     return "\n".join(table_lines)
 
 
+# Row labels for the survival scores, in the order they should print. A
+# score not named here still prints, after these, under its own key with
+# underscores turned into spaces: the metric set grows with the number of
+# cuts on the time grid, so the table cannot enumerate it.
+SCORE_LABELS = (
+    ('Loss_DeepHit', 'DeepHit objective:'),
+    ('Loss_DeepHit_NLL', '  likelihood term:'),
+    ('Mean_Cindex', 'Mean C-index (time-dependent):'),
+    ('Readmission_Cindex', '  readmission:'),
+    ('Death_Cindex', '  death:'),
+    ('Readmission_Integrated_Brier', 'Integrated Brier, readmission:'),
+    ('Death_Integrated_Brier', 'Integrated Brier, death:'),
+)
+
+# Counts rather than scores: printed as integers and kept out of the
+# per-horizon block.
+COUNT_KEYS = ('Readmission_Events', 'Death_Events', 'Censored')
+
+
 def format_finetuning_performance_table(
-    task: str,
     train_scores: dict,
     val_scores: dict,
-    test_scores: dict
+    test_scores: dict,
+    title: str = 'Competing-Risks Model Performance'
 ) -> str:
-    """Format an ASCII table for finetuning metrics."""
-    
-    # Fixed width calculation: same as pretraining table
+    """Format an ASCII table for the finetuning metrics.
+
+    Driven by the score dict rather than by a task name. The old table
+    hard-coded one block of rows per prediction task; there is one task
+    now, and its metric set is a function of how many cuts the time grid
+    has, so the rows are read off the scores instead of listed.
+    """
+
     TABLE_WIDTH = 60
     CONTENT_WIDTH = 58
-    DESC_WIDTH = 37  # Maximum description width
-    VALUE_WIDTH = 17  # Maximum value width (12 digits + 1 decimal + 4 trailing)
-    
-    def format_value(value, is_string=False):
-        """Format a value to occupy exactly 17 characters if ≤12 leading digits."""
-        if is_string:
-            return f"{value:>{VALUE_WIDTH}}"
-        
-        # Format the number with 4 decimal places
-        formatted = f"{value:.4f}"
-        
-        # Find the decimal point position to count leading digits
-        decimal_pos = formatted.find('.')
-        leading_digits = decimal_pos
-        
-        # If 12 or fewer leading digits, pad to exactly 17 characters
-        if leading_digits <= 12:
-            padding_needed = max(0, 12 - leading_digits)
-            padded_value = " " * padding_needed + formatted
-            return f"{padded_value:>{VALUE_WIDTH}}"[:VALUE_WIDTH]
+    DESC_WIDTH = 37
+    VALUE_WIDTH = 17
+
+    def format_value(value, integer=False):
+        """Format a value to occupy exactly 17 characters."""
+        if value is None:
+            formatted = '--'
+        elif isinstance(value, str):
+            formatted = value
+        elif not np.isfinite(value):
+            formatted = 'n/a'
+        elif integer:
+            formatted = f"{int(round(value)):,}"
         else:
-            # More than 12 leading digits - no padding, will misalign
-            return formatted
-    
+            formatted = f"{value:.4f}"
+        return f"{formatted:>{VALUE_WIDTH}}"[:VALUE_WIDTH]
+
+    def row(label, value, integer=False):
+        return (f"\u2502 {label:<{DESC_WIDTH}}    "
+                f"{format_value(value, integer)} \u2502")
+
+    def ordered_keys(scores: dict):
+        named = {k for k, _ in SCORE_LABELS} | set(COUNT_KEYS)
+        return [k for k in scores if k not in named]
+
     def format_score_section(scores: dict, section_title: str) -> list:
-        lines = []
-        lines.append(f"│ {section_title:<{CONTENT_WIDTH}} │")
-        lines.append("├" + "─" * TABLE_WIDTH + "┤")
-        
-        if task == 'mortality':
-            lines.append(f"│ {'Mean cross-entropy loss:':<{DESC_WIDTH}}    {format_value(scores['Loss_Cross_Entropy'])} │")
-            lines.append(f"│ {'Accuracy:':<{DESC_WIDTH}}    {format_value(scores['Accuracy'])} │")
-            lines.append(f"│ {'AUROC:':<{DESC_WIDTH}}    {format_value(scores['AUROC'])} │")
-            lines.append(f"│ {'AUPRC:':<{DESC_WIDTH}}    {format_value(scores['AUPRC'])} │")
-            lines.append(f"│ {'F1:':<{DESC_WIDTH}}    {format_value(scores['F1_Score'])} │")
-
-        elif task == 'length_of_stay':
-            # CORRECTED: Use the actual keys from calculate_finetuning_eval_metrics
-            lines.append(f"│ {'Mean squared error loss:':<{DESC_WIDTH}}    {format_value(scores['Loss_Mean_Squared_Error'])} │")
-            lines.append(f"│ {'Mean absolute difference:':<{DESC_WIDTH}}    {format_value(scores['Mean_Absolute_Error'])} │")
-
-        else:  # phenotype
-            lines.append(f"│ {'Mean cross-entropy loss:':<{DESC_WIDTH}}    {format_value(scores['Loss_Cross_Entropy'])} │")
-            lines.append(f"│ {'Microaveraged AUROC:':<{DESC_WIDTH}}    {format_value(scores['Micro_averaged_AUROC'])} │")
-            lines.append(f"│ {'Macroaveraged AUROC:':<{DESC_WIDTH}}    {format_value(scores['Macro_averaged_AUROC'])} │")
-        
+        lines = [f"\u2502 {section_title:<{CONTENT_WIDTH}} \u2502",
+                 "\u251c" + "\u2500" * TABLE_WIDTH + "\u2524"]
+        for key, label in SCORE_LABELS:
+            if key in scores:
+                lines.append(row(label, scores[key]))
+        for key in ordered_keys(scores):
+            lines.append(row(key.replace('_', ' ') + ':', scores[key]))
+        for key in COUNT_KEYS:
+            if key in scores:
+                lines.append(row(key.replace('_', ' ') + ':', scores[key],
+                                 integer=True))
         return lines
-    
-    # Build the complete table
-    table_lines = []
-    
-    # Title
-    title = f"Finetuned {task} Model Performance"
-    table_lines.append("┌" + "─" * TABLE_WIDTH + "┐")
-    table_lines.append(f"│ {title:^{CONTENT_WIDTH}} │")
-    table_lines.append("├" + "─" * TABLE_WIDTH + "┤")
-    
-    # Training set scores
-    table_lines.extend(format_score_section(train_scores, "Training set"))
-    table_lines.append("├" + "─" * TABLE_WIDTH + "┤")
-    
-    # Validation set scores
-    table_lines.extend(format_score_section(val_scores, "Validation set"))
-    table_lines.append("├" + "─" * TABLE_WIDTH + "┤")
-    
-    # Test set scores
-    table_lines.extend(format_score_section(test_scores, "Test set"))
-    
-    # Close table
-    table_lines.append("└" + "─" * TABLE_WIDTH + "┘")
-    
+
+    table_lines = ["\u250c" + "\u2500" * TABLE_WIDTH + "\u2510",
+                   f"\u2502 {title:^{CONTENT_WIDTH}} \u2502",
+                   "\u251c" + "\u2500" * TABLE_WIDTH + "\u2524"]
+    for scores, name in ((train_scores, "Training set"),
+                         (val_scores, "Validation set"),
+                         (test_scores, "Test set")):
+        table_lines.extend(format_score_section(scores or {}, name))
+        table_lines.append("\u251c" + "\u2500" * TABLE_WIDTH + "\u2524")
+    table_lines[-1] = "\u2514" + "\u2500" * TABLE_WIDTH + "\u2518"
+
     return "\n".join(table_lines)
 
 
@@ -1051,37 +1015,24 @@ def get_param_shapes(model: torch.nn.Module) -> OrderedDict[str, Tuple[int]]:
     return param_shapes
 
 
-def print_peak_memory(accelerator: Accelerator):
-    """Print peak memory usage across all ranks."""
+def print_peak_memory(device: torch.device):
+    """Print and reset peak CUDA memory for this process's device."""
     
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_available() or torch.device(device).type != 'cuda':
         return
     
-    peak_gb = torch.cuda.max_memory_allocated(accelerator.device) / (1024**3)
+    peak_gb = torch.cuda.max_memory_allocated(device) / (1024**3)
+    print("\n" + "="*60)
+    print("PEAK MEMORY USAGE")
+    print("="*60)
+    print(f"{device}: {peak_gb:.3f} GB")
+    print("="*60 + "\n")
     
-    rank_data = {
-        'rank': accelerator.process_index,
-        'peak_gb': peak_gb
-    }
-    
-    all_ranks = accelerator.gather_for_metrics([rank_data])
-    
-    if accelerator.is_main_process:
-        print("\n" + "="*60)
-        print("PEAK MEMORY USAGE")
-        print("="*60)
-        for data in all_ranks:
-            print(f"Rank {data['rank']}: {data['peak_gb']:.3f} GB")
-        print("="*60 + "\n")
-    
-    accelerator.wait_for_everyone()
-    torch.cuda.reset_peak_memory_stats(accelerator.device)
+    torch.cuda.reset_peak_memory_stats(device)
 
 
 def convert_model_to_dtype(model: torch.nn.Module, dtype: torch.dtype = torch.bfloat16) -> torch.nn.Module:
     """Convert all parameters and buffers in a model to the specified dtype.
-    
-    This should be called BEFORE accelerator.prepare() to ensure FSDP sees uniform dtypes.
     
     Args:
         model: The model to convert

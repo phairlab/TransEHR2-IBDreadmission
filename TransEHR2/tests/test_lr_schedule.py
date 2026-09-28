@@ -13,14 +13,13 @@ import yaml
 
 from pathlib import Path
 
-# routines_accelerate imports tensorboard at module scope, which is absent from
-# some environments -- the same gap that keeps test_tune_hyperparameters out of
-# the default run. It surfaces as an AttributeError rather than an ImportError,
+# routines imports tensorboard at module scope, which is absent from some
+# environments. It surfaces as an AttributeError rather than an ImportError,
 # so importorskip does not catch it. The config checks below need none of this
 # and run either way, which is the half that would otherwise go unchecked
 # wherever the dependency is missing.
 try:
-    from TransEHR2.routines_accelerate import (
+    from TransEHR2.routines import (
         IMPROVEMENT_THRESHOLD,
         is_improvement,
         resolve_decay_factor,
@@ -33,7 +32,7 @@ else:
 
 needs_routines = pytest.mark.skipif(
     ROUTINES_IMPORT_ERROR is not None,
-    reason=f'TransEHR2.routines_accelerate unimportable: {ROUTINES_IMPORT_ERROR}'
+    reason=f'TransEHR2.routines unimportable: {ROUTINES_IMPORT_ERROR}'
 )
 
 CONFIGS = Path(__file__).resolve().parents[1] / 'configs' / 'experiments'

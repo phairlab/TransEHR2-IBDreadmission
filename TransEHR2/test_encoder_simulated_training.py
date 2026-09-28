@@ -123,7 +123,7 @@ def _simulate_cohort(n_episodes=24, max_steps=12, seed=0, all_padding_episode=Tr
             'times': times,
             'masks': masks,
         },
-        'targets': {'mortality': labels.unsqueeze(-1)},
+        'targets': {'label': labels.unsqueeze(-1)},
     }
     return batch, labels
 
@@ -210,7 +210,7 @@ def _run_pretraining(transform=None, steps=30, seed=0):
             type_predictions,
             time_predictions,
         )
-        # The same three terms routines_accelerate.pretrain sums, so every encoder in the model
+        # The same three terms routines.pretrain_one_epoch sums, so every encoder in the model
         # is attached to the objective -- the event encoder reaches it only through this one.
         loss = (
             generator_loss_fn(outputs['generator'], outputs['masked_targets'], record_masks)

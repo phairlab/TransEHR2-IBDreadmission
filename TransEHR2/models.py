@@ -12,12 +12,23 @@ from TransEHR2.utils import (
 
 
 class ELECTRA(torch.nn.Module):
+    """The pretraining model: a masked generator, a discriminator, and
+    optionally a Transformer Hawkes process over the event stream.
+
+    ``hawkes`` is optional because the THP term can be switched off. Its
+    log-likelihood integrates an intensity over inter-event gaps, so a
+    broad dynamic range of timestamps makes it diverge, and no reweighting
+    fixes that -- it is the shape of the loss, not its scale. Passing None
+    leaves the event stream out of *pretraining* only; the downstream
+    classifier still encodes it, starting from a random initialization
+    rather than from pretrained weights.
+    """
 
     def __init__(
         self,
         generator: MaskedTokenGenerator,
         discriminator: MaskedTokenDiscriminator,
-        hawkes: TransformerHawkesProcess,
+        hawkes: Optional[TransformerHawkesProcess] = None,
         use_lookup: bool = False,
     ):
         super().__init__()
@@ -291,8 +302,9 @@ class ELECTRA(torch.nn.Module):
         """
         outputs = {}
         
-        # Process event data if available
-        if 'event_data' in batch:
+        # Process event data if the Hawkes process is switched on and there
+        # is an event stream to give it.
+        if self.hawkes is not None and 'event_data' in batch:
             event_enc, event_pred = self.hawkes(batch['event_data'])
             outputs['hawkes_encodings'] = event_enc
             outputs['hawkes_predictions'] = event_pred  # A tuple of (event_type_prediction, time_prediction)
@@ -378,6 +390,7 @@ class MixedClassifier(torch.nn.Module):
         num_classes: int,
         aggr: str = 'max',
         use_lookup: bool = False,
+        head: Optional[torch.nn.Module] = None,
     ):
         """Initialize MixedClassifier.
 
@@ -390,15 +403,38 @@ class MixedClassifier(torch.nn.Module):
             num_classes: Number of output classes
             aggr: Aggregation method ('max' or 'mean') for sequence-level encoding
             use_lookup: If True, the model will expect pre-computed lookup embeddings in the input batch.
+            head: Module mapping the pooled encoding to logits. Defaults to the
+                two-layer stack this class has always used, which returns
+                `num_classes` logits. A DeepHitHead goes here instead, because a
+                competing-risks head needs per-cause capacity that a shared
+                32-unit bottleneck cannot give it.
         """
 
         super().__init__()
         self.event_encoder = event_encoder
         self.val_encoder = val_encoder
-        self.linear = torch.nn.Linear(d_event_enc + d_val_enc + d_statics, 32)
-        self.linear1 = torch.nn.Linear(32, num_classes)
+        d_enc = self.encoding_width(d_event_enc, d_val_enc, d_statics)
+        if head is None:
+            head = torch.nn.Sequential(
+                torch.nn.Linear(d_enc, 32),
+                torch.nn.GELU(),
+                torch.nn.Linear(32, num_classes),
+            )
+        self.head = head
         self.aggr = aggr
         self.use_lookup = use_lookup
+
+    @staticmethod
+    def encoding_width(d_event_enc: int, d_val_enc: int, d_statics: int) -> int:
+        """Width of the vector the head receives.
+
+        `forward` concatenates the event encoding, the value encoding and the
+        static block in that order, so this is their sum. It exists as a
+        method because a caller building its own head has to size it, and
+        two copies of this sum would drift the moment the concatenation
+        changes.
+        """
+        return d_event_enc + d_val_enc + d_statics
 
     def forward(self, batch: MixedTensorDataset, trace_grads: bool = False) -> Tensor:
         """Forward pass through the mixed classifier.
@@ -565,6 +601,5 @@ class MixedClassifier(torch.nn.Module):
             enc = embeddings[0]
         
         # Final classification layers
-        enc = self.linear(enc)
-        return self.linear1(torch.nn.functional.gelu(enc))
+        return self.head(enc)
     

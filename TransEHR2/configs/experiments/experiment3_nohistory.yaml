@@ -59,6 +59,14 @@ PRETRAIN_TOTAL_EPOCH: 1000
 DISC_LOSS_WEIGHT: 1.0
 THP_LOSS_NLL_WEIGHT: 0.01
 THP_LOSS_MC_SAMPLES: 100
+# Whether the Transformer Hawkes process takes part in pretraining. Its
+# log-likelihood integrates an intensity over inter-event gaps, so a broad
+# dynamic range of timestamps makes it diverge; no reweighting fixes that,
+# because it is the form of the loss rather than its scale. False removes
+# the module, drops its term from the objective, and leaves the event
+# encoder unpretrained -- the classifier still reads the event stream, and
+# trains that encoder during finetuning instead.
+USE_THP: False
 USE_THP_PRED_LOSS: True
 THP_PRED_LOSS_TYPE_WT: 1.0
 THP_PRED_LOSS_TIME_WT: 0.000001
@@ -70,3 +78,54 @@ CMPNT_MASK_RATIO: 0.25
 FINETUNE_LEARNING_RATE: 0.0002
 FINETUNE_TOTAL_EPOCH: 500
 FINETUNE_LR_HALF_LIFE: 132
+
+# ---- Competing risks (DeepHit) ----------------------------------------------
+#
+# Unplanned readmission and death are fitted jointly, as competing causes:
+# a patient who dies cannot be readmitted, so scoring the two separately
+# would describe a cohort that does not exist.
+
+# The right edges of the discrete time bins, in days. Six bins: 30, 60 and
+# 90 days, then 1, 3 and 5 years. The last cut is the horizon -- an event
+# beyond it is an episode observed through the whole grid without one.
+# See development/reports/event_time_distribution.html for where the events
+# actually fall.
+TIME_GRID_CUTS_DAYS: [30, 60, 90, 365, 1095, 1825]
+
+# Which EVENT_TYPEs the model treats as competing causes, in output order.
+# Anything absent is censoring, so dropping "out_migration" here gives the
+# two-cause arm without a code change.
+#
+# Out-migration is a cause rather than censoring because leaving the province
+# is a period of missing data, not the end of the record, and this data is
+# already incomplete -- it holds no trace of most of a patient's contacts
+# with the health system. Treating a departure as censoring would assume it
+# says nothing about readmission risk. IBDdataprep races it against
+# readmission and death per episode (see build_labels.py).
+MODELLED_CAUSES: ["readmission", "death", "out_migration"]
+
+# Weight on DeepHit's ranking term. The likelihood alone is indifferent to
+# whether the patient who failed carried the higher risk; 0 is the
+# ablation that says so.
+DEEPHIT_RANK_WEIGHT: 1.0
+
+# Scale of the ranking term's exponential. Smaller punishes a mis-ordered
+# pair more sharply and saturates sooner.
+DEEPHIT_SIGMA: 0.1
+
+# Per-cause weight inside the ranking term, in cause order
+# (readmission, death). Raising the rarer cause buys its ordering at the
+# other's expense; it does not touch the likelihood. null means equal.
+DEEPHIT_CAUSE_WEIGHTS: null
+
+# The head: one shared stack, then one per cause, each also seeing the raw
+# encoding.
+DEEPHIT_HEAD_D_SHARED: 128
+DEEPHIT_HEAD_D_CAUSE: 64
+DEEPHIT_HEAD_DROPOUT: 0.1
+
+# Which validation number picks the finetuned epoch. 'cindex' maximizes the
+# mean cause-specific time-dependent concordance; 'loss' minimizes the
+# DeepHit objective. They disagree: the ranking term rewards ordering the
+# cohort, the likelihood rewards calibrating it.
+FINETUNE_SELECTION_METRIC: "cindex"

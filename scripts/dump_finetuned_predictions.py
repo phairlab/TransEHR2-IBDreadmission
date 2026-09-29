@@ -20,7 +20,7 @@ One process, one GPU: fold-level parallelism is the caller's, as in
 run_experiment.py.
 
 Usage:
-    python dump_finetuned_predictions.py <dataset_config> <experiment_config> \\
+    python scripts/dump_finetuned_predictions.py <dataset_config> <experiment_config> \\
         <experiment_name> [--model_dir ./models] [--folds fold0] \\
         [--device cuda:0] [--num_workers 0] [--batch_size 750]
 """
@@ -37,6 +37,9 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from typing import Dict, List, Tuple
 
+import _path  # noqa: F401  (repository root on sys.path)
+
+from TransEHR2.cli import TASK, get_fold_names, resolve_device
 from TransEHR2.data.preprocessing import (
     compute_static_feat_dims, prepare_dataloaders
 )
@@ -48,7 +51,6 @@ from TransEHR2.survival import (
 )
 from TransEHR2.utils import move_batch_to_device
 
-from run_experiment import TASK, get_fold_names, resolve_device
 
 
 SPLITS = ('train', 'val', 'test')

@@ -12,10 +12,18 @@ a timestamp nothing else names.
 import numpy as np
 import pandas as pd
 import pytest
+import sys
 import torch
 import yaml
 
 from pathlib import Path
+
+# The entry points live in ``scripts/`` and are not a package, but several
+# tests drive their ``main()`` directly rather than through a subprocess --
+# which is what makes the extraction assertions readable. Put that directory
+# on the path so ``from extract_data import main`` still resolves.
+sys.path.insert(
+    0, str(Path(__file__).resolve().parents[2] / "scripts"))
 
 from TransEHR2.data.preprocessing import collate_tensorized
 from TransEHR2.utils import move_batch_to_device

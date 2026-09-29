@@ -52,7 +52,7 @@ relative to the project root. Create the directory and fetch what can be
 fetched:
 
 ```shell
-bash setup_data.sh                  # or: bash setup_data.sh /path/to/data
+bash scripts/setup_data.sh          # or: bash scripts/setup_data.sh /path/to/data
 ```
 
 Set `SHARED_DATA_ROOT` in your shell profile to avoid passing the path each
@@ -60,7 +60,7 @@ time. Each file is verified against its checksum; the script is safe to
 re-run. To register a file you have added or changed:
 
 ```shell
-bash update_manifest.sh <path/relative/to/data/root> <source> <source_type>
+bash scripts/update_manifest.sh <path/relative/to/data/root> <source> <source_type>
 ```
 
 `source_type` is one of `local_copy`, `local_symlink`, `download`, or
@@ -86,7 +86,7 @@ and any saved predictions all address the same rows.
 ### 2. Extract to arrays
 
 ```shell
-python extract_data.py TransEHR2/configs/datasets/RMT23345.yaml
+python scripts/extract_data.py TransEHR2/configs/datasets/RMT23345.yaml
 ```
 
 Reads `data/root/` and `data/labels.csv` and writes `data/extracted/` — one
@@ -100,7 +100,7 @@ fold is a set of row indices into these arrays.
 ### 3. Build the lookup tables
 
 ```shell
-python embed.py TransEHR2/configs/datasets/RMT23345.yaml
+python scripts/embed.py TransEHR2/configs/datasets/RMT23345.yaml
 ```
 
 Text and drug values are not stored per timestep. Each is an `int32` row
@@ -124,13 +124,13 @@ longer matches, so rebuild it after any re-extraction.
 ## Running an experiment
 
 ```shell
-python run_experiment.py \
+python scripts/run_experiment.py \
     TransEHR2/configs/datasets/RMT23345.yaml \
     TransEHR2/configs/experiments/experiment1_baseline.yaml
 ```
 
 An experiment is pretraining, finetuning, and evaluation on a held-out test
-set, repeated per fold. [`tune_hyperparameters.py`](tune_hyperparameters.py)
+set, repeated per fold. [`tune_hyperparameters.py`](scripts/tune_hyperparameters.py)
 takes the same two config arguments and sweeps one pretraining
 hyperparameter at a time instead of training once.
 
@@ -148,7 +148,7 @@ memory-mapped arrays.
 
 ```shell
 for f in 0 1 2 3 4; do
-    CUDA_VISIBLE_DEVICES=$f python run_experiment.py \
+    CUDA_VISIBLE_DEVICES=$f python scripts/run_experiment.py \
         TransEHR2/configs/datasets/RMT23345.yaml \
         TransEHR2/configs/experiments/experiment1_baseline.yaml \
         --folds fold$f &
@@ -197,11 +197,11 @@ finetuning rather than being handed pretrained weights.
 ## Scoring a trained model
 
 ```shell
-python dump_finetuned_predictions.py \
+python scripts/dump_finetuned_predictions.py \
     TransEHR2/configs/datasets/RMT23345.yaml \
     TransEHR2/configs/experiments/experiment1_baseline.yaml \
     experiment1_baseline --model_dir ./models
-python evaluate_finetuned_predictions.py experiment1_baseline \
+python scripts/evaluate_finetuned_predictions.py experiment1_baseline \
     --model_dir ./models \
     --experiment_config TransEHR2/configs/experiments/experiment1_baseline.yaml
 ```

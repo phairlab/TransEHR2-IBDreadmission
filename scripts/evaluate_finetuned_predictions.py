@@ -10,7 +10,7 @@ Writes one YAML per split at ``{model_dir}/{experiment}/{split}_evaluation.yaml`
 each metric a list of per-fold values in fold order.
 
 Usage:
-    python evaluate_finetuned_predictions.py <experiment_name> \\
+    python scripts/evaluate_finetuned_predictions.py <experiment_name> \\
         [--model_dir ./models] [--experiment_config <yaml>]
 """
 
@@ -23,6 +23,8 @@ import yaml
 
 from collections import defaultdict
 from typing import Dict, List, Optional
+
+import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.survival import (
     DEFAULT_CAUSES, DEFAULT_CUTS_DAYS, TimeGrid, cause_specific_brier,

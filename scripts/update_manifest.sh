@@ -10,7 +10,7 @@
 # shared from being inadvertently registered for distribution.
 #
 # Usage:
-#   ./update_manifest.sh <file_path> <source> <source_type> [DATA_ROOT]
+#   ./scripts/update_manifest.sh <file_path> <source> <source_type> [DATA_ROOT]
 #
 # Arguments:
 #   file_path     Path to the file. Can be:
@@ -32,12 +32,12 @@
 #
 # Examples:
 #   # Update checksum after a file changes
-#   ./update_manifest.sh ibd/RMT23345/encounters.parquet \
+#   ./scripts/update_manifest.sh ibd/RMT23345/encounters.parquet \
 #       /home/michael/TransEHR2-IBDreadmission/data/ibd/RMT23345/encounters.parquet \
 #       local_copy
 #
 #   # Update source URL for a downloadable resource
-#   ./update_manifest.sh resources/atc_codes.csv \
+#   ./scripts/update_manifest.sh resources/atc_codes.csv \
 #       https://example.org/atc_codes.csv \
 #       download
 # -----------------------------------------------------------------------------
@@ -49,7 +49,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+# scripts/ lives one level under the project root, which is where
+# manifest.csv is and what DATA_ROOT is resolved against.
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_DATA_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)/data"
 
 if [[ $# -lt 3 ]]; then

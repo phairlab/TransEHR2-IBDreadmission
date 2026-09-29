@@ -21,9 +21,9 @@ is what makes text feasible at all: it is a few million forward passes
 for the whole study against a couple of hundred million otherwise.
 
 Usage:
-    python embed.py TransEHR2/configs/datasets/RMT23345.yaml
-    python embed.py <config> --tables drug     # no LLM is loaded
-    python embed.py <config> --tables text --batch-size 32
+    python scripts/embed.py TransEHR2/configs/datasets/RMT23345.yaml
+    python scripts/embed.py <config> --tables drug     # no LLM is loaded
+    python scripts/embed.py <config> --tables text --batch-size 32
 
 Design decisions this script commits to
 ---------------------------------------
@@ -76,6 +76,8 @@ import torch
 import yaml
 
 from typing import Callable, List, Sequence
+
+import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.constants import MAX_TOKEN_LENGTH
 from TransEHR2.data.manifest import record_checksum

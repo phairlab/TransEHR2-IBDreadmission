@@ -24,7 +24,7 @@ GB, and a digest collision at that scale is far below the precision the
 answer is wanted to.
 
 Usage:
-    python text_dedup_report.py --root /path/to/data/root
+    python scripts/text_dedup_report.py --root /path/to/data/root
 """
 
 import argparse

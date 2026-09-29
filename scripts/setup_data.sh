@@ -6,7 +6,7 @@
 # manifest, and fetches any missing or corrupt files.
 #
 # Usage:
-#   ./setup_data.sh [DATA_ROOT]
+#   ./scripts/setup_data.sh [DATA_ROOT]
 #
 # Arguments:
 #   DATA_ROOT   Optional. Absolute path to the shared data root directory.
@@ -27,7 +27,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$SCRIPT_DIR"
+# scripts/ lives one level under the project root, which is where
+# manifest.csv is and what DATA_ROOT is resolved against.
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 DEFAULT_DATA_ROOT="$(cd "$PROJECT_ROOT/.." && pwd)/data"
 
 # Priority: CLI argument > env var > default

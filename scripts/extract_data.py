@@ -69,6 +69,8 @@ import re
 import sys
 import yaml
 
+import _path  # noqa: F401  (repository root on sys.path)
+
 from TransEHR2.data.datareaders import EHRDataReader
 from TransEHR2.data.preprocessing import (
     _bucket_valued_feats, check_feature_contract, extract_data

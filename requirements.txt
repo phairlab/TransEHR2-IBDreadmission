@@ -2,7 +2,14 @@
 
 # Core deep learning
 torch>=2.3.0
-transformers>=4.30.0
+# v5. ModernBert -- BioClinical ModernBERT's architecture -- arrived in
+# 4.48.0 and is native there, so no trust_remote_code. The suite and
+# tests/test_llm_compat.py pass on 4.48.3, 4.52.4, 4.55.4, 4.56.0 and
+# 5.17.0; TransEHR2.modules.dtype_kwarg is what keeps the older ones
+# working, since from_pretrained's torch_dtype became dtype in 4.56.0.
+# The floor is v5 because that is what this is developed against, not
+# because 4.x is known broken.
+transformers>=5.0.0
 
 # Scientific computing
 numpy>=1.24.0

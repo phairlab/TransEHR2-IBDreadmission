@@ -18,18 +18,21 @@ os.environ['HF_HUB_DOWNLOAD_TIMEOUT'] = '300'  # 5 minutes
 PAD = 0
 TOKENIZER_PAD_TOKEN = '[PAD]'
 
-# Text encoder. bge-m3 is a plain XLMRobertaModel with no remote code: 1024-d, 8192 tokens,
+# Text encoder. Verified against transformers 5.17.0; see tests/test_llm_compat.py, which
+# runs against whatever version is installed.
+#
+# bge-m3 is a plain XLMRobertaModel with no remote code: 1024-d, 8192 tokens,
 # CLS-pooled, 568M parameters, 250k multilingual vocabulary. Most of that parameter count is a
 # vocabulary this study does not use -- the text is English code descriptions -- which is the
 # price of the model that needs no trust_remote_code on a controlled cluster.
 #
 # Alibaba-NLP/gte-base-en-v1.5 is smaller and better matched at 768-d and a 30k English
-# vocabulary, and it is NOT usable under a transformers>=5.9.0 pin. Its remote code in
-# Alibaba-NLP/new-impl registers the `position_ids` buffer with persistent=False and fills it
-# via torch.arange at construction; v5 materializes weights into an empty model, so the buffer
-# is never initialized and every forward pass dies in the embedding lookup. This fork pins
-# transformers>=4.30.0, so gte would run today -- it is excluded because executing downloaded
-# model code is the thing to avoid here, not because it cannot work.
+# vocabulary, and it is NOT usable here. Its remote code in Alibaba-NLP/new-impl registers the
+# `position_ids` buffer with persistent=False and fills it via torch.arange at construction;
+# v5 materializes weights into an empty model, so the buffer is never initialized and every
+# forward pass dies in the embedding lookup. This fork now pins transformers>=5.0.0, so that
+# is fatal rather than hypothetical -- and it would be excluded anyway, because executing
+# downloaded model code is the thing to avoid on a controlled cluster.
 #
 # LLM_NAME = 'Alibaba-NLP/gte-base-en-v1.5'  # needs trust_remote_code; see above
 LLM_NAME = 'BAAI/bge-m3'

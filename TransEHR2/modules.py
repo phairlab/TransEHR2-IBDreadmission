@@ -25,6 +25,36 @@ from TransEHR2.layers import (
 from TransEHR2.utils import combine_value_and_lookup_data, resolve_lookup_embeddings
 
 
+def dtype_kwarg(dtype) -> dict:
+    """``{'dtype': ...}`` or ``{'torch_dtype': ...}``, per installed version.
+
+    ``from_pretrained``'s ``torch_dtype`` was renamed ``dtype`` in
+    transformers 4.56.0, and ``torch_dtype`` is deprecated in v5 -- it still
+    works there but warns on every load. Below 4.56 the *new* name is not
+    merely unrecognized: it falls through ``**kwargs`` to the model
+    constructor and raises ``TypeError: __init__() got an unexpected keyword
+    argument 'dtype'``, so the whole text path dies at load time.
+
+    Measured, not assumed: 4.55.4 raises, 4.56.0 honours it. Both versions
+    declare ``**kwargs``, so the signature cannot be inspected for this --
+    the difference is in how the kwargs are consumed.
+
+    Passing nothing when no dtype is wanted keeps the call valid on every
+    version, which is why None returns an empty dict rather than a named
+    None.
+    """
+    if dtype is None:
+        return {}
+
+    from transformers import __version__ as version
+    try:
+        major, minor = (int(part) for part in version.split('.')[:2])
+    except ValueError:                       # a dev or rc string we cannot read
+        return {'dtype': dtype}              # assume current; v5 is the future
+    return ({'dtype': dtype} if (major, minor) >= (4, 56)
+            else {'torch_dtype': dtype})
+
+
 class GradientTraceableLLM(torch.nn.Module):
     """A wrapper for a language model that allows gradients to be traced through it."""
 
@@ -45,8 +75,9 @@ class GradientTraceableLLM(torch.nn.Module):
             use_gradient_checkpointing (bool, optional): Whether to enable gradient checkpointing.
                 Defaults to True.
             device_map (str, optional): Passed to `from_pretrained`. Defaults to 'cpu'.
-            dtype (optional): Passed to `from_pretrained`. Named for the transformers v5 argument;
-                `torch_dtype` is deprecated there and warns on every load. Defaults to None.
+            dtype (optional): The parameter dtype to load in. Named for the transformers v5
+                argument; `dtype_kwarg` translates it to `torch_dtype` below 4.56, where the new
+                name raises rather than warning. Defaults to None, which passes neither.
             pooling (str, optional): How a token sequence is reduced to one embedding, 'cls' or
                 'mean'. Defaults to `TEXT_POOLING`.
 
@@ -97,7 +128,7 @@ class GradientTraceableLLM(torch.nn.Module):
             model_name,
             token=HF_API_TOKEN,
             device_map=device_map,
-            dtype=dtype,
+            **dtype_kwarg(dtype),
         )
         # Resize only when the tokenizer actually grew. Unconditionally resizing a 250k-row
         # embedding matrix rebuilds 256M parameters to change nothing.

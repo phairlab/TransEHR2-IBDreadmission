@@ -22,11 +22,14 @@ from TransEHR2.survival import (
     OUT_MIGRATION,
     READMISSION,
     TimeGrid,
+    brier_times,
     cause_specific_brier,
     cause_specific_concordance,
     censoring_survival,
     cif_from_pmf,
+    event_times_days,
     integrated_brier,
+    interpolate_cif,
     pmf_from_logits,
     survival_from_pmf,
     survival_metrics,
@@ -56,6 +59,29 @@ def test_grid_shape_and_edges():
 def test_grid_rejects_bad_cuts(cuts):
     with pytest.raises(ValueError):
         TimeGrid(cuts)
+
+
+def test_the_brier_bound_defaults_to_one_year():
+    assert TimeGrid(CUTS, TWO_CAUSES).brier_integration_days == 365.0
+
+
+def test_the_brier_bound_may_not_outrun_the_grid():
+    """Past the last cut the head predicts nothing to score."""
+    with pytest.raises(ValueError, match='grid ends at'):
+        TimeGrid([30.0, 90.0], TWO_CAUSES, brier_integration_days=365.0)
+
+
+@pytest.mark.parametrize("bound", [0.0, -1.0, float('nan')])
+def test_the_brier_bound_must_be_positive(bound):
+    with pytest.raises(ValueError, match='must be positive'):
+        TimeGrid(CUTS, TWO_CAUSES, brier_integration_days=bound)
+
+
+def test_the_brier_axis_runs_from_zero_to_the_bound_by_days():
+    taus = brier_times(TimeGrid(CUTS, TWO_CAUSES,
+                                brier_integration_days=90.0))
+    assert taus[0] == 0.0 and taus[-1] == 90.0
+    assert taus.size == 91
 
 
 def test_bins_are_left_closed():
@@ -356,64 +382,192 @@ def test_concordance_agrees_with_the_brute_force_pair_count():
 
 # ------------------------------------------------------------ Brier and IPCW
 
-def test_censoring_km_matches_a_hand_run():
-    """Five episodes: censorings in bins 0 and 2, events in 1 and 2.
+def test_event_times_are_truncated_at_the_horizon():
+    """Minutes in, days out, and nothing past the last cut.
 
-    Bin 0: 1 of 5 censored          -> G = 0.8
-    Bin 1: 0 of 4 censored          -> G = 0.8
-    Bin 2: 1 of 3 censored          -> G = 0.8 * (2/3)
+    The continuous reading of an episode and the binned one have to agree
+    about where the grid ends: discretize clears the event flag past the
+    horizon, and this puts the time there too.
     """
-    bin_index = np.array([0, 1, 2, 2, 2])
-    is_event = np.array([False, True, False, True, True])
-    g = censoring_survival(bin_index, is_event, 3)
-    assert g == pytest.approx([0.8, 0.8, 0.8 * 2 / 3])
+    grid = TimeGrid(CUTS, TWO_CAUSES)          # last cut 365 days
+    got = event_times_days(
+        np.array([0.0, 10.0, 365.0, 900.0]) * MINUTES_PER_DAY, grid)
+    assert got == pytest.approx([0.0, 10.0, 365.0, 365.0])
+
+
+def test_censoring_km_matches_a_hand_run():
+    """Five episodes, censorings at day 10 and two at day 100.
+
+    Day 10:  1 of the 5 still at risk is censored  -> G = 0.8
+    Day 100: 2 of the 3 still at risk are censored -> G = 0.8 * (1/3)
+
+    The episode whose outcome is observed at day 100 counts toward the
+    three at risk there: a tie between an event and a censoring is
+    resolved in favour of still being under observation.
+    """
+    times = np.array([10.0, 50.0, 100.0, 100.0, 200.0])
+    is_event = np.array([False, True, False, False, True])
+    jumps, surv = censoring_survival(times, is_event)
+    assert jumps == pytest.approx([10.0, 100.0])
+    assert surv == pytest.approx([0.8, 0.8 / 3.0])
 
 
 def test_censoring_km_is_flat_without_censoring():
-    bin_index = np.array([0, 1, 2])
-    is_event = np.ones(3, dtype=bool)
-    assert censoring_survival(bin_index, is_event, 3) == pytest.approx(
-        [1.0, 1.0, 1.0])
+    times = np.array([10.0, 50.0, 100.0])
+    jumps, surv = censoring_survival(times, np.ones(3, dtype=bool))
+    assert jumps.size == 0 and surv.size == 0
 
 
-def test_brier_is_zero_for_a_perfect_uncensored_prediction():
-    """Everyone fails of cause 0 in bin 0 and the model says so."""
-    n, n_bins = 6, 3
-    cif = np.ones((n, 2, n_bins))
-    cif[:, 1, :] = 0.0
-    bin_index = np.zeros(n, dtype=int)
-    cause_index = np.zeros(n, dtype=int)
-    is_event = np.ones(n, dtype=bool)
+def test_brier_is_zero_for_a_perfect_step_prediction():
+    """Everyone fails of cause 0 on day 10 and the model says exactly that.
 
-    b = cause_specific_brier(cif, bin_index, cause_index, is_event, 0)
-    assert b == pytest.approx(np.zeros(n_bins))
+    Perfect here means the step: no incidence before day 10, certainty
+    from day 10 on. A model certain of readmission at discharge is not
+    right about a readmission that happens later -- see the next test.
+    """
+    times = np.full(6, 10.0)
+    taus = np.array([5.0, 10.0, 30.0])
+    cif_k = np.tile([0.0, 1.0, 1.0], (6, 1))
+
+    b = cause_specific_brier(cif_k, times, np.zeros(6, dtype=int),
+                             np.ones(6, dtype=bool), 0, taus)
+    assert b == pytest.approx(np.zeros(3))
+
+
+def test_brier_penalises_incidence_claimed_before_it_happens():
+    """Certain of failure from day 0, when everyone fails on day 10."""
+    times = np.full(6, 10.0)
+    taus = np.array([5.0, 10.0])
+    cif_k = np.ones((6, 2))
+
+    b = cause_specific_brier(cif_k, times, np.zeros(6, dtype=int),
+                             np.ones(6, dtype=bool), 0, taus)
+    # At day 5 every episode is still event-free and the model says the
+    # opposite, as wrong as it can be; by day 10 it is right.
+    assert b == pytest.approx([1.0, 0.0])
 
 
 def test_brier_counts_the_other_cause_as_a_non_event():
     """A patient who died has not been readmitted, and still counts."""
-    n_bins = 2
-    cif = np.zeros((2, 2, n_bins))
-    cif[:, 0, :] = 1.0                       # both predicted certain to be
-    bin_index = np.array([0, 0])             # readmitted at once
-    cause_index = np.array([0, 1])           # but one died instead
-    is_event = np.array([True, True])
+    times = np.array([10.0, 10.0])
+    taus = np.array([30.0])
+    cif_k = np.ones((2, 1))                  # both predicted certain to be
+    cause_index = np.array([0, 1])           # readmitted, but one died
 
-    b = cause_specific_brier(cif, bin_index, cause_index, is_event, 0)
+    b = cause_specific_brier(cif_k, times, cause_index,
+                             np.array([True, True]), 0, taus)
     # One residual of 0 and one of 1, equally weighted.
     assert b[0] == pytest.approx(0.5)
 
 
-def test_integrated_brier_weights_by_bin_width():
-    """A wide bin must count for more than a narrow one."""
-    grid = TimeGrid([30.0, 90.0, 365.0])     # widths 30, 60, 275
-    brier = np.array([0.0, 0.0, 1.0])
-    assert integrated_brier(brier, grid) == pytest.approx(275.0 / 365.0)
+def test_brier_weights_by_the_inverse_censoring_probability():
+    """One hand-run horizon, worked out term by term.
+
+    Four episodes: censored at day 10, cause 0 at day 20, cause 1 at day
+    40, still at risk past day 100. The single censoring at day 10 leaves
+    G = 3/4 from there on, so every weight below is 4/3.
+
+    At tau = 50 the contributions are
+        censored at 10: weight 0, out of the sum
+        cause 0 at 20:  target 1, (0.80 - 1)^2 = 0.0400
+        cause 1 at 40:  target 0, (0.25 - 0)^2 = 0.0625
+        at risk at 50:  target 0, (0.50 - 0)^2 = 0.2500
+    which is (4/3) * 0.3525 = 0.47, over the four episodes: 0.1175.
+    """
+    times = np.array([10.0, 20.0, 40.0, 100.0])
+    is_event = np.array([False, True, True, True])
+    cause_index = np.array([-1, 0, 1, 0])
+    taus = np.array([50.0])
+    cif_k = np.array([[0.9], [0.8], [0.25], [0.5]])
+
+    b = cause_specific_brier(cif_k, times, cause_index, is_event, 0, taus)
+    assert b[0] == pytest.approx(0.1175)
 
 
-def test_integrated_brier_skips_empty_bins():
-    grid = TimeGrid([30.0, 90.0, 365.0])
-    brier = np.array([0.2, np.nan, 0.2])
-    assert integrated_brier(brier, grid) == pytest.approx(0.2)
+def test_an_episode_censored_before_the_horizon_contributes_nothing():
+    """Its own prediction cannot move the score, however wrong it is."""
+    times = np.array([10.0, 20.0, 100.0])
+    is_event = np.array([False, True, True])
+    cause_index = np.array([-1, 0, 0])
+    taus = np.array([50.0])
+
+    mild = np.array([[0.5], [0.8], [0.5]])
+    wild = np.array([[0.0], [0.8], [0.5]])
+    assert (cause_specific_brier(mild, times, cause_index, is_event, 0, taus)
+            == pytest.approx(cause_specific_brier(wild, times, cause_index,
+                                                  is_event, 0, taus)))
+
+
+def test_the_event_weight_is_the_left_limit_of_g():
+    """An episode failing at the instant of a censoring was still observed.
+
+    Three episodes: one censored on day 10, one failing of cause 0 on day
+    10, one at risk past day 100. G drops to 2/3 *at* day 10, so reading
+    it there rather than just before it would weight the failure 1.5
+    instead of 1.
+
+    With the model predicting no incidence at all, the failure's residual
+    is 1 and the episode at risk contributes nothing, so the score is its
+    weight over three episodes: 1/3 for the left limit, 0.5 for the other
+    reading.
+    """
+    times = np.array([10.0, 10.0, 100.0])
+    is_event = np.array([False, True, True])
+    cause_index = np.array([-1, 0, 0])
+    taus = np.array([50.0])
+
+    b = cause_specific_brier(np.zeros((3, 1)), times, cause_index,
+                             is_event, 0, taus)
+    assert b[0] == pytest.approx(1.0 / 3.0)
+
+
+def test_integrated_brier_is_a_trapezoid_mean():
+    """Rising from 0 to 1 over the first day, flat after: area 1.5 of 2."""
+    taus = np.array([0.0, 1.0, 2.0])
+    assert integrated_brier(np.array([0.0, 1.0, 1.0]), taus) == pytest.approx(
+        0.75)
+
+
+def test_integrated_brier_of_a_constant_is_that_constant():
+    taus = np.linspace(0.0, 365.0, 366)
+    assert integrated_brier(np.full(366, 0.2), taus) == pytest.approx(0.2)
+
+
+# --------------------------------------------------- the interpolated curve
+
+def test_the_interpolated_curve_passes_through_the_cuts():
+    """An interpolant of the head's output, not a smoothing of it."""
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    cif_k = np.array([[0.1, 0.3, 0.6], [0.0, 0.0, 0.9]])
+    assert interpolate_cif(cif_k, grid, grid.cuts) == pytest.approx(cif_k)
+
+
+def test_the_interpolated_curve_is_anchored_at_zero():
+    """Nobody has been readmitted at the moment they are discharged."""
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    cif_k = np.array([[0.1, 0.3, 0.6]])
+    assert interpolate_cif(cif_k, grid, np.array([0.0]))[0, 0] == (
+        pytest.approx(0.0))
+
+
+def test_the_interpolated_curve_never_turns_back():
+    """What the monotone filter is there for: incidence only accumulates."""
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    rng = np.random.default_rng(11)
+    cif_k = np.sort(rng.random((50, 3)), axis=1) * 0.9
+    curve = interpolate_cif(cif_k, grid, np.linspace(0.0, 365.0, 400))
+    assert np.all(np.diff(curve, axis=1) >= -1e-12)
+    assert curve.min() >= 0.0 and curve.max() <= 1.0
+
+
+def test_interpolation_survives_a_float32_cumulative_sum():
+    """A saturated head leaves the cumsum a hair short of monotone."""
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    pmf = np.array([[1.0, 0.0, 0.0]], dtype=np.float32)
+    cif_k = np.cumsum(pmf, axis=1).astype(np.float64)
+    cif_k[0, 2] -= 1e-16                      # below the previous value
+    curve = interpolate_cif(cif_k, grid, np.array([0.0, 15.0, 365.0]))
+    assert np.all(np.diff(curve, axis=1) >= -1e-12)
 
 
 # -------------------------------------------------------------- the reporter

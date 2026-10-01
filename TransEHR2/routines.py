@@ -68,15 +68,26 @@ IMPROVEMENT_THRESHOLD = 1e-4
 # Epochs without improvement before a run stops.
 EARLY_STOPPING_PATIENCE = 30
 
-# Which validation number selects the finetuned model. 'cindex' maximizes the
-# mean cause-specific time-dependent concordance; 'loss' minimizes the DeepHit
-# objective. They disagree often enough to matter: the ranking term rewards
-# ordering the cohort, the likelihood rewards calibrating it, and a run can
-# improve at one while losing ground on the other.
+# Which validation number selects the finetuned model. They disagree often
+# enough to matter: the ranking term rewards ordering the cohort, the
+# likelihood rewards calibrating it, and a run can improve at one while
+# losing ground on the other.
+#
+# 'brier' is the one that answers the question this study asks. The other
+# two score all causes at once -- a run that orders deaths well and
+# readmissions poorly looks good on 'cindex' -- and neither says anything
+# about a horizon. The integrated Brier score is readmission's alone, and
+# it is integrated from discharge out to TimeGrid.brier_integration_days,
+# one year by default. Lower is better.
 SELECTION_METRICS = {
+    'brier': ('Readmission_Integrated_Brier', False),
     'cindex': ('Mean_Cindex', True),
     'loss': ('Loss_DeepHit', False),
 }
+
+# The cause 'brier' scores. A run that does not model it has no such
+# column to select on.
+BRIER_SELECTION_CAUSE = 'readmission'
 
 
 def resolve_decay_factor(lr_half_life: Optional[float]) -> float:
@@ -824,7 +835,7 @@ def finetune_model(
     rank_weight: float = 1.0,
     sigma: float = 0.1,
     cause_weights: Optional[List[float]] = None,
-    selection_metric: str = 'cindex',
+    selection_metric: str = 'brier',
     lr_half_life: Optional[float] = None,
     total_epoch: int = 100,
     checkpoint_dir: Optional[str] = None,
@@ -846,8 +857,8 @@ def finetune_model(
         rank_weight: Weight on DeepHit's ranking term.
         sigma: Scale of the ranking term's exponential.
         cause_weights: Per-cause weight inside the ranking term.
-        selection_metric: 'cindex' or 'loss'; which validation number picks
-            the best epoch. See SELECTION_METRICS.
+        selection_metric: 'brier', 'cindex' or 'loss'; which validation
+            number picks the best epoch. See SELECTION_METRICS.
         lr_half_life: Epochs over which the learning rate halves. The scheduler steps every
             epoch, so this is the schedule in full. None leaves the rate constant.
         total_epoch: Maximum number of epochs.
@@ -866,6 +877,16 @@ def finetune_model(
         raise ValueError(f'selection_metric: expected one of '
                          f'{sorted(SELECTION_METRICS)}, got {selection_metric}')
     metric_key, higher_is_better = SELECTION_METRICS[selection_metric]
+
+    # Caught here rather than at the first epoch, where a missing key would
+    # read as a NaN score, never improve on the incumbent, and save the
+    # randomly initialized weights after the patience ran out.
+    if (selection_metric == 'brier'
+            and BRIER_SELECTION_CAUSE not in grid.cause_names):
+        raise ValueError(
+            f"selection_metric 'brier' scores {BRIER_SELECTION_CAUSE}, which "
+            f"MODELLED_CAUSES does not include: {list(grid.cause_names)}. "
+            f"Add it, or select on 'cindex' or 'loss'.")
 
     train_loader, val_loader = loaders[0], loaders[1]
 

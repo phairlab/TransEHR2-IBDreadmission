@@ -19,13 +19,13 @@ from TransEHR2.modules import (
     MaskedTokenGenerator, TransformerHawkesProcess, ValueDataEncoder
 )
 from TransEHR2.routines import (
-    cpu_state_dict, evaluate_finetuned_model, finetune_model,
-    is_improvement, load_checkpoint, pretrain_model, save_checkpoint,
-    save_encoder_weights
+    BRIER_SELECTION_CAUSE, cpu_state_dict, evaluate_finetuned_model,
+    finetune_model, is_improvement, load_checkpoint, pretrain_model,
+    save_checkpoint, save_encoder_weights
 )
 from TransEHR2.survival import (
-    CENSORED, DEATH, DEFAULT_CAUSES, MINUTES_PER_DAY, OUT_MIGRATION,
-    READMISSION, TimeGrid
+    CENSORED, DEATH, DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES,
+    MINUTES_PER_DAY, OUT_MIGRATION, READMISSION, TimeGrid
 )
 
 
@@ -222,8 +222,8 @@ def test_finetune_rejects_an_unknown_selection_metric(loaders, tmp_path):
             checkpoint_dir=None, resume_from_checkpoint=False)
 
 
-@pytest.mark.parametrize('metric', ['cindex', 'loss'])
-def test_both_selection_metrics_pick_an_epoch(loaders, tmp_path, metric):
+@pytest.mark.parametrize('metric', ['brier', 'cindex', 'loss'])
+def test_every_selection_metric_picks_an_epoch(loaders, tmp_path, metric):
     grid = TimeGrid(CUTS)
     _, val_scores = finetune_model(
         model=_predictor(grid), save_path=str(tmp_path / f'{metric}.pt'),
@@ -231,6 +231,18 @@ def test_both_selection_metrics_pick_an_epoch(loaders, tmp_path, metric):
         device=DEVICE, total_epoch=2, selection_metric=metric,
         checkpoint_dir=None, resume_from_checkpoint=False)
     assert val_scores, f'{metric} selected no epoch'
+
+
+def test_selecting_on_brier_without_readmission_is_refused(loaders,
+                                                          tmp_path):
+    """The column would be missing and every epoch would score NaN."""
+    grid = TimeGrid(CUTS, ['death'])
+    with pytest.raises(ValueError, match='MODELLED_CAUSES'):
+        finetune_model(
+            model=_predictor(grid), save_path=str(tmp_path / 'no.pt'),
+            loaders=loaders, grid=grid, writer=None, learning_rate=1e-3,
+            device=DEVICE, total_epoch=1, selection_metric='brier',
+            checkpoint_dir=None, resume_from_checkpoint=False)
 
 
 def test_evaluate_scores_the_split_as_a_whole(loaders, tmp_path):
@@ -471,7 +483,9 @@ def test_shipped_configs_declare_a_usable_grid(name, config):
     cuts = config.get('TIME_GRID_CUTS_DAYS')
     if cuts is None:
         pytest.skip(f'{name} sets no grid; the default applies')
-    grid = TimeGrid(cuts, config.get('MODELLED_CAUSES', DEFAULT_CAUSES))
+    grid = TimeGrid(cuts, config.get('MODELLED_CAUSES', DEFAULT_CAUSES),
+                    config.get('BRIER_INTEGRATION_DAYS',
+                               DEFAULT_BRIER_INTEGRATION_DAYS))
     assert grid.n_bins == len(cuts)
 
 
@@ -482,6 +496,20 @@ def test_shipped_configs_name_a_real_selection_metric(name, config):
     if metric is None:
         pytest.skip(f'{name} sets no selection metric; the default applies')
     assert metric in SELECTION_METRICS
+
+
+@pytest.mark.parametrize('name,config', list(_experiment_configs()))
+def test_shipped_configs_can_select_on_the_metric_they_name(name, config):
+    """'brier' scores readmission, so a config naming it must model it.
+
+    The run refuses this combination before building anything; the point
+    of checking it here is that the refusal would otherwise arrive after
+    the data is loaded and the encoders are on the GPU.
+    """
+    if config.get('FINETUNE_SELECTION_METRIC') != 'brier':
+        pytest.skip(f'{name} does not select on the Brier score')
+    causes = config.get('MODELLED_CAUSES', DEFAULT_CAUSES)
+    assert BRIER_SELECTION_CAUSE in causes
 
 
 @pytest.mark.parametrize('name,config', list(_experiment_configs()))

@@ -29,6 +29,20 @@ Readings this module commits to
   model predicts; it is an episode observed through the whole grid without
   one. Dropping those episodes instead would throw away the follow-up they
   do contribute.
+* **Between the cuts, the cumulative incidence is a monotone cubic.**
+  The head predicts at six times and says nothing between them, but the
+  Brier score is integrated over a continuous axis, and reading the curve
+  as a step function would hand three quarters of a one-year integral to
+  whatever the model said at exactly 365 days. The gaps are filled by
+  ``splinefun(method = "hyman")`` -- the smoothing MTLR draws its survival
+  curves with, ported in :mod:`TransEHR2.hyman` -- anchored at
+  ``F_k(0) = 0``. This adds no information: the head still emits six
+  numbers per cause, and the curve between them is an assumption about
+  smoothness. It does make the assumption part of the predictor, so
+  scoring and reporting both read the same curve.
+* **The Brier score is integrated from discharge to a stated bound**,
+  ``TimeGrid.brier_integration_days``, one year by default, and the
+  interpolation is what frees that bound from having to land on a cut.
 * **Times arrive in minutes and are held in days.** ``TIME_TO_EVENT`` is
   minutes, because that is the resolution the source records have. Every
   cut, every axis and every printed number here is in days, because that is
@@ -42,6 +56,8 @@ import torch
 
 from torch import Tensor
 from typing import Dict, List, Optional, Sequence, Tuple
+
+from TransEHR2.hyman import hyman_spline
 
 
 MINUTES_PER_DAY = 1440.0
@@ -77,6 +93,13 @@ DEFAULT_CAUSES: Tuple[str, ...] = ("readmission", "death", "out_migration")
 DEFAULT_CUTS_DAYS: Tuple[float, ...] = (30.0, 60.0, 90.0, 365.0, 1095.0,
                                         1825.0)
 
+# How far the cause-specific Brier score is integrated, in days, unless
+# BRIER_INTEGRATION_DAYS says otherwise. One year, because the model is
+# meant to be re-run whenever the patient sees a physician and a patient is
+# expected to see one at least annually, which makes the year the window
+# any single prediction has to cover. The lower bound is always zero.
+DEFAULT_BRIER_INTEGRATION_DAYS = 365.0
+
 
 class TimeGrid:
     """The discrete time axis a DeepHit head predicts on.
@@ -87,8 +110,12 @@ class TimeGrid:
     horizon rather than the start of an open bin.
     """
 
-    def __init__(self, cuts_days: Sequence[float] = DEFAULT_CUTS_DAYS,
-                 causes: Sequence[str] = DEFAULT_CAUSES):
+    def __init__(
+        self,
+        cuts_days: Sequence[float] = DEFAULT_CUTS_DAYS,
+        causes: Sequence[str] = DEFAULT_CAUSES,
+        brier_integration_days: float = DEFAULT_BRIER_INTEGRATION_DAYS,
+    ):
         unknown = [name for name in causes if name not in CAUSE_CODES]
         if unknown:
             raise ValueError(f"unknown cause(s) {unknown}; known: "
@@ -109,6 +136,22 @@ class TimeGrid:
             raise ValueError(f"cuts_days must be strictly ascending, got "
                              f"{cuts_days}")
         self.cuts = cuts
+
+        # The Brier integration bound rides on the grid rather than being
+        # passed beside it: every scoring call already receives the grid,
+        # and threading one more number through five signatures to reach
+        # the same places would only make it easier to leave one behind.
+        if not np.isfinite(brier_integration_days) or \
+                brier_integration_days <= 0:
+            raise ValueError(f"brier_integration_days must be positive, got "
+                             f"{brier_integration_days}")
+        if brier_integration_days > float(cuts[-1]):
+            raise ValueError(
+                f"brier_integration_days is {brier_integration_days} but the "
+                f"grid ends at {float(cuts[-1])}; the score cannot be "
+                f"integrated past the last cut, where the model stops "
+                f"predicting.")
+        self.brier_integration_days = float(brier_integration_days)
 
     @property
     def n_bins(self) -> int:
@@ -310,87 +353,207 @@ def cause_specific_concordance(
     return concordant / n_pairs if n_pairs else float("nan")
 
 
-def censoring_survival(
-    bin_index: np.ndarray,
-    is_event: np.ndarray,
-    n_bins: int,
+def event_times_days(time_to_event: np.ndarray,
+                    grid: TimeGrid) -> np.ndarray:
+    """Event times in days, truncated at the horizon.
+
+    The same reading :meth:`TimeGrid.discretize` applies, in continuous
+    time: an episode whose event falls past the last cut is one observed
+    through the whole grid without an outcome this model predicts, so its
+    time is the horizon and :meth:`~TimeGrid.discretize` has already
+    cleared its event flag. Keeping the rule in one function is what stops
+    the binned and continuous readings of the same episode from drifting
+    apart.
+    """
+    days = np.asarray(time_to_event, dtype=np.float64) / MINUTES_PER_DAY
+    return np.minimum(days, grid.horizon_days)
+
+
+def brier_times(grid: TimeGrid) -> np.ndarray:
+    """The axis the Brier score is integrated over: 0 to the bound, daily.
+
+    One point per day. The outcome times are recorded to the minute but
+    argued in days, and a day is already finer than any distinction this
+    cohort supports; a denser axis would cost time without moving the
+    integral. Zero is on the axis because ``F_k(0) = 0`` for every patient
+    and nobody has failed yet, so the score there is exactly zero -- a
+    real point of the curve rather than an extrapolation.
+    """
+    n_steps = max(int(round(grid.brier_integration_days)), 1)
+    return np.linspace(0.0, grid.brier_integration_days, n_steps + 1)
+
+
+def interpolate_cif(
+    cif_k: np.ndarray, grid: TimeGrid, times: np.ndarray
 ) -> np.ndarray:
-    """Kaplan-Meier estimate of the censoring distribution, ``G(t)``.
+    """One cause's cumulative incidence, read at arbitrary times.
+
+    The head predicts ``F_k`` at the cuts and nowhere else. Between them
+    the curve is filled in by a monotone cubic with Hyman filtering --
+    ``splinefun(method = "hyman")``, the smoothing MTLR draws its survival
+    curves with -- anchored at the one point that needs no model:
+    ``F_k(0) = 0``, because no patient has failed at the moment they are
+    discharged. Without that anchor the spline has nothing to say below
+    the first cut and would extrapolate a cubic fitted to the four cuts
+    above it across the whole of the first bin.
+
+    This interpolation is part of the predictor, not part of the scoring.
+    The model whose Brier score is integrated below is DeepHit *and* this
+    curve, which is why the reporting script reads it through the same
+    function rather than keeping the step function for itself.
+
+    Args:
+        cif_k: (n, n_bins) cumulative incidence of one cause at the cuts.
+        grid: the grid those cuts come from.
+        times: (p,) days at which to read the curve, within ``[0,
+            horizon]``.
+
+    Returns:
+        (n, p) cumulative incidence.
+    """
+    anchored = np.concatenate(
+        [np.zeros((cif_k.shape[0], 1), dtype=np.float64),
+         np.asarray(cif_k, dtype=np.float64)], axis=1)
+    # A cumulative sum of non-negative mass is monotone by construction,
+    # but it reaches here through a float32 softmax, and the filter
+    # refuses input that steps backwards by even one ulp.
+    np.maximum.accumulate(anchored, axis=1, out=anchored)
+
+    curve = hyman_spline(grid.edges_days, anchored, times)
+    # Monotone interpolation between knots inside [0, 1] cannot leave it;
+    # the clip is against rounding at the ends, not against the spline.
+    return np.clip(curve, 0.0, 1.0)
+
+
+def censoring_survival(
+    times_days: np.ndarray, is_event: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Kaplan-Meier estimate of the censoring distribution, ``G``.
 
     The Brier score below weights each episode by the inverse of its
     probability of still being under observation, so a cohort whose
     follow-up ends early does not look well calibrated merely because its
     late bins are empty. Censoring is the "event" in this fit.
+
+    Fitted on the recorded times rather than on bin indices: the score is
+    read at every day between zero and the bound, and a ``G`` that could
+    only step at the six cuts would hold a smooth numerator over a
+    six-step denominator.
+
+    An episode whose outcome is observed at exactly a censoring time is
+    counted as still at risk there, the usual convention for a tie
+    between the two.
+
+    Returns:
+        ``(jump_times, surv)``: ``surv[j]`` is ``G`` at and after
+        ``jump_times[j]``. ``G`` is 1 before the first.
     """
-    g = np.ones(n_bins, dtype=np.float64)
-    at_risk = float(bin_index.size)
-    surv = 1.0
-    for t in range(n_bins):
-        in_bin = bin_index == t
-        n_cens = int(np.sum(in_bin & ~is_event))
-        if at_risk > 0 and n_cens > 0:
-            surv *= 1.0 - n_cens / at_risk
-        g[t] = surv
-        at_risk -= float(np.sum(in_bin))
+    t = np.asarray(times_days, dtype=np.float64)
+    censored = ~np.asarray(is_event, dtype=bool)
+    if not censored.any():
+        return np.empty(0), np.empty(0)
+
+    jump_times, counts = np.unique(t[censored], return_counts=True)
+    # Everyone whose record runs to the jump time or beyond is at risk.
+    at_risk = t.size - np.searchsorted(np.sort(t), jump_times, side='left')
+    surv = np.cumprod(1.0 - counts / at_risk)
     # A zero here would make the weights infinite. The floor costs a little
     # bias in the last bins and buys a finite score.
-    return np.maximum(g, 1e-8)
+    return jump_times, np.maximum(surv, 1e-8)
+
+
+def _censoring_at(
+    jump_times: np.ndarray, surv: np.ndarray, times: np.ndarray,
+    left_limit: bool
+) -> np.ndarray:
+    """``G`` read off the step function, at ``times`` or just before them.
+
+    Equation 8.7 asks for both: ``G(t_i)`` for an episode weighted at its
+    own event time -- which is the left limit, the probability of being
+    under observation up to the instant the outcome happened -- and
+    ``G(tau)`` for one still at risk at the horizon.
+    """
+    if jump_times.size == 0:
+        return np.ones(np.shape(times), dtype=np.float64)
+    side = 'left' if left_limit else 'right'
+    idx = np.searchsorted(jump_times, times, side=side) - 1
+    return np.where(idx < 0, 1.0, surv[np.clip(idx, 0, None)])
 
 
 def cause_specific_brier(
-    cif: np.ndarray,
-    bin_index: np.ndarray,
+    cif_k: np.ndarray,
+    times_days: np.ndarray,
     cause_index: np.ndarray,
     is_event: np.ndarray,
     k: int,
+    times: np.ndarray,
 ) -> np.ndarray:
-    """IPCW Brier score of ``F_k`` at every bin: shape (n_bins,).
+    """IPCW Brier score of ``F_k`` at each time in ``times``.
 
-    Three groups contribute at horizon ``t``: those who failed of cause
-    ``k`` by ``t`` (target 1, weighted by ``G`` at their own event time),
-    those still event-free at ``t`` (target 0, weighted by ``G(t)``), and
-    those who failed of another cause by ``t``. The third group keeps
-    target 0 and stays in the sum -- that is precisely what makes this a
-    competing-risks score rather than a cause-specific one that pretends
-    the other cause removes the patient from the cohort.
+    Schoop et al.'s non-integrated cause-specific survival Brier score,
+    equation 8.7, term for term. Three groups contribute at horizon
+    ``tau``: those who failed of cause ``k`` by ``tau`` (target 1,
+    weighted by ``G`` just before their own event time), those who failed
+    of another cause by ``tau`` (target 0, same weighting), and those
+    still event-free at ``tau`` (target 0, weighted by ``G(tau)``). An
+    episode censored before ``tau`` contributes zero. The second group is
+    what makes this a competing-risks score rather than one that pretends
+    the other cause removed the patient from the cohort.
+
+    The sum is divided by the number of episodes, as in the paper, rather
+    than by the total weight. The two are closer than they look: the
+    inverse-probability weights of a Kaplan-Meier censoring fit sum to
+    exactly ``n`` when no event time coincides with a censoring time, and
+    to within a fraction of a percent of it when some do. The paper's form
+    is used because it is the paper's, not because it moves the number.
+
+    Args:
+        cif_k: (n, p) cumulative incidence of cause ``k``, already read at
+            ``times`` -- see :func:`interpolate_cif`.
+        times_days: (n,) days to the outcome, truncated at the horizon.
+        cause_index: (n,) position in the grid's causes, -1 if censored.
+        is_event: (n,) whether an outcome was observed inside the grid.
+        k: which cause.
+        times: (p,) the horizons ``tau``.
+
+    Returns:
+        (p,) the score at each ``tau``.
     """
-    n = bin_index.size
-    n_bins = cif.shape[-1]
-    g = censoring_survival(bin_index, is_event, n_bins)
-    g_at_event = g[np.maximum(bin_index - 1, 0)]
+    t = np.asarray(times_days, dtype=np.float64)[:, None]
+    ev = np.asarray(is_event, dtype=bool)[:, None]
+    failed_k = (ev & (np.asarray(cause_index)[:, None] == k))
 
-    out = np.full(n_bins, np.nan, dtype=np.float64)
-    for t in range(n_bins):
-        failed_k = is_event & (cause_index == k) & (bin_index <= t)
-        failed_other = is_event & (cause_index != k) & (bin_index <= t)
-        still_at_risk = bin_index > t
-        censored_early = (~is_event) & (bin_index <= t)
+    jump_times, surv = censoring_survival(times_days, is_event)
+    g_event = _censoring_at(jump_times, surv, times_days, left_limit=True)
+    g_tau = _censoring_at(jump_times, surv, times, left_limit=False)
 
-        w = np.zeros(n, dtype=np.float64)
-        w[failed_k] = 1.0 / g_at_event[failed_k]
-        w[failed_other] = 1.0 / g_at_event[failed_other]
-        w[still_at_risk] = 1.0 / g[t]
-        w[censored_early] = 0.0      # no longer informative at this horizon
+    by_now = t <= np.asarray(times, dtype=np.float64)[None, :]
+    weight = np.where(by_now, (1.0 / g_event)[:, None], 1.0 / g_tau[None, :])
+    weight = np.where(by_now & ~ev, 0.0, weight)   # censored: uninformative
 
-        target = failed_k.astype(np.float64)
-        resid = (cif[:, k, t] - target) ** 2
-        denom = w.sum()
-        out[t] = float((w * resid).sum() / denom) if denom > 0 else np.nan
-    return out
+    residual = (cif_k - (by_now & failed_k)) ** 2
+    return (weight * residual).sum(axis=0) / t.size
 
 
-def integrated_brier(brier: np.ndarray, grid: TimeGrid) -> float:
-    """Brier score integrated over the grid, weighted by bin width.
+def integrated_brier(brier: np.ndarray, times: np.ndarray) -> float:
+    """Mean Brier score over ``times``, by the trapezoid rule.
 
-    Bins are not equal width -- a 30-day bin and a two-year bin are both
-    one index -- so an unweighted mean would let the fine near-term bins
-    dominate a score meant to describe the whole horizon.
+    Divided by the width of the interval rather than left as an integral,
+    so the number is on the same scale as the scores it averages and two
+    runs integrated to different bounds are at least comparable in
+    magnitude.
+
+    The rule is written out rather than taken from NumPy because the
+    function was renamed between the versions this runs on.
     """
-    widths = np.diff(grid.edges_days)
     ok = np.isfinite(brier)
-    if not ok.any():
-        return float("nan")
-    return float(np.sum(brier[ok] * widths[ok]) / np.sum(widths[ok]))
+    if ok.sum() < 2:
+        return float('nan')
+    y, x = np.asarray(brier)[ok], np.asarray(times, dtype=np.float64)[ok]
+    span = x[-1] - x[0]
+    if span <= 0:
+        return float('nan')
+    return float(np.sum(0.5 * (y[:-1] + y[1:]) * np.diff(x)) / span)
 
 
 def survival_metrics(
@@ -409,7 +572,9 @@ def survival_metrics(
     Returns:
         A flat dict of scalars: the joint NLL, then per cause the
         time-dependent concordance overall and at each cut, and the
-        integrated Brier score.
+        Brier score integrated over ``grid.brier_integration_days``. The
+        bound is not in the key: like the cuts and the modelled causes, it
+        is a property of the run, and the run records it.
     """
     t = torch.as_tensor(time_to_event, dtype=torch.float64)
     e = torch.as_tensor(event_type)
@@ -423,6 +588,8 @@ def survival_metrics(
     bi = bin_index.numpy()
     ci = cause_index.numpy()
     ev = is_event.numpy().astype(bool)
+    days = event_times_days(t.numpy(), grid)
+    taus = brier_times(grid)
 
     out: Dict[str, float] = {"Loss_DeepHit_NLL": float(
         _nll_numpy(pmf.numpy(), surv, bi, ci, ev))}
@@ -436,7 +603,8 @@ def survival_metrics(
                 cause_specific_concordance(cif, bi, ci, ev, k,
                                            horizon_bin=b))
         out[f"{key}_Integrated_Brier"] = integrated_brier(
-            cause_specific_brier(cif, bi, ci, ev, k), grid)
+            cause_specific_brier(interpolate_cif(cif[:, k, :], grid, taus),
+                                 days, ci, ev, k, taus), taus)
         out[f"{key}_Events"] = float(np.sum(ev & (ci == k)))
 
     finite = [out[f"{metric_label(n)}_Cindex"] for n in grid.cause_names]

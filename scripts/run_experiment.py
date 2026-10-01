@@ -41,7 +41,8 @@ from TransEHR2.routines import (
     evaluate_finetuned_model, finetune_model, pretrain_model
 )
 from TransEHR2.survival import (
-    DEFAULT_CAUSES, DEFAULT_CUTS_DAYS, TimeGrid
+    DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES, DEFAULT_CUTS_DAYS,
+    TimeGrid, format_days
 )
 from TransEHR2.utils import (
     convert_to_python_types, create_timer,
@@ -185,13 +186,15 @@ def main():
     FINETUNE_TOTAL_EPOCH = experiment_config.get('FINETUNE_TOTAL_EPOCH', 500)
     FINETUNE_LR_HALF_LIFE = experiment_config.get('FINETUNE_LR_HALF_LIFE', None)
     FINETUNE_SELECTION_METRIC = experiment_config.get(
-        'FINETUNE_SELECTION_METRIC', 'cindex')
+        'FINETUNE_SELECTION_METRIC', 'brier')
 
     # The competing-risks head and its time grid.
     TIME_GRID_CUTS_DAYS = experiment_config.get(
         'TIME_GRID_CUTS_DAYS', list(DEFAULT_CUTS_DAYS))
     MODELLED_CAUSES = experiment_config.get(
         'MODELLED_CAUSES', list(DEFAULT_CAUSES))
+    BRIER_INTEGRATION_DAYS = experiment_config.get(
+        'BRIER_INTEGRATION_DAYS', DEFAULT_BRIER_INTEGRATION_DAYS)
     DEEPHIT_RANK_WEIGHT = experiment_config.get('DEEPHIT_RANK_WEIGHT', 1.0)
     DEEPHIT_SIGMA = experiment_config.get('DEEPHIT_SIGMA', 0.1)
     DEEPHIT_CAUSE_WEIGHTS = experiment_config.get('DEEPHIT_CAUSE_WEIGHTS', None)
@@ -199,8 +202,12 @@ def main():
     DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', 64)
     DEEPHIT_HEAD_DROPOUT = experiment_config.get('DEEPHIT_HEAD_DROPOUT', 0.1)
 
-    grid = TimeGrid(TIME_GRID_CUTS_DAYS, MODELLED_CAUSES)
+    grid = TimeGrid(TIME_GRID_CUTS_DAYS, MODELLED_CAUSES,
+                    BRIER_INTEGRATION_DAYS)
     print(f"Time grid: {grid.n_bins} bins, {', '.join(grid.labels())}")
+    print(f"Integrated Brier score: discharge to "
+          f"{format_days(grid.brier_integration_days)}, over a monotone "
+          f"cubic interpolation of the cumulative incidence")
     print(f"Modelled causes: {', '.join(grid.cause_names)} "
           f"(any EVENT_TYPE not listed is censoring)")
 
@@ -509,6 +516,7 @@ def main():
             'experiment': EXPERIMENT_NAME,
             'time_grid_cuts_days': list(map(float, grid.cuts)),
             'modelled_causes': list(grid.cause_names),
+            'brier_integration_days': grid.brier_integration_days,
             'use_thp': USE_THP,
             'selection_metric': FINETUNE_SELECTION_METRIC,
             'train_scores': convert_to_python_types(best_train_scores or {}),

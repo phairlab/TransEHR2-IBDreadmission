@@ -124,8 +124,29 @@ DEEPHIT_HEAD_D_SHARED: 128
 DEEPHIT_HEAD_D_CAUSE: 64
 DEEPHIT_HEAD_DROPOUT: 0.1
 
-# Which validation number picks the finetuned epoch. 'cindex' maximizes the
-# mean cause-specific time-dependent concordance; 'loss' minimizes the
-# DeepHit objective. They disagree: the ranking term rewards ordering the
-# cohort, the likelihood rewards calibrating it.
-FINETUNE_SELECTION_METRIC: "cindex"
+# Which validation number picks the finetuned epoch. 'brier' minimizes the
+# integrated Brier score for readmission alone; 'cindex' maximizes the mean
+# cause-specific time-dependent concordance; 'loss' minimizes the DeepHit
+# objective. They disagree: the ranking term rewards ordering the cohort,
+# the likelihood rewards calibrating it.
+#
+# 'brier' because it is the only one of the three that scores the question
+# this study asks. A run that orders deaths well and readmissions poorly
+# looks good on 'cindex', and neither of the others names a horizon.
+#
+# This is model selection only. The objective the run trains against is
+# DeepHit's published all-cause default and is not affected.
+FINETUNE_SELECTION_METRIC: "brier"
+
+# How far the integrated Brier score reaches, in days. The lower limit is
+# always discharge. One year reflects the intended use and the limits of
+# the distant future: the model is meant to be re-run whenever the patient
+# sees a physician, a patient is expected to see one at least annually, and
+# outcomes further out are hard to predict regardless (development/notes.md).
+#
+# Between the cuts the cumulative incidence is filled in with a monotone
+# cubic spline (Hyman filtering), so this bound is free of the grid: it can
+# be any number of days out to the last cut, whether or not a cut falls
+# there. The spline is part of the predictor, not of the scoring -- the
+# reported curves are read off it too.
+BRIER_INTEGRATION_DAYS: 365

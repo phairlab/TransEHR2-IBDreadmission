@@ -82,6 +82,10 @@ def extracted(tmp_path_factory):
     n = len(pd.read_csv(data_dir / 'labels.csv'))
     assert n >= 3, "the fold needs three partitions"
     rows = np.arange(n, dtype=np.int64)
+    # Every row: this cohort exercises the extraction itself, not the
+    # selection, so the two numberings coincide and the fold arrays below
+    # read as positions in labels.csv.
+    np.save(data_dir / 'extracted_rows.npy', rows)
     fold_dir = data_dir / 'fold0'
     fold_dir.mkdir()
     for partition, selected in (('train', rows[:-2]), ('val', rows[-2:-1]),

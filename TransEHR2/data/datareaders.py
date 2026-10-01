@@ -83,7 +83,8 @@ class EHRDataReader(Sequence):
         drug_feats: Optional[List[str]] = None,
         static_feats: Optional[List[str]] = None,
         string_feats: Optional[List[str]] = None,
-        n_examples: Optional[int] = None
+        n_examples: Optional[int] = None,
+        selected_rows: Optional[np.ndarray] = None
     ):
         """Initialize the reader.
 
@@ -106,6 +107,12 @@ class EHRDataReader(Sequence):
             n_examples: Read only the first N rows of ``labels.csv``, for
                 debugging. Episodes, not patients: the patient set follows
                 from the rows kept.
+            selected_rows: ``labels.csv`` row numbers to build an episode
+                for, ascending -- ``extracted_rows.npy`` from ``split.py``.
+                Without it every row is built, which is one episode per
+                *stay* rather than per patient and is what made the dense
+                arrays 4.7 TiB. The folds' row arrays are positions in this
+                selection, so it also fixes the output order.
         """
 
         super().__init__()
@@ -130,10 +137,22 @@ class EHRDataReader(Sequence):
                 f"{labels_path} is missing column(s) {missing}; it should "
                 f"be the output of IBDdataprep's build_labels.py"
             )
-        # The row number *is* the output row. Recorded now, because the
-        # per-patient grouping below reorders nothing but must not be
-        # mistaken for the canonical order.
         labels = labels.reset_index(drop=True)
+        if selected_rows is not None:
+            selected_rows = np.asarray(selected_rows, dtype=np.int64)
+            if selected_rows.size and (selected_rows.min() < 0
+                                       or selected_rows.max() >= len(labels)):
+                raise ValueError(
+                    f"selected_rows spans "
+                    f"[{selected_rows.min()}, {selected_rows.max()}] but "
+                    f"{labels_path} has {len(labels)} row(s); the selection "
+                    f"and labels.csv are from different runs"
+                )
+            labels = labels.iloc[selected_rows].reset_index(drop=True)
+        # The row number *is* the output row -- a position in the selection
+        # where there is one, which is what the fold row arrays index.
+        # Recorded now, because the per-patient grouping below reorders
+        # nothing but must not be mistaken for the canonical order.
         labels['ROW'] = np.arange(len(labels), dtype=np.int64)
         self.labels = labels
 
@@ -152,7 +171,11 @@ class EHRDataReader(Sequence):
 
     @property
     def n_episodes(self) -> int:
-        """Number of rows in ``labels.csv``, i.e. output rows."""
+        """Episodes to build, i.e. output rows.
+
+        The selection's length when one was given, otherwise every row of
+        ``labels.csv``.
+        """
         return len(self.labels)
 
     def patient_dir(self, patid: int) -> Path:

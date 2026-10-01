@@ -2189,8 +2189,9 @@ def extract_data(
             raise ValueError(
                 f"{fold_name} indexes rows [{rows.min()}, {rows.max()}] "
                 f"but this cohort has {n_episodes} episode(s). Fold rows "
-                f"are positions in labels.csv; rebuild the folds against "
-                f"the current labels.csv, or drop --n_examples."
+                f"are positions in extracted_rows.npy, not in labels.csv; "
+                f"rebuild the folds and the selection together with "
+                f"split.py, or drop --n_examples."
             )
 
     print(f"Processing {n_episodes} episodes over {n_patients} patients "

@@ -2,15 +2,22 @@
 """Extract the cohort's episodes into ``data/extracted/``.
 
 Runs **once for the cohort**, not once per fold and not once per
-partition. The row order is ``labels.csv``'s -- patient directories
-lexicographically, then ``STAY_INDEX`` -- and the folds are ``int64``
-row indices into the arrays this writes, so the row count is
-fixed by ``labels.csv`` and no episode may be filtered out.
+partition. ``extracted_rows.npy`` names the episodes to build -- one per
+patient, chosen by ``split.py`` -- and the folds are ``int64`` positions in
+that selection, so the row count is fixed by the selection and no episode
+in it may be filtered out.
+
+It is a selection rather than all of ``labels.csv`` because that file holds
+one row per *stay*: ~9.5M for this cohort, against ~137k patients. Every
+fold draws the same episode for a patient, so the other ~9.4M would be
+written and never indexed -- 4.7 TiB of dense arrays to store ~75 GB of
+reachable data.
 
 Inputs, all named by the dataset config:
 
     {DATA_DIR}/root/{PATID}/{stays,timeseries,drugs}.csv   Stage B
     {DATA_DIR}/labels.csv                                  Stage B'
+    {DATA_DIR}/extracted_rows.npy                          split.py
     {DATA_DIR}/fold{i}/fold{i}_train_rows.npy              split.py
     VARIABLE_PROPERTIES_PATH, CLINVEC_PATH
 
@@ -75,6 +82,27 @@ from TransEHR2.data.datareaders import EHRDataReader
 from TransEHR2.data.preprocessing import (
     _bucket_valued_feats, check_feature_contract, extract_data
 )
+
+
+def load_selection(data_dir: str) -> np.ndarray:
+    """``extracted_rows.npy``: the episodes to build, one per patient.
+
+    Required rather than optional. Without it the reader builds an episode
+    for every row of ``labels.csv`` -- one per *stay* -- which for this
+    cohort is ~9.5M episodes and ~4.7 TiB of dense arrays, an allocation
+    that cannot succeed and should not be attempted by default. ``split.py``
+    writes it beside the fold directories, and the fold row arrays are
+    positions in it.
+    """
+
+    path = os.path.join(data_dir, 'extracted_rows.npy')
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"{path} not found. It names the episodes to extract and is "
+            f"written by IBDdataprep's split.py; run that first, or pass "
+            f"--n_examples for a truncated smoke test."
+        )
+    return np.load(path)
 
 
 def find_fold_train_rows(data_dir: str) -> dict:
@@ -188,7 +216,9 @@ def main(argv=None) -> int:
         drug_feats=DRUG_FEATS,
         static_feats=STATIC_FEATS,
         string_feats=string_feats,
-        n_examples=args.n_examples
+        n_examples=args.n_examples,
+        selected_rows=(None if args.n_examples is not None
+                       else load_selection(DATA_DIR))
     )
 
     if args.n_examples is not None:

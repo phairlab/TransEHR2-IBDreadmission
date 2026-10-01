@@ -145,6 +145,14 @@ class MiniRoot:
                   ['PATID', 'STAY_INDEX', 'DATA_SOURCE', 'TIME_TO_EVENT',
                    'EVENT_TYPE'])
 
+        # Every row, because these cohorts are written one episode per
+        # patient already. split.py narrows labels.csv to one row per
+        # patient for the real cohort; here the two coincide, so the
+        # selection is the identity and the fold arrays stay readable as
+        # positions in labels.csv.
+        np.save(self.data_dir / 'extracted_rows.npy',
+                np.arange(len(self.labels_rows), dtype=np.int64))
+
         props_path = self.tmp_path / 'variable_properties.yaml'
         props_path.write_text(yaml.safe_dump(self.var_properties))
 

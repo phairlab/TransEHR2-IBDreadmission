@@ -326,6 +326,59 @@ def test_row_order_and_count_are_labels_csv_s(mini):
     assert mini.load('val_times').shape[0] == len(labels)
 
 
+def test_only_the_selected_rows_are_extracted(mini):
+    """``extracted_rows.npy`` chooses which episodes get built.
+
+    ``labels.csv`` keeps one row per *stay* -- it is a faithful image of
+    ``stays.csv`` -- so without the selection the cohort is one episode per
+    stay: ~9.5M of them against ~137k patients, and ~4.7 TiB of dense
+    arrays for data no fold would ever index. ``split.py`` draws one
+    episode per patient and the fold arrays are positions in that.
+    """
+
+    mini.config['MAX_EPISODE_LEN_STEPS'] = 4
+    for patid, month in ((1001, '01'), (1002, '02')):
+        mini.add_patient(
+            patid,
+            timeseries=[[f'2019-{month}-01T00:00:00Z', 1.0, 'L', '0', 'Few',
+                         '', ''],
+                        [f'2019-{month}-05T00:00:00Z', 2.0, 'L', '0', 'Few',
+                         '', '']],
+            stays=[('DAD', f'2019-{month}-01T00:00:00Z',
+                    f'2019-{month}-01T00:00:00Z'),
+                   ('DAD', f'2019-{month}-05T00:00:00Z',
+                    f'2019-{month}-05T00:00:00Z')],
+        )
+
+    config_path = mini.finish()
+    # Rows 1 and 3: the second stay of each patient, so a correct
+    # implementation cannot pass by taking a prefix.
+    np.save(mini.data_dir / 'extracted_rows.npy',
+            np.array([1, 3], dtype=np.int64))
+    assert extract_main([str(config_path)]) == 0
+
+    import pickle
+    with open(mini.extracted / 'episode_ids.pkl', 'rb') as f:
+        ids = pickle.load(f)
+    assert ids == [(1001, 1), (1002, 1)]
+    assert mini.load('val_times').shape[0] == 2
+
+
+def test_a_missing_selection_is_refused(mini):
+    """Falling back to every row is the 4.7 TiB allocation, so it is an
+    error rather than a default."""
+
+    mini.add_patient(
+        1001,
+        timeseries=[['2019-01-01T00:00:00Z', 1.0, 'L', '0', 'Few', '', '']],
+        stays=[('DAD', '2019-01-01T00:00:00Z', '2019-01-01T00:00:00Z')],
+    )
+    config_path = mini.finish()
+    (mini.data_dir / 'extracted_rows.npy').unlink()
+    with pytest.raises(FileNotFoundError, match='extracted_rows.npy'):
+        extract_main([str(config_path)])
+
+
 def test_targets_are_columns_of_labels_csv(one_patient):
     """B4: time_to_event.npy and event_type.npy are columns of
     labels.csv, not a second derivation."""

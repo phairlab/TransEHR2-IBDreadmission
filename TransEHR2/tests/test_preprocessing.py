@@ -10,8 +10,8 @@ import pytest
 import yaml
 
 from TransEHR2.data.preprocessing import (
-    OUT_OF_DOMAIN, _bucket_valued_feats, check_feature_contract,
-    filter_timeseries_records, standardize_feats
+    OUT_OF_DOMAIN, DataProcessor, _bucket_valued_feats,
+    check_feature_contract, filter_timeseries_records, standardize_feats
 )
 
 from extract_data import main as extract_main
@@ -377,6 +377,25 @@ def test_a_missing_selection_is_refused(mini):
     (mini.data_dir / 'extracted_rows.npy').unlink()
     with pytest.raises(FileNotFoundError, match='extracted_rows.npy'):
         extract_main([str(config_path)])
+
+
+def test_text_entries_survive_pandas_copy_on_write(monkeypatch):
+    """Under copy-on-write ``to_numpy`` borrows the frame's buffer and
+    returns it read-only, so combining the two masks in place raised
+    "output array is read-only" -- for every patient carrying text, which
+    is nearly all of them. It passed here and failed on the cluster purely
+    on the installed pandas, so the option is forced rather than inherited.
+    """
+
+    if not hasattr(pd.options.mode, 'copy_on_write'):
+        pytest.skip("this pandas has no copy_on_write option to force")
+    monkeypatch.setattr(pd.options.mode, 'copy_on_write', True)
+
+    frame = pd.DataFrame({'TXT': ['hello', '', None, '  ', 'world']})
+    assert DataProcessor._text_entries(frame, 'TXT') == [
+        (0, 'hello', None, None),
+        (4, 'world', None, None),
+    ]
 
 
 def test_targets_are_columns_of_labels_csv(one_patient):

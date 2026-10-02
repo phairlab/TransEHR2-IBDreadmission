@@ -629,9 +629,14 @@ class DataProcessor:
         if feat not in text_data.columns:
             return []
         column = text_data[feat]
-        present = column.notna().to_numpy()
         stripped = column.fillna('').astype(str).str.strip()
-        present &= (stripped != '').to_numpy()
+        # Combined out of place. Under pandas' copy-on-write ``to_numpy``
+        # hands back a read-only array to protect the frame it borrows
+        # from, so ``present &= ...`` raises "output array is read-only"
+        # -- on every patient carrying text, which is nearly all of them.
+        # Whether it bites depends on the installed pandas, so this is not
+        # a style preference.
+        present = column.notna().to_numpy() & (stripped != '').to_numpy()
         return [
             (int(t), str(column.iloc[t]), None, None)
             for t in np.flatnonzero(present)

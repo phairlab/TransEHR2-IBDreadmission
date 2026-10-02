@@ -127,6 +127,12 @@ from TransEHR2.data.manifest import verify as verify_manifest_checksum
 # Global variables for multi-process data extraction
 _tensorized_processor = None
 _tensorized_dims = None
+# The reader lives here rather than in the task payload. ``Pool.imap``
+# pickles its function once per *task*, so binding the reader into a
+# ``partial`` sent it down the task pipe 137k times -- 43.7 MB a go,
+# ~6 TB in total through a queue one thread drains. Through the pool
+# initializer it is pickled once per worker instead.
+_tensorized_reader = None
 
 # The two ``type`` values that make a feature a member of the lookup family
 #. The on-disk file prefix is the type itself, which is what
@@ -999,18 +1005,24 @@ def _init_tensorized_worker(
     event_feats: List[str],
     lookup_feats: List[str],
     static_feats: List[str],
-    dims_dict: dict
+    dims_dict: dict,
+    reader: 'EHRDataReader'
 ):
     """
-    Initialize worker process with a DataProcessor.
+    Initialize worker process with a DataProcessor and the reader.
 
     Called once per worker when the process pool is created. No
     tokenizer is built: extraction stores strings and indices, and
     ``embed.py`` embeds them later.
+
+    The reader is passed here, not with each task: it carries
+    ``labels`` and a per-patient frame for every patient, so sending it
+    per task is what made extraction quadratic in cohort size.
     """
-    global _tensorized_processor, _tensorized_dims
+    global _tensorized_processor, _tensorized_dims, _tensorized_reader
 
     _tensorized_dims = TensorDimensions(**dims_dict)
+    _tensorized_reader = reader
 
     _tensorized_processor = DataProcessor(
         var_properties_path=var_properties_path,
@@ -1055,7 +1067,6 @@ def filter_timeseries_records(
 
 def _process_single_patient(
     i: int,
-    reader: EHRDataReader,
     max_episode_len_steps: int
 ) -> Tuple[List[EpisodeData], np.ndarray, np.ndarray, Optional[str]]:
     """
@@ -1065,8 +1076,8 @@ def _process_single_patient(
     patient's episodes, each of which is a suffix slice of the result.
 
     Args:
-        i: Index of the patient in the reader
-        reader: EHRDataReader instance
+        i: Index of the patient in the reader, which the pool
+            initializer put in ``_tensorized_reader``
         max_episode_len_steps: Most timesteps to keep per episode
 
     Returns:
@@ -1075,12 +1086,12 @@ def _process_single_patient(
         caller counts that as a failed patient rather than losing rows
         silently.
     """
-    global _tensorized_processor, _tensorized_dims
+    global _tensorized_processor, _tensorized_dims, _tensorized_reader
     dims = _tensorized_dims
 
     try:
         (patid, episode_rows, statics, val_data, event_data,
-         text_data, drug_data) = reader[i]
+         text_data, drug_data) = _tensorized_reader[i]
 
         # One row per distinct minute. The data-prep step already
         # guarantees no two rows of a patient share a timestamp, so this
@@ -2220,7 +2231,6 @@ def extract_data(
 
     process_fn = partial(
         _process_single_patient,
-        reader=reader,
         max_episode_len_steps=max_episode_len_steps
     )
 
@@ -2247,7 +2257,7 @@ def extract_data(
         initializer=_init_tensorized_worker,
         initargs=(var_properties_path, reader.valued_feats,
                   reader.event_feats, lookup_feats, reader.static_feats,
-                  dims_dict)
+                  dims_dict, reader)
     ) as pool:
         for episodes, patient_cat, patient_ord, error in tqdm(
             pool.imap_unordered(process_fn, range(n_patients), chunksize=1),

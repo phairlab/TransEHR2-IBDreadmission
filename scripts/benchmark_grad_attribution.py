@@ -40,7 +40,6 @@ every sequence runs at full width.
 """
 
 import argparse
-import math
 import statistics
 import sys
 import time
@@ -171,6 +170,14 @@ def main(argv=None):
     parser.add_argument('--render-cells', type=int, default=None,
                         help="text cells per episode whose tokens are actually rendered; "
                              "defaults to the timestep count, i.e. all of them")
+    parser.add_argument('--ig-steps', type=int, default=0,
+                        help="Use integrated gradients as TSR's R(.) over this many path "
+                             'points instead of grad x input. Multiplies every pass by it.')
+    parser.add_argument('--density', type=float, default=1.0,
+                        help='Fraction of (timestep, feature) cells the synthetic episode '
+                             'observes. TSR skips the rest, since deleting what is not there '
+                             'moves nothing, so this is the dominant term in the real cost. '
+                             '1.0, the default, is the worst case and not a realistic one.')
     parser.add_argument('--steps', default=None, metavar='T[,T...]',
                         help='Episode lengths to measure, overriding the T in --stage1. '
                              'MAX_EPISODE_LEN_STEPS is the whole episode; a shorter window '
@@ -376,19 +383,36 @@ def build_stage1(steps, widths, d_model, text_width, device, n_causes, n_bins):
     return model
 
 
-def stage1_batch(batch_size, steps, widths, text_width, device):
+def stage1_batch(batch_size, steps, widths, text_width, device, density=1.0):
+    """A batch at the given shape, with `density` of its cells observed.
+
+    An unobserved cell is zero in both the value and the indicator, which is how extraction
+    leaves one and what makes TSR's skip exact. Density is the single largest term in the real
+    cost -- a patient-minute carries a handful of a 148-feature set -- so a benchmark that
+    leaves it at 1.0 measures a worst case no episode exhibits.
+    """
+    def observed(n_features):
+        if density >= 1.0:
+            return torch.ones(batch_size, steps, n_features, device=device)
+        return (torch.rand(batch_size, steps, n_features, device=device)
+                < density).float()
+
+    numeric_inds = observed(len(widths))
+    lookup_inds = observed(1)
     return {
         'val_data': {
             'times': torch.arange(steps, device=device).float().repeat(batch_size, 1),
             'masks': torch.ones(batch_size, steps, device=device),
             'numeric': {
-                'indicators': torch.ones(batch_size, steps, len(widths), device=device),
+                'indicators': numeric_inds,
                 'values': [torch.randn(batch_size, steps, width, device=device)
-                           for width in widths],
+                           * numeric_inds[..., feature:feature + 1]
+                           for feature, width in enumerate(widths)],
             },
             'lookup': {
-                'indicators': torch.ones(batch_size, steps, 1, device=device),
-                'slot_values': [torch.randn(batch_size, steps, text_width, device=device)],
+                'indicators': lookup_inds,
+                'slot_values': [torch.randn(batch_size, steps, text_width, device=device)
+                                * lookup_inds],
                 'doses': [None], 'masks': [None],
             },
         }
@@ -446,7 +470,8 @@ def _report_one_shape(args, device, steps, widths, source, cause, n_causes, n_bi
                          n_causes, n_bins)
 
     def measure(batch_size, horizon_bin):
-        batch = stage1_batch(batch_size, steps, widths, args.text_width, device)
+        batch = stage1_batch(batch_size, steps, widths, args.text_width, device,
+                             args.density)
         index = feature_index(batch)
         target = cif_logit_target(cause, horizon_bin, n_causes, n_bins)
         timings = []
@@ -501,10 +526,13 @@ def report_horizons(args, model, steps, widths, n_causes, n_bins, ms_item,
 
     cause = 0
     features = len(widths) + 1
-    batch = stage1_batch(1, steps, widths, args.text_width, device)
+    batch = stage1_batch(1, steps, widths, args.text_width, device, args.density)
 
+    method = (f"IG x{args.ig_steps}" if args.ig_steps else 'grad x input')
+    dense = (args.ig_steps or 1) * (1 + steps + steps * features)
     print()
-    print(f"measured episode, gate q={args.gate_quantile}, chunk {args.chunk}")
+    print(f"measured episode, {method}, gate q={args.gate_quantile}, "
+          f"chunk {args.chunk}, density {args.density:g}")
     header = (f"{'horizon':>10}  {'bin':>4}  {'passes':>7}  {'calls':>6}  "
               f"{'s/episode':>10}  {'peak MiB':>9}")
     print(header)
@@ -517,7 +545,7 @@ def report_horizons(args, model, steps, widths, n_causes, n_bins, ms_item,
         reset_peak_memory(device)
         start = time.perf_counter()
         result = tsr_scores(model, batch, target=target, quantile=args.gate_quantile,
-                            chunk=args.chunk)
+                            chunk=args.chunk, ig_steps=args.ig_steps)
         synchronize(device)
         seconds = time.perf_counter() - start
         total += seconds
@@ -526,18 +554,20 @@ def report_horizons(args, model, steps, widths, n_causes, n_bins, ms_item,
         # and mean nothing -- unlike in the per-pass table, where the batch is still alive.
         peak = peak_memory_mib(device) if device.type == 'cuda' else None
         peak_text = f"{peak:9.0f}" if peak is not None else f"{'-':>9}"
-        calls = math.ceil(result['passes'] / args.chunk)
+        calls = result['calls']
+        passes_taken = result['passes']
         days = cuts_days[horizon_bin]
         label = f"{days:g} d" if days < 365 else f"{days / 365.25:.3g} y"
         print(f"{label:>10}  {horizon_bin:>4}  {result['passes']:>7}  {calls:>6}  "
               f"{seconds:10.1f}  {peak_text}")
 
-    passing = round(steps * (1.0 - args.gate_quantile))
-    passes = 1 + steps + passing * features
     print()
     print(f"TSR for one episode at T={steps}, N={features}, encoder not involved")
+    print(f"  {dense} passes if every cell were observed; "
+          f"{100 * (1 - passes_taken / dense):.0f}% skipped as empty")
     print(f"  one horizon     {total / n_bins:.1f} s measured, "
-          f"{passes * ms_item / 1000:.1f} s projected at {ms_item:.2f} ms/pass/item")
+          f"{passes_taken * ms_item / 1000:.1f} s projected from the passes actually taken "
+          f"at {ms_item:.2f} ms/pass/item")
     print(f"  all {n_bins} horizons  {total:.1f} s measured")
 
 

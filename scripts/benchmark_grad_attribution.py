@@ -171,6 +171,15 @@ def main(argv=None):
     parser.add_argument('--render-cells', type=int, default=None,
                         help="text cells per episode whose tokens are actually rendered; "
                              "defaults to the timestep count, i.e. all of them")
+    parser.add_argument('--steps', default=None, metavar='T[,T...]',
+                        help='Episode lengths to measure, overriding the T in --stage1. '
+                             'MAX_EPISODE_LEN_STEPS is the whole episode; a shorter window '
+                             'truncates it, and T enters the dominant T*N term.')
+    parser.add_argument('--dataset-config', default=None, metavar='PATH',
+                        help='Size the stage-1 model from this dataset config and its '
+                             'VARIABLE_PROPERTIES_PATH, so N and every feature width are the '
+                             "study's rather than --feat-width repeated. Needs both files, "
+                             'which live on the cluster.')
     parser.add_argument('--stage1', default=None, metavar='T,N',
                         help="time a TransEHR2 forward+backward at this shape, against batch "
                              "size: the pass TSR spends all its time in")
@@ -306,8 +315,31 @@ def report_tsr_budget(args, attribute_rate):
 # Stage 1: the TransEHR2 pass TSR actually spends its time in
 # ---------------------------------------------------------------------------
 
-def build_stage1(steps, features, d_model, feat_width, text_width, device,
-                 n_causes, n_bins):
+def dataset_widths(config_path):
+    """``(steps, per-feature value widths)`` for the real study, from its two config files.
+
+    `run_experiment` sizes the value encoder as ``sum(variable_properties[f]['size'])`` over
+    ``VALUED_FEATS``, with one more feature for the text superfeature; this reads the same two
+    numbers so the benchmarked shape cannot drift from the trained one. A categorical feature is
+    one-hot and occupies ``size`` columns, so count and width diverge as soon as any feature has
+    size > 1 -- which is why repeating a single ``--feat-width`` is a stand-in rather than a
+    measurement.
+
+    The widths are returned one per feature rather than summed because TSR deletes one feature
+    at a time: the per-pass cost follows the total, but the per-pass *overhead* follows how many
+    separate tensors there are.
+    """
+    import yaml
+
+    with open(config_path) as handle:
+        config = yaml.safe_load(handle)
+    with open(config['VARIABLE_PROPERTIES_PATH']) as handle:
+        properties = yaml.safe_load(handle)
+    widths = [properties[name]['size'] for name in config['VALUED_FEATS']]
+    return config['MAX_EPISODE_LEN_STEPS'], widths
+
+
+def build_stage1(steps, widths, d_model, text_width, device, n_causes, n_bins):
     """A MixedClassifier and a batch at the given shape, for timing only.
 
     Random weights, because a forward and backward cost the same whatever the weights say. The
@@ -327,8 +359,8 @@ def build_stage1(steps, features, d_model, feat_width, text_width, device,
     from TransEHR2.models import MixedClassifier
     from TransEHR2.modules import DeepHitHead, EventDataEncoder, ValueDataEncoder
 
-    n_numeric = features - 1                       # one lookup feature, the text one
-    feat_dim = n_numeric * feat_width + text_width
+    features = len(widths) + 1                     # one lookup feature, the text one
+    feat_dim = sum(widths) + text_width
     val_encoder = ValueDataEncoder(
         n_features=features, feat_dim=feat_dim, d_model=d_model, n_heads=2,
         n_encoder_blocks=1, dim_feedforward=d_model, dropout=0.0, norm='LayerNorm')
@@ -344,16 +376,15 @@ def build_stage1(steps, features, d_model, feat_width, text_width, device,
     return model
 
 
-def stage1_batch(batch_size, steps, features, feat_width, text_width, device):
-    n_numeric = features - 1
+def stage1_batch(batch_size, steps, widths, text_width, device):
     return {
         'val_data': {
             'times': torch.arange(steps, device=device).float().repeat(batch_size, 1),
             'masks': torch.ones(batch_size, steps, device=device),
             'numeric': {
-                'indicators': torch.ones(batch_size, steps, n_numeric, device=device),
-                'values': [torch.randn(batch_size, steps, feat_width, device=device)
-                           for _ in range(n_numeric)],
+                'indicators': torch.ones(batch_size, steps, len(widths), device=device),
+                'values': [torch.randn(batch_size, steps, width, device=device)
+                           for width in widths],
             },
             'lookup': {
                 'indicators': torch.ones(batch_size, steps, 1, device=device),
@@ -375,20 +406,47 @@ def report_stage1(args, device):
     readmission by one horizon -- so the measured pass is the one deployment would take. Each
     horizon needs its own backward, so the second table is what deciding not to pick a single
     horizon actually costs.
-    """
-    from TransEHR2.survival import (DEFAULT_CAUSES, DEFAULT_CUTS_DAYS,
-                                    cif_logit_target)
-    from TransEHR2.tsr import feature_index, saliency
 
-    steps, features = (int(v) for v in args.stage1.split(','))
+    Every shape in `--steps` is reported separately, because T enters the dominant T*N term and
+    a truncated window is a real lever on the cost rather than a rounding of it.
+    """
+    from TransEHR2.survival import DEFAULT_CAUSES, DEFAULT_CUTS_DAYS
+
+    declared_steps, features = (int(v) for v in args.stage1.split(','))
     n_causes, n_bins = len(DEFAULT_CAUSES), len(DEFAULT_CUTS_DAYS)
     cause = DEFAULT_CAUSES.index('readmission')
-    model = build_stage1(steps, features, args.d_model, args.feat_width,
-                         args.text_width, device, n_causes, n_bins)
+
+    if args.dataset_config:
+        config_steps, widths = dataset_widths(args.dataset_config)
+        source = f"{args.dataset_config} ({len(widths)} valued + 1 text)"
+    else:
+        config_steps, widths = declared_steps, [args.feat_width] * (features - 1)
+        source = f"--feat-width {args.feat_width} repeated ({features} features)"
+
+    if args.steps:
+        sweep = [int(v) for v in args.steps.split(',')]
+    elif args.dataset_config:
+        sweep = [config_steps]
+    else:
+        sweep = [declared_steps]
+
+    for steps in sweep:
+        _report_one_shape(args, device, steps, widths, source, cause, n_causes,
+                          n_bins, DEFAULT_CUTS_DAYS)
+
+
+def _report_one_shape(args, device, steps, widths, source, cause, n_causes, n_bins,
+                      cuts_days):
+    """The two tables for one episode length: per-pass against batch size, then the episode."""
+    from TransEHR2.survival import cif_logit_target
+    from TransEHR2.tsr import feature_index, saliency
+
+    features = len(widths) + 1
+    model = build_stage1(steps, widths, args.d_model, args.text_width, device,
+                         n_causes, n_bins)
 
     def measure(batch_size, horizon_bin):
-        batch = stage1_batch(batch_size, steps, features, args.feat_width,
-                             args.text_width, device)
+        batch = stage1_batch(batch_size, steps, widths, args.text_width, device)
         index = feature_index(batch)
         target = cif_logit_target(cause, horizon_bin, n_causes, n_bins)
         timings = []
@@ -405,27 +463,28 @@ def report_stage1(args, device):
 
     print()
     print(f"stage 1: TransEHR2 forward+backward, T={steps}, N={features}, "
-          f"d_model={args.d_model}, DeepHit head {n_causes}x{n_bins}")
-    print(f"target: log-odds of readmission by {DEFAULT_CUTS_DAYS[-1]:g} d "
-          f"(the last bin)")
+          f"feat_dim={sum(widths) + args.text_width}, d_model={args.d_model}, "
+          f"DeepHit head {n_causes}x{n_bins}")
+    print(f"widths: {source}")
+    print(f"target: log-odds of readmission by {cuts_days[-1]:g} d (the last bin)")
     header = f"{'batch':>6}  {'ms/pass':>9}  {'ms/pass/item':>13}  {'peak MiB':>9}"
     print(header)
     print('-' * len(header))
 
-    best_batch, best_ms_item = None, None
+    best_ms_item = None
     for batch_size in [int(b) for b in args.stage1_batches.split(',')]:
         seconds, peak = measure(batch_size, n_bins - 1)
         ms_item = 1000 * seconds / batch_size
         if best_ms_item is None or ms_item < best_ms_item:
-            best_batch, best_ms_item = batch_size, ms_item
+            best_ms_item = ms_item
         peak_text = f"{peak:9.0f}" if peak is not None else f"{'-':>9}"
         print(f"{batch_size:>6}  {1000 * seconds:9.2f}  {ms_item:13.2f}  {peak_text}")
 
-    report_horizons(args, model, steps, features, n_causes, n_bins, best_ms_item,
-                    DEFAULT_CUTS_DAYS, device)
+    report_horizons(args, model, steps, widths, n_causes, n_bins, best_ms_item,
+                    cuts_days, device)
 
 
-def report_horizons(args, model, steps, features, n_causes, n_bins, ms_item,
+def report_horizons(args, model, steps, widths, n_causes, n_bins, ms_item,
                     cuts_days, device):
     """Run TSR end to end, once per horizon, and time it.
 
@@ -441,7 +500,8 @@ def report_horizons(args, model, steps, features, n_causes, n_bins, ms_item,
     from TransEHR2.tsr import tsr_scores
 
     cause = 0
-    batch = stage1_batch(1, steps, features, args.feat_width, args.text_width, device)
+    features = len(widths) + 1
+    batch = stage1_batch(1, steps, widths, args.text_width, device)
 
     print()
     print(f"measured episode, gate q={args.gate_quantile}, chunk {args.chunk}")

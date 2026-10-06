@@ -304,3 +304,90 @@ def test_the_real_classifier_gives_the_same_scores_batched_or_not():
     serial = tsr_scores(model, collated, target=target, chunk=1)
     parallel = tsr_scores(model, collated, target=target, chunk=256)
     assert torch.allclose(serial['scores'], parallel['scores'], atol=1e-5)
+
+
+# ---------------------------------------------------------------------------
+# Empty cells
+# ---------------------------------------------------------------------------
+
+def _empty_cell(batch, timestep, feature=0):
+    """Clear one numeric cell the way extraction leaves an unobserved one."""
+    batch['val_data']['numeric']['values'][feature][:, timestep] = 0
+    batch['val_data']['numeric']['indicators'][:, timestep, feature] = 0
+
+
+def test_deleting_an_empty_cell_is_a_no_op_at_the_model(batch):
+    """The invariant the skip rests on, checked against the model rather than assumed.
+
+    If this ever fails -- a model that reads something other than the value and the indicator,
+    an extraction that leaves a stray value under a cleared indicator -- the skip is unsound and
+    the scores it writes as zero are wrong rather than merely unmeasured.
+    """
+    _empty_cell(batch, timestep=2)
+    index = feature_index(batch)
+    baseline, _ = saliency(StubModel(), batch)
+    perturbed, _ = saliency(StubModel(), batch, timestep=2, feature=0, index=index)
+    assert torch.equal(baseline, perturbed)
+
+
+def test_empty_cells_cost_no_pass_and_score_zero(batch):
+    _empty_cell(batch, timestep=2)
+    _empty_cell(batch, timestep=3)
+    result = tsr_scores(StubModel(), batch)
+
+    empty = ~result['occupied']
+    assert int(empty.sum(dim=(1, 2))[0]) == 2
+    assert result['passes'] == 1 + STEPS + (STEPS * N_FEATURES - 2)
+    assert (result['feature_contribution'][empty] == 0).all()
+    assert (result['scores'][empty] == 0).all()
+
+
+def test_a_stray_value_under_a_cleared_indicator_is_still_measured(batch):
+    """Occupancy is read off the batch, not inferred from the indicator alone."""
+    batch['val_data']['numeric']['indicators'][:, 1, 0] = 0
+    result = tsr_scores(StubModel(), batch)
+    assert bool(result['occupied'][0, 1, 0])
+    assert result['passes'] == 1 + STEPS + STEPS * N_FEATURES
+
+
+# ---------------------------------------------------------------------------
+# Integrated gradients
+# ---------------------------------------------------------------------------
+
+def test_integrated_gradients_matches_grad_x_input_on_a_linear_model(batch):
+    """The case where the two provably coincide, so a wrong path or divisor shows up.
+
+    StubModel is linear in its values with the indicators held at 1, so the gradient is constant
+    along the path and `x . mean_alpha grad(alpha*x)` collapses to `grad . x`. The midpoint rule
+    is exact for a constant integrand, so this holds at any number of steps -- a quadrature with
+    the wrong nodes, or a missing division by alpha, would not.
+    """
+    plain = tsr_scores(StubModel(), batch)
+    for steps in (1, 2, 37):
+        integrated = tsr_scores(StubModel(), batch, ig_steps=steps)
+        assert torch.allclose(plain['baseline'], integrated['baseline'], atol=1e-6), steps
+        assert torch.allclose(plain['scores'], integrated['scores'], atol=1e-5), steps
+
+
+def test_integrated_gradients_multiplies_every_pass(batch):
+    steps = 10
+    plain = tsr_scores(StubModel(), batch)
+    integrated = tsr_scores(StubModel(), batch, ig_steps=steps)
+    assert integrated['passes'] == steps * plain['passes']
+
+
+def test_the_path_leaves_indicators_alone(batch):
+    """An indicator is a statement that a value was observed, not a quantity to halve."""
+    from TransEHR2.tsr import saliency_many
+
+    before = batch['val_data']['numeric']['indicators'].clone()
+    saliency_many(StubModel(), batch, [None], alpha=0.25)
+    assert torch.equal(batch['val_data']['numeric']['indicators'], before)
+
+
+def test_midpoint_alphas_never_hit_zero_and_are_centred():
+    from TransEHR2.tsr import midpoint_alphas
+
+    assert midpoint_alphas(1) == [0.5]
+    assert midpoint_alphas(4) == [0.125, 0.375, 0.625, 0.875]
+    assert all(0 < a <= 1 for a in midpoint_alphas(50))

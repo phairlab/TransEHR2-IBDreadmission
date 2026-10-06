@@ -30,10 +30,12 @@ R(.) returns one scalar per (feature, timestep) cell, so every evaluation is a T
 and backward over the **stored lookup rows**. The text encoder is not in that graph and is never
 run by TSR. The cost is
 
-    1 + T + (passing timesteps) x N   TransEHR2 passes   and   0   encoder passes
+    1 + T + (occupied cells of the passing timesteps)   TransEHR2 passes   and   0   encoder
 
-which at the default open gate is ``1 + T + T*N``, and at the reference's 0.55 gate about
-``1 + T + 0.45*T*N``. The encoder backward
+At the default open gate that is ``1 + T + (occupied cells)``, which at EHR density is far
+below the ``1 + T + T*N`` the shape suggests: a patient-minute carries a handful of the
+feature set, and deleting a cell that was never observed provably moves nothing (see
+`_occupied`). The reference's 0.55 gate would cut it by a further 45%. The encoder backward
 (`attribution.token_attributions`) enters once per text cell whose tokens are actually rendered,
 after TSR has chosen them; `tsr_scores` returns the lookup gradients that pass needs.
 
@@ -60,6 +62,10 @@ Deviations from the reference, and why
   maximum keeps the [0, 1] bound, keeps the ordering the raw deltas had, and keeps the origin.
   The gate is untouched either way: a quantile is equivariant under an increasing affine map, so
   the comparison that defines it gives the same answer scaled or not.
+* **Empty cells are not perturbed.** The reference explains MNIST, where every pixel has a
+  value; an EHR timestep has a value for a few of its features and nothing for the rest. Those
+  cells are skipped and scored zero, which is exact rather than an approximation, and it is the
+  difference between a tractable method and an intractable one at N in the hundreds.
 * **The gate is open by default and gated timesteps are zeroed, not floored.** The gate exists
   to avoid work, and the reference's 0.55 is a constant tuned on MNIST-shaped data. ``quantile``
   defaults to 0, which measures every cell and so costs ``1 + T + T*N``; the flat floor then has
@@ -73,6 +79,7 @@ Deviations from the reference, and why
   intended use for explanation, the two coincide.
 """
 
+import math
 import torch
 
 from torch import Tensor
@@ -182,8 +189,8 @@ def _zero(batch, leaves, index, timestep: int, feature: Optional[int] = None,
 
 
 def saliency_many(model, batch, perturbations: Sequence[Optional[Tuple[int, Optional[int]]]],
-                  target: Optional[Callable] = None,
-                  index: Optional[Sequence] = None) -> Tuple[Tensor, List[Tensor]]:
+                  target: Optional[Callable] = None, index: Optional[Sequence] = None,
+                  alpha: float = 1.0) -> Tuple[Tensor, List[Tensor]]:
     """R(X~) for several perturbations in one forward and one backward.
 
     The batch is tiled once per perturbation and each replica has its own cell deleted, so a
@@ -202,6 +209,12 @@ def saliency_many(model, batch, perturbations: Sequence[Optional[Tuple[int, Opti
             Defaults to summing it.
         index (sequence, optional): `feature_index(batch)`, required when any perturbation names
             a feature.
+        alpha (float, optional): Scale the value tensors to this fraction of themselves before
+            the forward pass, which is one point on integrated gradients' path from the
+            all-zero baseline. The gradient then comes back evaluated at `alpha * x` while the
+            leaf still holds `alpha * x`, so a caller wanting `grad(alpha*x) . x` divides the
+            returned scores by alpha. Indicators are left alone: an indicator is a statement
+            that a value was observed, not a quantity, and half of one describes no record.
 
     Returns:
         (Tensor, list): scores of shape (len(perturbations), batch, max_ts_len, n_features), and
@@ -215,6 +228,11 @@ def saliency_many(model, batch, perturbations: Sequence[Optional[Tuple[int, Opti
     n_items = next(val_data[family]['indicators'].shape[0]
                    for family in FAMILIES if family in val_data)
     masked, leaves = _leaf_values(batch, copies=copies)
+
+    if alpha != 1.0:
+        for tensors in leaves.values():
+            for tensor in tensors:
+                tensor.data.mul_(alpha)
 
     for replica, perturbation in enumerate(perturbations):
         if perturbation is None:
@@ -264,7 +282,49 @@ def saliency(model, batch, target: Optional[Callable] = None,
     return scores[0], lookup_grads
 
 
-def _deltas(model, batch, perturbations, baseline, target, index, chunk) -> Tensor:
+def midpoint_alphas(steps: int) -> List[float]:
+    """``steps`` points of the Riemann midpoint rule on (0, 1].
+
+    Midpoints rather than endpoints for two reasons: the rule is exact for an integrand linear
+    in alpha, where a left or right rule is not, and it never evaluates at alpha = 0, where the
+    division that recovers ``grad . x`` would not be defined. ``steps=1`` gives [0.5], which for
+    a model linear in its values is already exact.
+    """
+    return [(k + 0.5) / steps for k in range(steps)]
+
+
+def _relevance(model, batch, perturbations, target, index,
+               alphas) -> Tuple[Tensor, List[Tensor]]:
+    """R(.) per perturbation: grad x input, or integrated gradients when `alphas` is longer.
+
+    Integrated gradients from the all-zero baseline is ``x . mean_alpha grad(alpha * x)``, and
+    `saliency_many` hands back ``grad(alpha*x) . (alpha*x)``, so each term is divided by its own
+    alpha before the terms are averaged. With one alpha of 1.0 that is exactly grad x input,
+    which is why both modes run through here rather than through two paths that could disagree.
+
+    The lookup gradients are averaged *without* that division, because stage 2 consumes a
+    gradient and multiplies by its own input: `attribution.token_attributions` wants
+    ``mean_alpha grad(alpha * x)``, not ``grad . x``. Integrating them alongside R(.) is what
+    keeps the token pass consistent with the cell pass when IG is on -- the two would otherwise
+    answer different questions about the same cell.
+
+    The alpha loop is innermost so a chunk's maps are averaged while they are in hand: the
+    average has to happen before the perturbation is reduced against the baseline, and holding
+    every perturbation's map to do it afterwards would cost hundreds of megabytes.
+    """
+    total, grads = None, None
+    for alpha in alphas:
+        scores, lookup = saliency_many(model, batch, perturbations, target, index,
+                                       alpha=alpha)
+        contribution = scores if alpha == 1.0 else scores / alpha
+        total = contribution if total is None else total + contribution
+        grads = lookup if grads is None else [a + b for a, b in zip(grads, lookup)]
+    n = len(alphas)
+    return total / n, [g / n for g in grads]
+
+
+def _deltas(model, batch, perturbations, baseline, target, index, chunk,
+            alphas) -> Tensor:
     """``sum |R(X) - R(X~)|`` over the whole saliency map, per perturbation and batch item.
 
     Reduced inside the chunk loop rather than after it: the maps themselves are
@@ -273,10 +333,41 @@ def _deltas(model, batch, perturbations, baseline, target, index, chunk) -> Tens
     """
     out = []
     for start in range(0, len(perturbations), chunk):
-        scores, _ = saliency_many(model, batch, perturbations[start:start + chunk],
-                                  target, index)
-        out.append((baseline.unsqueeze(0) - scores).abs().sum(dim=(2, 3)))
+        relevance, _ = _relevance(model, batch, perturbations[start:start + chunk],
+                                  target, index, alphas)
+        out.append((baseline.unsqueeze(0) - relevance).abs().sum(dim=(2, 3)))
     return torch.cat(out, dim=0)
+
+
+def _occupied(batch) -> Tensor:
+    """(batch, max_ts_len, n_features) bool: cells whose deletion could change anything.
+
+    `_zero` sets a cell's value row and its indicator to zero. A cell where both are already
+    zero is therefore bit-identical before and after, so the model returns the same output, the
+    same gradients, and ``|R(X) - R(X~)| == 0`` exactly. Those are not passes worth approximating
+    away -- they are arithmetic that does not need the model run to do it, and at EHR density
+    they are the overwhelming majority of the T*N term.
+
+    Both conditions are read off the batch rather than assumed from one. Extraction does fill
+    unobserved numerics with zeros (`preprocessing.ProcessedEpisode._process_numeric` allocates
+    zeros and writes `nan_to_num`), but a cell carrying a stray value under a cleared indicator
+    would make the skip wrong, and checking costs one reduction per feature.
+
+    The column order is `feature_index`'s, which is the same iteration.
+    """
+    densify_lookup_slots(batch)
+    val_data = batch['val_data']
+    columns = []
+    for family in FAMILIES:
+        if family not in val_data:
+            continue
+        entry = val_data[family]
+        tensors = (resolve_lookup_embeddings(entry) if family == 'lookup'
+                   else entry['values'])
+        for position, tensor in enumerate(tensors):
+            columns.append((entry['indicators'][..., position] != 0)
+                           | (tensor != 0).any(dim=-1))
+    return torch.stack(columns, dim=-1)
 
 
 def _maxscale(values: Tensor) -> Tensor:
@@ -293,7 +384,7 @@ def _maxscale(values: Tensor) -> Tensor:
 
 def tsr_scores(model, batch, target: Optional[Callable] = None,
                quantile: float = 0.0, gated_value: float = 0.0,
-               chunk: int = 64) -> Dict:
+               chunk: int = 64, ig_steps: int = 0) -> Dict:
     """Temporal Saliency Rescaling over a collated batch.
 
     Args:
@@ -315,6 +406,12 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
         chunk (int, optional): How many perturbations share one forward and backward. The pass
             is latency-bound well past 64 at the shapes this model runs at, so this is close to
             a pure speedup; what it costs is memory, since the batch is tiled `chunk` times.
+        ig_steps (int, optional): Replace grad x input as TSR's R(.) with integrated gradients
+            over this many path points. 0, the default, keeps grad x input. Every pass is
+            multiplied by this, and nothing else about the method changes -- TSR rescales
+            whatever R(.) returns. Note that the quantity reaching the token pass is then no
+            longer a gradient, so `attribution.token_attributions` would have to integrate too
+            for stage 2 to stay consistent with stage 1.
 
     Returns:
         dict: ``scores`` (batch, max_ts_len, n_features) rescaled saliency, ``baseline`` the
@@ -323,16 +420,23 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
         holding the raw, unscaled feature relevance,
         ``gate`` (batch, max_ts_len), ``lookup_grads`` from the unmasked pass -- the upstream
         gradients `attribution.token_attributions` consumes -- ``index`` from `feature_index`,
-        and ``passes``, the number of perturbations evaluated. ``passes`` counts work, not model
-        calls: `chunk` of them share one forward and backward.
+        ``occupied`` (batch, max_ts_len, n_features) bool, the cells a pass was worth taking
+        for, and ``passes``, the number of perturbations evaluated. ``passes`` counts work, not
+        model calls -- ``calls`` is those -- and it is below ``1 + T + T*N`` by however many
+        cells were empty.
     """
     index = feature_index(batch)
-    baseline, lookup_grads = saliency(model, batch, target)
+    alphas = midpoint_alphas(ig_steps) if ig_steps else [1.0]
+    baseline, lookup_grads = _relevance(model, batch, [None], target, index, alphas)
+    baseline = baseline[0]
     n_batch, n_steps, n_features = baseline.shape
 
     delta_time = _deltas(model, batch, [(t, None) for t in range(n_steps)],
-                         baseline, target, index, chunk).t().contiguous()
-    passes = 1 + n_steps
+                         baseline, target, index, chunk, alphas).t().contiguous()
+    passes = len(alphas) * (1 + n_steps)
+    # Model invocations, which is not `passes / chunk`: a call carries up to `chunk`
+    # perturbations at ONE alpha, so the alphas multiply the calls as well as the passes.
+    calls = len(alphas) * (1 + math.ceil(n_steps / chunk))
 
     time_contribution = _maxscale(delta_time)
     if quantile <= 0:
@@ -343,15 +447,21 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
         threshold = torch.quantile(time_contribution, quantile, dim=-1, keepdim=True)
         gate = time_contribution > threshold
 
-    feature_contribution = torch.full((n_batch, n_steps, n_features), gated_value,
-                                      device=baseline.device)
-    # Every cell of every timestep any item admits, in one list: the two loops the reference
-    # nests are independent of each other given the gate, so they flatten into one chunked run.
-    cells = [(t, c) for t in range(n_steps) if bool(gate[:, t].any())
-             for c in range(n_features)]
+    occupied = _occupied(batch)
+    feature_contribution = torch.where(
+        occupied, torch.full_like(baseline, gated_value),
+        torch.zeros_like(baseline))
+    # Every occupied cell of every timestep any item admits, in one list: the two loops the
+    # reference nests are independent of each other given the gate, so they flatten into one
+    # chunked run. An empty cell is left at exactly zero rather than the floor -- that is a
+    # measurement, not a stand-in for one, because deleting what is not there moves nothing.
+    cells = [(int(t), int(c)) for t, c in
+             (occupied & gate.unsqueeze(-1)).any(dim=0).nonzero().tolist()]
     if cells:
-        delta_feature = _deltas(model, batch, cells, baseline, target, index, chunk).t()
-        passes += len(cells)
+        delta_feature = _deltas(model, batch, cells, baseline, target, index, chunk,
+                                alphas).t()
+        passes += len(alphas) * len(cells)
+        calls += len(alphas) * math.ceil(len(cells) / chunk)
         steps = torch.tensor([t for t, _ in cells], device=baseline.device)
         columns = torch.tensor([c for _, c in cells], device=baseline.device)
         # Unscaled, so the magnitudes are comparable across timesteps and a cell reading zero
@@ -365,4 +475,5 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
     return {'scores': scores, 'baseline': baseline, 'delta_time': delta_time,
             'time_contribution': time_contribution,
             'feature_contribution': feature_contribution, 'gate': gate,
+            'occupied': occupied, 'calls': calls,
             'lookup_grads': lookup_grads, 'index': index, 'passes': passes}

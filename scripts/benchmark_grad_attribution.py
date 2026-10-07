@@ -199,6 +199,9 @@ def main(argv=None):
                         help="value encoder width; experiment2_text.yaml's")
     parser.add_argument('--feat-width', type=int, default=4,
                         help="per-feature value width for the synthetic --stage1 batch")
+    parser.add_argument('--drug-width', type=int, default=128,
+                        help="Width of a drug feature's pooled embedding, ClinVec's by "
+                             'default. Only used with --dataset-config.')
     parser.add_argument('--text-width', type=int, default=1024,
                         help="lookup embedding width for the synthetic --stage1 batch")
     parser.add_argument('--skip-encoder', action='store_true',
@@ -322,11 +325,11 @@ def report_tsr_budget(args, attribute_rate):
 # Stage 1: the TransEHR2 pass TSR actually spends its time in
 # ---------------------------------------------------------------------------
 
-def dataset_widths(config_path):
+def dataset_widths(config_path, drug_width=128):
     """``(steps, per-feature value widths)`` for the real study, from its two config files.
 
     `run_experiment` sizes the value encoder as ``sum(variable_properties[f]['size'])`` over
-    ``VALUED_FEATS``, with one more feature for the text superfeature; this reads the same two
+    ``VALUED_FEATS``, plus one feature per member of the lookup family; this reads the same two
     numbers so the benchmarked shape cannot drift from the trained one. A categorical feature is
     one-hot and occupies ``size`` columns, so count and width diverge as soon as any feature has
     size > 1 -- which is why repeating a single ``--feat-width`` is a stand-in rather than a
@@ -335,6 +338,13 @@ def dataset_widths(config_path):
     The widths are returned one per feature rather than summed because TSR deletes one feature
     at a time: the per-pass cost follows the total, but the per-pass *overhead* follows how many
     separate tensors there are.
+
+    ``DRUG_FEATS`` is counted, at `drug_width` each. Extraction writes one indicator array per
+    lookup type and `datasets.MixedDataset` collates every one of them, so a batch carries the
+    drug column alongside the text one -- the data's feature count is what TSR perturbs, and
+    leaving it out would understate N. It joins the list as an
+    ordinary value column because stage 1 runs over *stored* lookup rows: the pooling that makes
+    a lookup feature different has already happened, so for cost it is a column of that width.
     """
     import yaml
 
@@ -343,6 +353,7 @@ def dataset_widths(config_path):
     with open(config['VARIABLE_PROPERTIES_PATH']) as handle:
         properties = yaml.safe_load(handle)
     widths = [properties[name]['size'] for name in config['VALUED_FEATS']]
+    widths += [drug_width] * len(config.get('DRUG_FEATS') or [])
     return config['MAX_EPISODE_LEN_STEPS'], widths
 
 
@@ -441,8 +452,8 @@ def report_stage1(args, device):
     cause = DEFAULT_CAUSES.index('readmission')
 
     if args.dataset_config:
-        config_steps, widths = dataset_widths(args.dataset_config)
-        source = f"{args.dataset_config} ({len(widths)} valued + 1 text)"
+        config_steps, widths = dataset_widths(args.dataset_config, args.drug_width)
+        source = f"{args.dataset_config} ({len(widths)} valued and drug + 1 text)"
     else:
         config_steps, widths = declared_steps, [args.feat_width] * (features - 1)
         source = f"--feat-width {args.feat_width} repeated ({features} features)"

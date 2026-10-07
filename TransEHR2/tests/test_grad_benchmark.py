@@ -25,16 +25,18 @@ def test_the_widths_are_per_feature_and_follow_variable_properties(tmp_path):
         'VARIABLE_PROPERTIES_PATH': str(properties),
         'VALUED_FEATS': ['HGB', 'ZONE_NAME', 'QUINTMAT'],
         'TEXT_FEATS': ['TEXT_SUPERFEATURE'],
+        'DRUG_FEATS': ['DRUG'],
         'MAX_EPISODE_LEN_STEPS': 500,
     }))
 
-    steps, widths = dataset_widths(str(config))
+    steps, widths = dataset_widths(str(config), drug_width=128)
 
     assert steps == 500
-    # Three features, twelve columns: count and width diverge the moment one is one-hot, which
-    # is exactly what repeating a single --feat-width cannot represent.
-    assert widths == [1, 6, 5]
-    assert len(widths) == 3 and sum(widths) == 12
+    # Three valued features in twelve columns -- count and width diverge the moment one is
+    # one-hot, which is what repeating a single --feat-width cannot represent -- then the drug
+    # feature, which extraction writes and the collate ships whether or not run_experiment
+    # sized the encoder for it.
+    assert widths == [1, 6, 5, 128]
 
 
 # ---------------------------------------------------------------------------

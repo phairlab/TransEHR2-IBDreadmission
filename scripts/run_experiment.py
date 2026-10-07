@@ -196,8 +196,8 @@ def main():
     DEEPHIT_RANK_WEIGHT = experiment_config.get('DEEPHIT_RANK_WEIGHT', 1.0)
     DEEPHIT_SIGMA = experiment_config.get('DEEPHIT_SIGMA', 0.1)
     DEEPHIT_CAUSE_WEIGHTS = experiment_config.get('DEEPHIT_CAUSE_WEIGHTS', None)
-    DEEPHIT_HEAD_D_SHARED = experiment_config.get('DEEPHIT_HEAD_D_SHARED', 128)
-    DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', 64)
+    DEEPHIT_HEAD_D_SHARED = experiment_config.get('DEEPHIT_HEAD_D_SHARED', [256, 128])
+    DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', [128, 64])
     DEEPHIT_HEAD_DROPOUT = experiment_config.get('DEEPHIT_HEAD_DROPOUT', 0.1)
 
     grid = TimeGrid(TIME_GRID_CUTS_DAYS, MODELLED_CAUSES,

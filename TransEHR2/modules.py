@@ -4,7 +4,7 @@ import torch
 from dlordinal.output_layers import CLM
 from torch import Tensor
 from transformers import AutoTokenizer, AutoModel
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from TransEHR2.constants import (
     HF_API_TOKEN,
@@ -1301,15 +1301,48 @@ class DeepHitHead(torch.nn.Module):
     whole block, with a slot appended for surviving the horizon, is taken
     in ``survival.deephit_distribution``, because the causes have to share
     a simplex for the competing-risks reading to hold.
+
+    Both stacks are sized by a list of layer widths rather than one width,
+    because Lee et al. fix the shape of this head but not its depth: their
+    experiments search 1, 2, 3 or 5 layers for the shared subnetwork and
+    independently for the cause-specific ones. Depth is therefore a
+    setting here, not a constant, and is set in the experiment config.
     """
+
+    @staticmethod
+    def _widths(widths: Sequence[int], name: str) -> List[int]:
+        """Validate one subnetwork's layer widths.
+
+        Depth and width are one setting here, so a malformed value is a
+        config error rather than a programming error, and it is worth
+        saying so plainly: left to itself it surfaces much later as a
+        shape mismatch inside a Linear, which names neither the key nor
+        the file it came from.
+        """
+        widths = list(widths)
+        if not widths or any(not isinstance(w, int) or w < 1 for w in widths):
+            raise ValueError(
+                f'{name} must be a non-empty list of positive integers, one '
+                f'per hidden layer; got {widths!r}')
+        return widths
+
+    @staticmethod
+    def _stack(d_in: int, widths: List[int], dropout: float) -> List:
+        """Hidden layers taking ``d_in`` through ``widths`` in turn."""
+        layers = []
+        for width in widths:
+            layers += [torch.nn.Linear(d_in, width), torch.nn.GELU(),
+                       torch.nn.Dropout(dropout)]
+            d_in = width
+        return layers
 
     def __init__(
         self,
         d_in: int,
         n_causes: int,
         n_bins: int,
-        d_shared: int = 128,
-        d_cause: int = 64,
+        d_shared: Sequence[int] = (256, 128),
+        d_cause: Sequence[int] = (128, 64),
         dropout: float = 0.1
     ):
         """
@@ -1317,24 +1350,28 @@ class DeepHitHead(torch.nn.Module):
             d_in (int): Width of the encoding coming out of the trunk.
             n_causes (int): Number of competing causes.
             n_bins (int): Number of bins on the discrete time grid.
-            d_shared (int): Width of the shared subnetwork.
-            d_cause (int): Width of each cause-specific subnetwork.
+            d_shared (Sequence[int]): Width of each hidden layer in the
+                shared subnetwork, in order. Its length is the depth.
+            d_cause (Sequence[int]): Width of each hidden layer in every
+                cause-specific subnetwork, in order. Its length is the
+                depth. Each cause gets its own parameters at these widths,
+                not a shared stack.
             dropout (float): Dropout applied after each hidden activation.
         """
         super().__init__()
         self.n_causes = n_causes
         self.n_bins = n_bins
+        d_shared = self._widths(d_shared, 'd_shared')
+        d_cause = self._widths(d_cause, 'd_cause')
         self.shared = torch.nn.Sequential(
-            torch.nn.Linear(d_in, d_shared),
-            torch.nn.GELU(),
-            torch.nn.Dropout(dropout),
-        )
+            *self._stack(d_in, d_shared, dropout))
+        # d_shared[-1] + d_in, not d_shared[-1]: the residual path hands
+        # each cause the raw encoding alongside the shared one, so the
+        # first cause layer reads both however deep the shared stack is.
         self.causes = torch.nn.ModuleList([
             torch.nn.Sequential(
-                torch.nn.Linear(d_shared + d_in, d_cause),
-                torch.nn.GELU(),
-                torch.nn.Dropout(dropout),
-                torch.nn.Linear(d_cause, n_bins),
+                *self._stack(d_shared[-1] + d_in, d_cause, dropout),
+                torch.nn.Linear(d_cause[-1], n_bins),
             )
             for _ in range(n_causes)
         ])

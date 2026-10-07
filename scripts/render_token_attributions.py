@@ -311,8 +311,8 @@ def build_classifier(dataset_config, experiment_config, grid, data_dir) -> Mixed
         head=DeepHitHead(
             d_in=MixedClassifier.encoding_width(d_thp, d_disc, static_dim),
             n_causes=grid.n_causes, n_bins=grid.n_bins,
-            d_shared=setting('DEEPHIT_HEAD_D_SHARED', 128),
-            d_cause=setting('DEEPHIT_HEAD_D_CAUSE', 64),
+            d_shared=setting('DEEPHIT_HEAD_D_SHARED', [256, 128]),
+            d_cause=setting('DEEPHIT_HEAD_D_CAUSE', [128, 64]),
             dropout=setting('DEEPHIT_HEAD_DROPOUT', 0.1)),
     )
 

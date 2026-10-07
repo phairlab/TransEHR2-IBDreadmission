@@ -116,9 +116,14 @@ DEEPHIT_SIGMA: 0.1
 DEEPHIT_CAUSE_WEIGHTS: null
 
 # The head: one shared stack, then one per cause, each also seeing the raw
-# encoding.
-DEEPHIT_HEAD_D_SHARED: 128
-DEEPHIT_HEAD_D_CAUSE: 64
+# encoding. One entry per hidden layer, so these lists set the depth as well
+# as the width -- Lee et al. fix the head's shape but search its depth, and
+# two layers each is the starting point rather than a published value.
+#
+# The cause-specific stacks are per cause: each of the three causes gets its
+# own parameters at these widths.
+DEEPHIT_HEAD_D_SHARED: [256, 128]
+DEEPHIT_HEAD_D_CAUSE: [128, 64]
 DEEPHIT_HEAD_DROPOUT: 0.1
 
 # Which validation number picks the finetuned epoch. 'brier' minimizes the

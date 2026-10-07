@@ -245,8 +245,8 @@ def main():
     THP_ENCODER_DROPOUT = experiment_config['THP_ENCODER_DROPOUT']
     THP_ENCODER_NORM_FIRST = experiment_config.get('THP_ENCODER_NORM_FIRST', True)
     PREDICTOR_AGGREGATION_METHOD = experiment_config['PREDICTOR_AGGREGATION_METHOD']
-    DEEPHIT_HEAD_D_SHARED = experiment_config.get('DEEPHIT_HEAD_D_SHARED', 128)
-    DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', 64)
+    DEEPHIT_HEAD_D_SHARED = experiment_config.get('DEEPHIT_HEAD_D_SHARED', [256, 128])
+    DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', [128, 64])
     DEEPHIT_HEAD_DROPOUT = experiment_config.get('DEEPHIT_HEAD_DROPOUT', 0.1)
 
     grid = TimeGrid(

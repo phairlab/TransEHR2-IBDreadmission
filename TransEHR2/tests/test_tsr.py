@@ -248,7 +248,7 @@ def _real_model_and_batch(steps=4, n_numeric=2, width=3, text_width=8,
         d_event_enc=8, d_val_enc=d_model, d_statics=0,
         num_classes=n_causes * n_bins, aggr='mean', use_lookup=True,
         head=DeepHitHead(d_in=encoding, n_causes=n_causes, n_bins=n_bins,
-                         d_shared=8, d_cause=4, dropout=0.0))
+                         d_shared=[8, 8], d_cause=[4, 4], dropout=0.0))
     model.eval()
 
     collated = {

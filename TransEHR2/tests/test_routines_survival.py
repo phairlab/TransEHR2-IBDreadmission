@@ -125,8 +125,8 @@ def _predictor(grid):
         num_classes=grid.n_causes * grid.n_bins,
         aggr='mean',
         head=DeepHitHead(d_in=D_EVENT + D_MODEL, n_causes=grid.n_causes,
-                         n_bins=grid.n_bins, d_shared=16, d_cause=8,
-                         dropout=0.0),
+                         n_bins=grid.n_bins, d_shared=[16, 16],
+                         d_cause=[8, 8], dropout=0.0),
     )
 
 
@@ -558,8 +558,8 @@ def test_the_head_is_sized_for_what_the_trunk_actually_concatenates():
         d_event_enc=D_EVENT, d_val_enc=D_MODEL, d_statics=0,
         num_classes=grid.n_causes * grid.n_bins, aggr='mean',
         head=DeepHitHead(d_in=width, n_causes=grid.n_causes,
-                         n_bins=grid.n_bins, d_shared=16, d_cause=8,
-                         dropout=0.0))
+                         n_bins=grid.n_bins, d_shared=[16, 16],
+                         d_cause=[8, 8], dropout=0.0))
 
     logits = model(_batch(3, 42))
     assert logits.shape == (3, grid.n_causes * grid.n_bins)

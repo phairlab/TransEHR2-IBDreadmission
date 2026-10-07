@@ -19,7 +19,6 @@ Usage:
 import argparse
 import gc
 import os
-import pickle
 import torch
 import yaml
 
@@ -29,7 +28,8 @@ import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.cli import TASK, get_fold_names, resolve_device
 from TransEHR2.data.preprocessing import (
-    compute_static_feat_dims, prepare_dataloaders
+    compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
+    value_encoder_dims
 )
 from TransEHR2.losses import DeepHitLoss
 from TransEHR2.models import ELECTRA, MixedClassifier
@@ -116,14 +116,12 @@ def main():
     VARIABLE_PROPERTIES_PATH = dataset_config['VARIABLE_PROPERTIES_PATH']
     VALUED_FEATS = dataset_config['VALUED_FEATS']
     EVENT_FEATS = dataset_config['EVENT_FEATS']
-    TEXT_FEATS = dataset_config['TEXT_FEATS']
     STATIC_FEATS = dataset_config['STATIC_FEATS']
 
     with open(args.experiment_config, 'r') as f_in:
         experiment_config = yaml.safe_load(f_in)
     EXPERIMENT_NAME = experiment_config['EXPERIMENT_NAME']
     BATCH_SIZE = experiment_config['BATCH_SIZE']
-    USE_TEXT = experiment_config['USE_TEXT']
     PREDICT_INDICATORS = experiment_config['PREDICT_INDICATORS']
     GENERATOR_ENCODER_D_MODEL = experiment_config['GENERATOR_ENCODER_D_MODEL']
     GENERATOR_ENCODER_N_HEADS = experiment_config['GENERATOR_ENCODER_N_HEADS']
@@ -228,13 +226,11 @@ def main():
     static_dim = sum(
         compute_static_feat_dims(variable_properties, STATIC_FEATS)
     )
-    tot_val_feat_dim = 0      # Total number of dimensions of all input features
     numeric_feat_dims = []    # The dimension of each numeric feature
     categorical_class_cnts = []   # Number of classes for each categorical feature
     ordinal_features = []     # Number of levels for each ordinal feature
     multilabel_class_cnts = []    # Number of classes for each multilabel feature
     for feature in VALUED_FEATS:
-        tot_val_feat_dim += variable_properties[feature]['size']
         if variable_properties[feature]['type'] == 'numeric':
             numeric_feat_dims.append(variable_properties[feature]['size'])
         elif variable_properties[feature]['type'] == 'categorical':
@@ -254,24 +250,19 @@ def main():
     if not fold_name_list:
         raise FileNotFoundError(f'No fold directories found in {DATA_DIR}')
 
-    if USE_TEXT:
-        n_val_feats = len(VALUED_FEATS) + len(TEXT_FEATS)
-        # Read text_embed_dim from the first fold's dataset metadata
-        first_fold_meta_path = os.path.join(
-            DATA_DIR, fold_name_list[0], 'train', 'metadata.pkl'
-        )
-        with open(first_fold_meta_path, 'rb') as f:
-            _meta = pickle.load(f)
-        text_embed_dim = _meta['text_embed_dim']
-        if text_embed_dim == 0:
-            raise RuntimeError(
-                "text_embed_dim is 0 in dataset metadata. "
-                "Run embed.py to pre-compute text embeddings before training."
-            )
-        tot_val_feat_dim += len(TEXT_FEATS) * text_embed_dim
-    else:
-        n_val_feats = len(VALUED_FEATS)
-        text_embed_dim = 0
+    # The lookup family is used whenever the extraction carries it: the
+    # dataset config's TEXT_FEATS and DRUG_FEATS decide that, and there
+    # is no experiment-level switch over them. Sizing therefore reads
+    # the extracted root rather than the config's feature lists --
+    # DRUG_FEATS has no VALUED_FEATS entry and no timeseries.csv column,
+    # so a width counted over text alone is short by one feature and by
+    # ClinVec's embedding width, and the first forward dies in the
+    # indicator projection.
+    lookup_dims = lookup_feat_widths(os.path.join(DATA_DIR, 'extracted'))
+    use_lookup = bool(lookup_dims)
+    n_val_feats, tot_val_feat_dim = value_encoder_dims(
+        variable_properties, VALUED_FEATS, lookup_dims
+    )
     n_event_types = len(EVENT_FEATS)
 
     def build_value_encoder(d_model, n_heads, n_blocks, dim_ff, dropout,
@@ -305,7 +296,7 @@ def main():
             d_statics=static_dim,
             num_classes=grid.n_causes * grid.n_bins,
             aggr=PREDICTOR_AGGREGATION_METHOD,
-            use_lookup=USE_TEXT,
+            use_lookup=use_lookup,
             head=DeepHitHead(
                 d_in=MixedClassifier.encoding_width(
                     THP_ENCODER_D_MODEL, DISCRIMINATOR_ENCODER_D_MODEL,
@@ -357,8 +348,7 @@ def main():
                 categorical_classes=categorical_class_cnts,
                 ordinal_features=ordinal_features if ordinal_features else None,
                 multilabel_classes=multilabel_class_cnts if multilabel_class_cnts else None,
-                n_text_features=len(TEXT_FEATS) if USE_TEXT else 0,
-                text_embed_dim=text_embed_dim,
+                lookup_dims=lookup_dims,
                 predict_indicators=PREDICT_INDICATORS,
                 dim_feedforward=GENERATOR_DIM_FEEDFORWARD
             )
@@ -376,7 +366,7 @@ def main():
                 n_categorical_features=len(categorical_class_cnts),
                 n_ordinal_features=len(ordinal_features),
                 n_multilabel_features=len(multilabel_class_cnts),
-                n_text_features=len(TEXT_FEATS) if USE_TEXT else 0,
+                n_lookup_features=len(lookup_dims),
                 n_static_features=static_dim,
                 dim_feedforward=DISCRIMINATOR_DIM_FEEDFORWARD
             )
@@ -391,7 +381,7 @@ def main():
                 generator=generator,
                 discriminator=discriminator,
                 hawkes=hawkes,
-                use_lookup=USE_TEXT,
+                use_lookup=use_lookup,
             )
 
             log_dir = f'./log/{EXPERIMENT_NAME}/{fold_name}/pretrained'

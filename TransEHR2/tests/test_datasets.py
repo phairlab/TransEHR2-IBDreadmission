@@ -370,7 +370,7 @@ def test_the_gather_casts_to_float32(one_patient):
 def test_a_missing_table_is_refused(one_patient):
     """Both tables are built by ``embed.py``. A text feature has no
     declared width until then, so there is no shape to fall back to, and dropping the feature
-    would train a USE_TEXT model on no text at all."""
+    would train a model on none of what that feature carries."""
     one_patient.add_fold('fold0', train=[0])
     assert run(one_patient) == 0
     with pytest.raises(FileNotFoundError, match='text_embeddings.npy'):

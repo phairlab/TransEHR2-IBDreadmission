@@ -41,7 +41,8 @@ import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.cli import TASK, get_fold_names, resolve_device
 from TransEHR2.data.preprocessing import (
-    compute_static_feat_dims, prepare_dataloaders
+    compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
+    value_encoder_dims
 )
 from TransEHR2.models import MixedClassifier
 from TransEHR2.modules import DeepHitHead, EventDataEncoder, ValueDataEncoder
@@ -222,12 +223,10 @@ def main():
     VARIABLE_PROPERTIES_PATH = dataset_config['VARIABLE_PROPERTIES_PATH']
     VALUED_FEATS = dataset_config['VALUED_FEATS']
     EVENT_FEATS = dataset_config['EVENT_FEATS']
-    TEXT_FEATS = dataset_config['TEXT_FEATS']
     STATIC_FEATS = dataset_config['STATIC_FEATS']
 
     with open(args.experiment_config, 'r') as f_in:
         experiment_config = yaml.safe_load(f_in)
-    USE_TEXT = experiment_config['USE_TEXT']
     BATCH_SIZE = args.batch_size or experiment_config['BATCH_SIZE']
     DISCRIMINATOR_ENCODER_D_MODEL = experiment_config['DISCRIMINATOR_ENCODER_D_MODEL']
     DISCRIMINATOR_ENCODER_N_HEADS = experiment_config['DISCRIMINATOR_ENCODER_N_HEADS']
@@ -259,21 +258,18 @@ def main():
         variable_properties = yaml.safe_load(f_in)
     static_dim = sum(
         compute_static_feat_dims(variable_properties, STATIC_FEATS))
-    tot_val_feat_dim = sum(variable_properties[f]['size']
-                           for f in VALUED_FEATS)
 
     fold_name_list = args.folds or get_fold_names(DATA_DIR)
 
-    if USE_TEXT:
-        import pickle
-        n_val_feats = len(VALUED_FEATS) + len(TEXT_FEATS)
-        meta_path = os.path.join(DATA_DIR, fold_name_list[0], 'train',
-                                 'metadata.pkl')
-        with open(meta_path, 'rb') as f:
-            text_embed_dim = pickle.load(f)['text_embed_dim']
-        tot_val_feat_dim += len(TEXT_FEATS) * text_embed_dim
-    else:
-        n_val_feats = len(VALUED_FEATS)
+    # The whole lookup family, whenever the extraction carries it: see
+    # run_experiment.py. The weights being loaded here were built from
+    # the same two numbers, so a short encoder fails the load rather
+    # than predicting wrongly -- but it fails on every fold, which is
+    # not a useful way to find out.
+    lookup_dims = lookup_feat_widths(os.path.join(DATA_DIR, 'extracted'))
+    use_lookup = bool(lookup_dims)
+    n_val_feats, tot_val_feat_dim = value_encoder_dims(
+        variable_properties, VALUED_FEATS, lookup_dims)
     n_event_types = len(EVENT_FEATS)
 
     def build_classifier() -> MixedClassifier:
@@ -299,7 +295,7 @@ def main():
             d_statics=static_dim,
             num_classes=grid.n_causes * grid.n_bins,
             aggr=PREDICTOR_AGGREGATION_METHOD,
-            use_lookup=USE_TEXT,
+            use_lookup=use_lookup,
             head=DeepHitHead(
                 d_in=MixedClassifier.encoding_width(
                     THP_ENCODER_D_MODEL, DISCRIMINATOR_ENCODER_D_MODEL,

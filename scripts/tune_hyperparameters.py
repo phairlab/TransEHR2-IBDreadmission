@@ -26,7 +26,6 @@ Usage:
 import argparse
 import gc
 import os
-import pickle
 import torch
 import yaml
 
@@ -37,7 +36,8 @@ import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.cli import resolve_device
 from TransEHR2.data.preprocessing import (
-    compute_static_feat_dims, prepare_dataloaders
+    compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
+    value_encoder_dims
 )
 from TransEHR2.models import ELECTRA
 from TransEHR2.modules import (
@@ -167,14 +167,12 @@ def main():
     VARIABLE_PROPERTIES_PATH = dataset_config['VARIABLE_PROPERTIES_PATH']
     VALUED_FEATS = dataset_config['VALUED_FEATS']
     EVENT_FEATS = dataset_config['EVENT_FEATS']
-    TEXT_FEATS = dataset_config['TEXT_FEATS']
     STATIC_FEATS = dataset_config['STATIC_FEATS']
 
     with open(args.experiment_config, 'r') as f_in:
         cfg = yaml.safe_load(f_in)
     EXPERIMENT_NAME = cfg['EXPERIMENT_NAME']
     BATCH_SIZE = cfg['BATCH_SIZE']
-    USE_TEXT = cfg['USE_TEXT']
     PREDICT_INDICATORS = cfg['PREDICT_INDICATORS']
     MODEL_DIR = cfg['MODEL_DIR']
     USE_THP = cfg.get('USE_THP', True)
@@ -197,11 +195,9 @@ def main():
         variable_properties = yaml.safe_load(f_in)
     static_dim = sum(
         compute_static_feat_dims(variable_properties, STATIC_FEATS))
-    tot_val_feat_dim = 0
     numeric_feat_dims, categorical_class_cnts = [], []
     ordinal_features, multilabel_class_cnts = [], []
     for feature in VALUED_FEATS:
-        tot_val_feat_dim += variable_properties[feature]['size']
         kind = variable_properties[feature]['type']
         if kind == 'numeric':
             numeric_feat_dims.append(variable_properties[feature]['size'])
@@ -214,19 +210,12 @@ def main():
         elif kind == 'multilabel':
             multilabel_class_cnts.append(variable_properties[feature]['size'])
 
-    fold_dir = os.path.join(DATA_DIR, FOLD_NAME)
-    if USE_TEXT:
-        n_val_feats = len(VALUED_FEATS) + len(TEXT_FEATS)
-        with open(os.path.join(fold_dir, 'train', 'metadata.pkl'), 'rb') as f:
-            text_embed_dim = pickle.load(f)['text_embed_dim']
-        if text_embed_dim == 0:
-            raise RuntimeError(
-                "text_embed_dim is 0 in dataset metadata. "
-                "Run embed.py to pre-compute text embeddings before tuning.")
-        tot_val_feat_dim += len(TEXT_FEATS) * text_embed_dim
-    else:
-        n_val_feats = len(VALUED_FEATS)
-        text_embed_dim = 0
+    # The whole lookup family, whenever the extraction carries it: see
+    # run_experiment.py.
+    lookup_dims = lookup_feat_widths(os.path.join(DATA_DIR, 'extracted'))
+    use_lookup = bool(lookup_dims)
+    n_val_feats, tot_val_feat_dim = value_encoder_dims(
+        variable_properties, VALUED_FEATS, lookup_dims)
     n_event_types = len(EVENT_FEATS)
 
     log_dir = f'./log/{EXPERIMENT_NAME}/{FOLD_NAME}/pretrained'
@@ -261,10 +250,9 @@ def main():
             categorical_classes=categorical_class_cnts,
             ordinal_features=ordinal_features or None,
             multilabel_classes=multilabel_class_cnts or None,
-            n_text_features=len(TEXT_FEATS) if USE_TEXT else 0,
+            lookup_dims=lookup_dims,
             predict_indicators=PREDICT_INDICATORS,
-            dim_feedforward=cfg['GENERATOR_DIM_FEEDFORWARD'],
-            text_embed_dim=text_embed_dim)
+            dim_feedforward=cfg['GENERATOR_DIM_FEEDFORWARD'])
         discriminator = MaskedTokenDiscriminator(
             encoder=build_value_encoder('DISCRIMINATOR'),
             d_model=cfg['DISCRIMINATOR_ENCODER_D_MODEL'],
@@ -272,7 +260,7 @@ def main():
             n_categorical_features=len(categorical_class_cnts),
             n_ordinal_features=len(ordinal_features),
             n_multilabel_features=len(multilabel_class_cnts),
-            n_text_features=len(TEXT_FEATS) if USE_TEXT else 0,
+            n_lookup_features=len(lookup_dims),
             n_static_features=static_dim,
             dim_feedforward=cfg['DISCRIMINATOR_DIM_FEEDFORWARD'])
         hawkes = TransformerHawkesProcess(
@@ -286,7 +274,7 @@ def main():
                 normalize_before=cfg.get('THP_ENCODER_NORM_FIRST', True)),
             num_types=n_event_types) if USE_THP else None
         return ELECTRA(generator=generator, discriminator=discriminator,
-                       hawkes=hawkes, use_lookup=USE_TEXT)
+                       hawkes=hawkes, use_lookup=use_lookup)
 
     results = load_results(evaluation_fp, EXPERIMENT_NAME)
     seed_defaults = True

@@ -35,8 +35,29 @@ TOKENIZER_PAD_TOKEN = '[PAD]'
 # downloaded model code is the thing to avoid on a controlled cluster.
 #
 # LLM_NAME = 'Alibaba-NLP/gte-base-en-v1.5'  # needs trust_remote_code; see above
-LLM_NAME = 'BAAI/bge-m3'
-# LLM_NAME = 'meta-llama/Llama-3.1-70B'  # the decoder this replaces, masked-mean pooled
+# LLM_NAME = 'BAAI/bge-m3'  # the encoder ContrastiveBMMB replaces, on main
+# LLM_NAME = 'meta-llama/Llama-3.1-70B'  # the decoder that replaced, masked-mean pooled
+#
+# This branch runs ContrastiveBMMB's A3 encoder: BioClinical ModernBERT large, contrastively
+# fine-tuned on ICD-10-CA/CCI sibling substitution. 396M parameters against bge-m3's 568M, and
+# 1024-d either way, so it is a dimensional drop-in. CLS-pooled, matching how it was trained --
+# `TEXT_POOLING` below must not drift from ContrastiveBMMB's `POOLING`, or the lookup table and
+# the encoder disagree about what a row means.
+#
+# A3 rather than A3w: the whitening transform lives outside the checkpoint, so loading this path
+# gives unwhitened embeddings. That is the right default until the transform is folded in, and
+# the attribution path takes it separately (`attribution.token_attributions`'s
+# `whitening_transform`).
+#
+# First existing candidate wins, so one tracked value works on the cluster and on a laptop. The
+# last is the fallback when none exist, which keeps the failure at `from_pretrained` -- where
+# the path is named -- rather than here.
+CONTRASTIVEBMMB_CANDIDATES = (
+    '/uhome/pr3/projects/p60290_2/ContrastiveBMMB/checkpoints/a3',
+    os.path.expanduser('~/Projects/ContrastiveBMMB/checkpoints/a3'),
+)
+LLM_NAME = next((p for p in CONTRASTIVEBMMB_CANDIDATES if os.path.isdir(p)),
+                CONTRASTIVEBMMB_CANDIDATES[0])
 
 # Maximum length of token sequences, and the second axis of text_tokens.npy -- so it is a
 # storage decision as much as a truncation one. At section 4.5's 3.95M unique strings the

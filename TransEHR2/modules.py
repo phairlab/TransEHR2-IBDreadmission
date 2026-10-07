@@ -175,29 +175,64 @@ class GradientTraceableLLM(torch.nn.Module):
 
         with torch.set_grad_enabled(trace_grads):  # Only trace gradients if trace_grads is True
             outputs = self.model(token_ids, attention_mask=attention_mask)
-            embeddings = outputs.last_hidden_state  # (N, max_token_length, embed_dim)
-            #   embeddings shape after pooling: (N, embed_dim)
-            if self.pooling == 'cls':
-                # Position 0 is the sequence representation an encoder model was trained to
-                # produce, and it is what bge-m3's contrastive objective optimized. This assumes
-                # right padding, which LLMTextProcessor asserts at tokenization time -- with left
-                # padding position 0 is a pad token and the embedding is content-free.
-                embeddings = embeddings[:, 0]
-            else:
-                # Mean-pool the non-padding token embeddings of each sequence. Correct for a
-                # decoder, whose position 0 carries only a BOS token.
-                if attention_mask is not None:
-                    mask_expanded = attention_mask.unsqueeze(-1).float()
-                    embeddings = (embeddings * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
-                else:
-                    embeddings = embeddings.mean(dim=1)
-            
+            embeddings = self._pool(outputs.last_hidden_state, attention_mask)
+
             # Add a hook to save gradients during the backward pass, but only if we're tracing gradients
             if trace_grads and embeddings.requires_grad:
                 embeddings.register_hook(self._save_gradients)
-        
+
         return embeddings
-    
+
+    def _pool(self, hidden_states: Tensor, attention_mask: Optional[Tensor]) -> Tensor:
+        """Reduce (N, max_token_length, embed_dim) token states to (N, embed_dim).
+
+        Its own method because `forward_from_embeds` has to pool identically: a second copy of
+        this that drifted would make token attributions describe a pooling the lookup table was
+        not built with, and nothing downstream could detect that.
+        """
+        if self.pooling == 'cls':
+            # Position 0 is the sequence representation an encoder model was trained to
+            # produce, and it is what bge-m3's contrastive objective optimized. This assumes
+            # right padding, which LLMTextProcessor asserts at tokenization time -- with left
+            # padding position 0 is a pad token and the embedding is content-free.
+            return hidden_states[:, 0]
+        # Mean-pool the non-padding token embeddings of each sequence. Correct for a
+        # decoder, whose position 0 carries only a BOS token.
+        if attention_mask is not None:
+            mask_expanded = attention_mask.unsqueeze(-1).float()
+            return (hidden_states * mask_expanded).sum(dim=1) / mask_expanded.sum(dim=1).clamp(min=1)
+        return hidden_states.mean(dim=1)
+
+    def forward_from_embeds(
+        self,
+        inputs_embeds: Tensor,
+        attention_mask: Optional[Tensor] = None
+    ) -> Tensor:
+        """Pooled embedding from input-layer token vectors, with gradients traced.
+
+        The entry point token-level attribution needs. `forward` takes integer `token_ids`, and
+        a gradient cannot be taken with respect to an integer: the embedding lookup is the first
+        point in the model where a differentiable input exists. Passing `inputs_embeds` as a
+        leaf tensor also sidesteps the frozen encoder -- every parameter has
+        `requires_grad=False`, so a forward from `token_ids` builds no graph at all and
+        `forward`'s `trace_grads` has nothing to hook.
+
+        Grad mode is the caller's to set; this method does not override it.
+
+        Args:
+            inputs_embeds (Tensor): (N, max_token_length, embed_dim) input-layer vectors,
+                normally `model.get_input_embeddings()(token_ids)` detached and marked
+                `requires_grad_(True)`.
+            attention_mask (Tensor, optional): (N, max_token_length) padding mask.
+
+        Returns:
+            Tensor: (N, embed_dim) pooled embeddings, pooled exactly as `forward` pools them.
+        """
+        if attention_mask is not None and attention_mask.dtype != torch.long:
+            attention_mask = attention_mask.long()
+        outputs = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
+        return self._pool(outputs.last_hidden_state, attention_mask)
+
     def _save_gradients(self, grad: Tensor) -> None:
         """Save gradients during the backward pass."""
         self.embedding_gradients = grad

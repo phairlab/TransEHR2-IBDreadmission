@@ -55,7 +55,7 @@ import numpy as np
 import torch
 
 from torch import Tensor
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from TransEHR2.hyman import hyman_spline
 
@@ -299,6 +299,75 @@ def survival_from_pmf(pmf: Tensor, p_survive: Tensor) -> Tensor:
     total = pmf.sum(dim=1)                                  # (batch, n_bins)
     tail_exclusive = total.flip(-1).cumsum(-1).flip(-1) - total
     return tail_exclusive + p_survive.unsqueeze(-1)
+
+
+def cif_logit_target(
+    cause: int, horizon_bin: int, n_causes: int, n_bins: int
+) -> Callable[[Tensor], Tensor]:
+    """A scalar for attribution: the log-odds that cause ``k`` happens by a horizon.
+
+    Gradient attribution needs one scalar per backward, and the training
+    objective is the wrong one to pick. DeepHit's loss is a likelihood plus
+    a pairwise ranking penalty, so a gradient of it answers "what moved this
+    patient's contribution to the objective", which is a question about the
+    fit and not about the patient. The cumulative incidence of unplanned
+    readmission by a stated horizon is the quantity a reader cares about,
+    and it is monotone in the risk.
+
+    The log-odds rather than the incidence itself, for the usual reason a
+    saliency target is taken before the squashing function: ``F_k`` is a
+    probability, so once the head is confident its gradient goes to zero in
+    every direction at once and the map reports numerical floor rather than
+    the inputs. ``log(F / (1 - F))`` is unbounded and monotone in ``F``, so
+    it ranks patients and inputs identically without saturating. The odds is
+    also the one a reader already has a denominator for: ``1 - F_k(t)`` is
+    not surviving the grid, it is "not readmitted by t", counting the
+    patients who died or left first.
+
+    There is no single head logit that would do instead. The head emits one
+    per ``(cause, bin)`` cell, and an incidence by a horizon is a sum over
+    bins taken after a softmax the causes share -- a raw cell logit can move
+    without ``F_k`` moving at all.
+
+    Computed as a difference of log-sum-exps rather than from the pmf. The
+    cells inside the horizon and the cells outside it partition the simplex
+    `deephit_distribution` defines, and the shared normalizer cancels in the
+    ratio, so ``log(F / (1 - F))`` is exactly
+    ``logsumexp(inside) - logsumexp(outside)``. Taking it that way matters
+    rather than being a tidiness: forming ``F`` first and clamping it off 1
+    to keep the logarithm finite would hand back a gradient of exactly zero
+    at saturation, which is the failure the log-odds was chosen to avoid.
+
+    Args:
+        cause (int): Position of the cause in the head's output order, i.e.
+            its index in ``TimeGrid.cause_names``, not its EVENT_TYPE code.
+        horizon_bin (int): Bin whose right edge is the horizon, 0-based.
+        n_causes (int): Number of competing causes the head predicts.
+        n_bins (int): Number of bins on the discrete time grid.
+
+    Returns:
+        A callable taking the head's ``(batch, n_causes * n_bins)`` logits
+        and returning the summed log-odds over the batch. Summing is what
+        `tsr.saliency` wants: no item's output depends on another's inputs,
+        so one backward carries every item's gradient unmixed.
+    """
+    if not 0 <= cause < n_causes:
+        raise ValueError(f'cause {cause} outside [0, {n_causes})')
+    if not 0 <= horizon_bin < n_bins:
+        raise ValueError(f'horizon_bin {horizon_bin} outside [0, {n_bins})')
+
+    # The layout `deephit_distribution` softmaxes over: cause-major, flat,
+    # with the survive-the-horizon slot appended.
+    inside = torch.zeros(n_causes * n_bins + 1, dtype=torch.bool)
+    inside[cause * n_bins:cause * n_bins + horizon_bin + 1] = True
+
+    def target(logits: Tensor) -> Tensor:
+        flat = logits.reshape(logits.shape[0], -1)
+        padded = torch.cat([flat, flat.new_zeros(flat.shape[0], 1)], dim=1)
+        return (torch.logsumexp(padded[:, inside], dim=1)
+                - torch.logsumexp(padded[:, ~inside], dim=1)).sum()
+
+    return target
 
 
 # --------------------------------------------------------------- metrics

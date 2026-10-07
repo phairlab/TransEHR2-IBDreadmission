@@ -27,6 +27,7 @@ from TransEHR2.survival import (
     cause_specific_concordance,
     censoring_survival,
     cif_from_pmf,
+    cif_logit_target,
     event_times_days,
     integrated_brier,
     interpolate_cif,
@@ -165,6 +166,42 @@ def test_cif_and_survival_partition_the_mass():
     # 1 - (F_1 + F_2) at each bin; 0.4 of the mass is never spent.
     assert torch.allclose(survival_from_pmf(pmf, torch.tensor([0.4]))[0],
                           torch.tensor([0.85, 0.55, 0.40]), atol=1e-6)
+
+
+# ----------------------------------------------- the attribution target
+
+def test_the_attribution_target_is_the_log_odds_of_the_cause_by_the_horizon():
+    torch.manual_seed(0)
+    logits = torch.randn(4, 3 * 6)
+    incidence = cif_from_pmf(deephit_distribution(logits, 3, 6)[0])[:, 0, 2]
+    expected = (torch.log(incidence) - torch.log1p(-incidence)).sum()
+    assert torch.allclose(cif_logit_target(0, 2, 3, 6)(logits), expected,
+                          atol=1e-6)
+
+
+def test_the_target_is_monotone_in_the_incidence_and_does_not_saturate():
+    """Why the log-odds and not the incidence: a confident head still has a gradient."""
+    logits = torch.zeros(1, 2 * 3, requires_grad=True)
+    with torch.no_grad():
+        logits[0, 0] = 30.0                      # cause 0, bin 0: F -> 1
+    target = cif_logit_target(0, 0, 2, 3)
+    value = target(logits)
+    value.backward()
+    assert torch.isfinite(value)
+    assert logits.grad.abs().sum() > 0, 'a saturated probability would give zeros'
+
+
+def test_the_target_accumulates_over_the_bins_up_to_the_horizon():
+    torch.manual_seed(1)
+    logits = torch.randn(2, 2 * 4)
+    values = [cif_logit_target(1, b, 2, 4)(logits) for b in range(4)]
+    assert all(values[b] < values[b + 1] for b in range(3))
+
+
+@pytest.mark.parametrize('cause,horizon_bin', [(-1, 0), (3, 0), (0, -1), (0, 6)])
+def test_the_target_rejects_an_index_off_the_grid(cause, horizon_bin):
+    with pytest.raises(ValueError):
+        cif_logit_target(cause, horizon_bin, 3, 6)
 
 
 # ------------------------------------------------------------------ the loss

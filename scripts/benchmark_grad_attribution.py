@@ -170,9 +170,12 @@ def main(argv=None):
     parser.add_argument('--render-cells', type=int, default=None,
                         help="text cells per episode whose tokens are actually rendered; "
                              "defaults to the timestep count, i.e. all of them")
-    parser.add_argument('--ig-steps', type=int, default=0,
+    parser.add_argument('--ig-steps', default='0', metavar='M[,M...]',
                         help="Use integrated gradients as TSR's R(.) over this many path "
-                             'points instead of grad x input. Multiplies every pass by it.')
+                             'points instead of grad x input, which is 0. Multiplies every '
+                             'pass by it. A list reports one episode table per setting, '
+                             'against the same model and batch, so the methods are comparable '
+                             'rather than two jobs apart.')
     parser.add_argument('--density', type=float, default=1.0,
                         help='Fraction of (timestep, feature) cells the synthetic episode '
                              'observes. TSR skips the rest, since deleting what is not there '
@@ -516,12 +519,13 @@ def _report_one_shape(args, device, steps, widths, source, cause, n_causes, n_bi
         peak_text = f"{peak:9.0f}" if peak is not None else f"{'-':>9}"
         print(f"{batch_size:>6}  {1000 * seconds:9.2f}  {ms_item:13.2f}  {peak_text}")
 
-    report_horizons(args, model, steps, widths, n_causes, n_bins, best_ms_item,
-                    cuts_days, device)
+    for ig_steps in [int(v) for v in args.ig_steps.split(',')]:
+        report_horizons(args, model, steps, widths, n_causes, n_bins, best_ms_item,
+                        cuts_days, device, ig_steps)
 
 
 def report_horizons(args, model, steps, widths, n_causes, n_bins, ms_item,
-                    cuts_days, device):
+                    cuts_days, device, ig_steps):
     """Run TSR end to end, once per horizon, and time it.
 
     Measured rather than projected. The projection this replaces multiplied a counted number of
@@ -531,6 +535,10 @@ def report_horizons(args, model, steps, widths, n_causes, n_bins, ms_item,
     A horizon is a different scalar and so a different backward over the same forward. They are
     timed separately rather than assumed equal because the log-odds of an early bin reduces over
     fewer cells than a late one.
+
+    Called once per `--ig-steps` setting against the same model and the same batch, so grad x
+    input and integrated gradients differ in nothing but R(.) -- comparing across jobs would
+    also be comparing across a fresh random model and whatever else the cluster was doing.
     """
     from TransEHR2.survival import cif_logit_target
     from TransEHR2.tsr import tsr_scores
@@ -539,8 +547,8 @@ def report_horizons(args, model, steps, widths, n_causes, n_bins, ms_item,
     features = len(widths) + 1
     batch = stage1_batch(1, steps, widths, args.text_width, device, args.density)
 
-    method = (f"IG x{args.ig_steps}" if args.ig_steps else 'grad x input')
-    dense = (args.ig_steps or 1) * (1 + steps + steps * features)
+    method = (f"IG x{ig_steps}" if ig_steps else 'grad x input')
+    dense = (ig_steps or 1) * (1 + steps + steps * features)
     print()
     print(f"measured episode, {method}, gate q={args.gate_quantile}, "
           f"chunk {args.chunk}, density {args.density:g}")
@@ -556,7 +564,7 @@ def report_horizons(args, model, steps, widths, n_causes, n_bins, ms_item,
         reset_peak_memory(device)
         start = time.perf_counter()
         result = tsr_scores(model, batch, target=target, quantile=args.gate_quantile,
-                            chunk=args.chunk, ig_steps=args.ig_steps)
+                            chunk=args.chunk, ig_steps=ig_steps)
         synchronize(device)
         seconds = time.perf_counter() - start
         total += seconds

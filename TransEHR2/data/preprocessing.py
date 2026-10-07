@@ -1223,6 +1223,82 @@ def compute_static_feat_dims(
     return [var_properties[f]['size'] for f in static_feats]
 
 
+def lookup_feat_widths(base_path: str) -> List[int]:
+    """Embedding width of each lookup feature, in the family's order.
+
+    The widths come from the tables themselves rather than from
+    ``metadata['lookup_table_dims']``, which is None for a text feature:
+    text has no declared width until ``embed.py`` builds its table, so
+    the table is the only authority. ``MixedDataset`` resolves the same
+    way (``lookup_table_dims`` there is read off the loaded tables), and
+    a second derivation would be a second thing to drift.
+
+    The order is ``metadata['lookup_feat_types']``, which is the family's
+    canonical feature order: it is what ``MixedDataset._lookup_columns``
+    indexes, what ``collate_tensorized`` stacks, and what
+    ``resolve_lookup_embeddings`` returns.
+
+    Args:
+        base_path: The ``extracted/`` directory, whose ``lookup_tables/``
+            sibling holds the global tables.
+
+    Returns:
+        One width per lookup feature; the empty list when the dataset has
+        no lookup feature at all.
+
+    Raises:
+        FileNotFoundError: If a type's table has not been built.
+    """
+    with open(os.path.join(base_path, 'metadata.pkl'), 'rb') as f:
+        feat_types = pickle.load(f)['lookup_feat_types']
+
+    tables_dir = lookup_tables_path(base_path)
+    widths = {}
+    for feat_type in dict.fromkeys(feat_types):
+        table_path = os.path.join(tables_dir, f'{feat_type}_embeddings.npy')
+        if not os.path.exists(table_path):
+            raise FileNotFoundError(
+                f"{table_path} not found. The global {feat_type} lookup "
+                f"table is built by embed.py (from the LLM for text and "
+                f"from ClinVec for drugs); the encoder cannot be sized "
+                f"without its width."
+            )
+        widths[feat_type] = int(np.load(table_path, mmap_mode='r').shape[1])
+    return [widths[t] for t in feat_types]
+
+
+def value_encoder_dims(
+    var_properties: Dict, valued_feats: List[str], lookup_dims: List[int]
+) -> Tuple[int, int]:
+    """``(n_features, feat_dim)`` for the ``ValueDataEncoder``.
+
+    The two numbers are what ``MixedClassifier.forward`` concatenates:
+    one indicator column and ``size`` value columns per entry of
+    ``VALUED_FEATS``, then one indicator column and one pooled
+    embedding per member of the lookup family. The
+    lookup half is the half that is easy to forget: ``DRUG_FEATS`` has no
+    ``VALUED_FEATS`` entry and no ``timeseries.csv`` column, so a count
+    taken over text alone is short by one feature and by ClinVec's width,
+    and the first forward dies in ``indicator_input_projection_layer``
+    with ``mat1 and mat2 shapes cannot be multiplied``.
+
+    Args:
+        var_properties: Parsed ``variable_properties.yaml``.
+        valued_feats: The VALUED_FEATS list from the dataset config.
+        lookup_dims: ``lookup_feat_widths()`` for the extracted root the
+            model will be fed from. Empty for a cohort extracted with no
+            lookup feature, which is the only thing that turns the
+            family off -- ``use_lookup`` follows it.
+
+    Returns:
+        ``(n_features, feat_dim)``, the encoder's two widths.
+    """
+    n_features = len(valued_feats) + len(lookup_dims)
+    feat_dim = (sum(var_properties[f]['size'] for f in valued_feats)
+                + sum(lookup_dims))
+    return n_features, feat_dim
+
+
 def _get_tensor_dimensions(
     var_properties_path: str,
     valued_feats: List[str],
@@ -1774,8 +1850,8 @@ def _load_lookup_family(
     built by ``embed.py``, so this is the state of a tree in which that
     has not been run -- but a text feature has no declared width until the
     table exists, so there is no shape to fall back to, and a lookup
-    feature silently dropped from the batch would train a ``USE_TEXT``
-    model on no text at all. The row-count checks catch the
+    feature silently dropped from the batch would train a model on none
+    of what that feature carries. The row-count checks catch the
     other half of the same problem: extraction re-interns the strings on
     every run, so a table left over from an earlier extraction indexes a
     vocabulary that no longer exists.

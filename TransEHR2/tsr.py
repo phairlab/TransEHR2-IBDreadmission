@@ -165,27 +165,55 @@ def _leaf_values(batch, copies: int = 1) -> Tuple[Dict, Dict[str, List[Tensor]]]
     return masked, leaves
 
 
-def _zero(batch, leaves, index, timestep: int, feature: Optional[int] = None,
-          rows: slice = slice(None)) -> None:
-    """Delete a whole timestep, or a single (timestep, feature) cell.
+def _zero_many(batch, leaves, index, perturbations, n_items: int) -> None:
+    """Delete each replica's timestep or cell, with one scatter per tensor.
 
     In place on the leaves, which are clones, and before the graph exists. The indicator goes
     with the value: a feature whose value is zero but whose indicator still says "observed" is
     not a deleted feature, it is an observed zero, and the model reads the two differently.
 
-    ``rows`` restricts the deletion to one replica's block of a tiled batch, so each replica
-    carries a different perturbation of the same episode.
+    Written against the whole chunk rather than one replica at a time because the writes, not
+    the arithmetic, were the cost. A replica deleting a whole timestep touches every feature's
+    tensor, so a chunk of 300 of them over 149 features issued ~45,000 kernel launches of a few
+    elements each -- measured at ~8 us apiece on an H200, which came to more than half the
+    runtime. Gathering the replicas that touch the same tensor into one indexed write makes it
+    one launch per tensor instead of one per (replica, tensor).
+
+    Args:
+        perturbations: One entry per replica, as `saliency_many` takes them.
+        n_items: Episodes per replica, so replica ``r`` owns rows ``r*n_items`` onward.
     """
     val_data = batch['val_data']
-    if feature is None:
+    device = next(iter(leaves.values()))[0].device
+    offsets = torch.arange(n_items, device=device)
+
+    def rows_and_steps(entries):
+        """The (row, timestep) pairs a group of replicas writes to, flattened."""
+        replicas = torch.tensor([r for r, _ in entries], device=device)
+        steps = torch.tensor([t for _, t in entries], device=device)
+        rows = (replicas.unsqueeze(1) * n_items + offsets).reshape(-1)
+        return rows, steps.repeat_interleave(n_items)
+
+    whole = [(replica, perturbation[0])
+             for replica, perturbation in enumerate(perturbations)
+             if perturbation is not None and perturbation[1] is None]
+    if whole:
+        rows, steps = rows_and_steps(whole)
         for family, tensors in leaves.items():
             for tensor in tensors:
-                tensor.data[rows, timestep] = 0
-            val_data[family]['indicators'][rows, timestep] = 0
-        return
-    family, position = index[feature]
-    leaves[family][position].data[rows, timestep] = 0
-    val_data[family]['indicators'][rows, timestep, position] = 0
+                tensor.data[rows, steps] = 0
+            val_data[family]['indicators'][rows, steps] = 0
+
+    by_feature: Dict[int, List[Tuple[int, int]]] = {}
+    for replica, perturbation in enumerate(perturbations):
+        if perturbation is not None and perturbation[1] is not None:
+            by_feature.setdefault(perturbation[1], []).append(
+                (replica, perturbation[0]))
+    for feature, entries in by_feature.items():
+        family, position = index[feature]
+        rows, steps = rows_and_steps(entries)
+        leaves[family][position].data[rows, steps] = 0
+        val_data[family]['indicators'][rows, steps, position] = 0
 
 
 def saliency_many(model, batch, perturbations: Sequence[Optional[Tuple[int, Optional[int]]]],
@@ -234,12 +262,7 @@ def saliency_many(model, batch, perturbations: Sequence[Optional[Tuple[int, Opti
             for tensor in tensors:
                 tensor.data.mul_(alpha)
 
-    for replica, perturbation in enumerate(perturbations):
-        if perturbation is None:
-            continue
-        timestep, feature = perturbation
-        _zero(masked, leaves, index, timestep, feature,
-              rows=slice(replica * n_items, (replica + 1) * n_items))
+    _zero_many(masked, leaves, index, perturbations, n_items)
 
     output = model(masked)
     scalar = output.sum() if target is None else target(output)

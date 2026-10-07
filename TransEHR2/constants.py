@@ -34,11 +34,16 @@ TOKENIZER_PAD_TOKEN = '[PAD]'
 # is fatal rather than hypothetical -- and it would be excluded anyway, because executing
 # downloaded model code is the thing to avoid on a controlled cluster.
 #
-# LLM_NAME = 'Alibaba-NLP/gte-base-en-v1.5'  # needs trust_remote_code; see above
-# LLM_NAME = 'BAAI/bge-m3'  # the encoder ContrastiveBMMB replaces, on main
-# LLM_NAME = 'meta-llama/Llama-3.1-70B'  # the decoder that replaced, masked-mean pooled
+# Encoders this fork has run, kept as a record of what was tried and why it was left:
 #
-# This branch runs ContrastiveBMMB's A3 encoder: BioClinical ModernBERT large, contrastively
+# LLM_NAME = 'Alibaba-NLP/gte-base-en-v1.5'  # needs trust_remote_code; see above
+# LLM_NAME = 'BAAI/bge-m3'  # what ContrastiveBMMB was built to replace
+# LLM_NAME = 'meta-llama/Llama-3.1-70B'  # the decoder bge-m3 replaced, masked-mean pooled
+#
+# These are history, not alternatives selected by branch: the grad-benchmark work merged, so
+# what follows is simply what this repository runs.
+#
+# It runs ContrastiveBMMB's A3 encoder: BioClinical ModernBERT large, contrastively
 # fine-tuned on ICD-10-CA/CCI sibling substitution. 396M parameters against bge-m3's 568M, and
 # 1024-d either way, so it is a dimensional drop-in. CLS-pooled, matching how it was trained --
 # `TEXT_POOLING` below must not drift from ContrastiveBMMB's `POOLING`, or the lookup table and

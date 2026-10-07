@@ -17,7 +17,8 @@ at all: it pins the failure of the cheaper approach that avoids the encoder back
 import pytest
 import torch
 
-from TransEHR2.attribution import token_attributions
+from TransEHR2.attribution import (SCORERS, text_cell_attributions,
+                                   token_attributions)
 from TransEHR2.modules import GradientTraceableLLM
 
 # The fixture builds a two-layer XLM-RoBERTa and a tokenizer; importing it is cheaper than a
@@ -140,3 +141,113 @@ def test_the_pooling_jacobian_shortcut_is_degenerate_under_cls(tiny_model, downs
     true_scores = token_attributions(llm, encoded['input_ids'],
                                      encoded['attention_mask'], upstream)
     assert true_scores[:, 1:].abs().max() > 1e-6
+
+
+# ---------------------------------------------------------------------------------------------
+# Pluggable scoring, and the join that renders a cell's tokens
+# ---------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize('name', sorted(SCORERS))
+def test_every_scorer_returns_one_number_per_token(tiny_model, downstream, name):
+    llm = _llm(tiny_model, 'cls')
+    encoded = _encode(llm, STRINGS, LENGTH)
+    upstream = _stage_one_gradient(llm, encoded, downstream)
+
+    scores = token_attributions(llm, encoded['input_ids'], encoded['attention_mask'],
+                                upstream, score=SCORERS[name])
+    assert scores.shape == encoded['input_ids'].shape
+    assert torch.isfinite(scores).all()
+
+
+def test_the_default_scorer_is_grad_x_input(tiny_model, downstream):
+    """Switching scorers must not be able to change the default silently."""
+    llm = _llm(tiny_model, 'cls')
+    encoded = _encode(llm, STRINGS, LENGTH)
+    upstream = _stage_one_gradient(llm, encoded, downstream)
+
+    assert torch.equal(
+        token_attributions(llm, encoded['input_ids'], encoded['attention_mask'], upstream),
+        token_attributions(llm, encoded['input_ids'], encoded['attention_mask'], upstream,
+                           score=SCORERS['grad_x_input']))
+
+
+def test_the_unsigned_scorers_are_the_magnitude_of_the_signed_one(tiny_model, downstream):
+    llm = _llm(tiny_model, 'cls')
+    encoded = _encode(llm, STRINGS, LENGTH)
+    upstream = _stage_one_gradient(llm, encoded, downstream)
+
+    signed = token_attributions(llm, encoded['input_ids'], encoded['attention_mask'], upstream)
+    unsigned = token_attributions(llm, encoded['input_ids'], encoded['attention_mask'],
+                                  upstream, score=SCORERS['abs_grad_x_input'])
+    assert torch.allclose(unsigned, signed.abs())
+    assert (signed < 0).any(), 'a signed scorer that never goes negative proves nothing'
+
+
+def test_the_cell_join_scores_the_same_tokens_as_a_direct_call(tiny_model, downstream):
+    """`text_cell_attributions` is a gather plus a mask around `token_attributions`."""
+    llm = _llm(tiny_model, 'cls')
+    encoded = _encode(llm, STRINGS, LENGTH)
+    upstream = _stage_one_gradient(llm, encoded, downstream)
+    pad_id = llm.tokenizer.pad_token_id
+
+    # The global table, as embed.py writes it: one row per unique string. The cells being
+    # explained name rows in it, in an order of their own.
+    table = encoded['input_ids'].cpu().numpy()
+    rows = torch.tensor([1, 0])
+
+    joined = text_cell_attributions(llm, table, rows, upstream.flip(0), pad_id)
+    direct = token_attributions(llm, encoded['input_ids'].flip(0),
+                                encoded['attention_mask'].flip(0), upstream.flip(0))
+    mask = encoded['attention_mask'].flip(0).to(direct.dtype)
+    assert torch.allclose(joined, direct * mask)
+
+
+def test_padding_scores_zero_because_the_mask_cuts_the_gradient_path(tiny_model, downstream):
+    """Not because `text_cell_attributions` zeroes it -- it is already zero by then.
+
+    A masked position is removed from every attention computation, so no path runs from its
+    input embedding to the pooled output and its gradient is exactly zero. The multiply in
+    `text_cell_attributions` is insurance for a caller that supplies no mask, which the test
+    below exercises; this pins the reason the common case needs none.
+    """
+    llm = _llm(tiny_model, 'cls')
+    # Longer than LENGTH so the strings leave padding behind; at LENGTH they fill every
+    # position and this would pass without testing anything.
+    encoded = _encode(llm, STRINGS, LENGTH * 2)
+    upstream = _stage_one_gradient(llm, encoded, downstream)
+    pad_id = llm.tokenizer.pad_token_id
+
+    padding = encoded['input_ids'] == pad_id
+    assert padding.any(), 'the fixture strings must be shorter than the length for this to test'
+
+    scores = token_attributions(llm, encoded['input_ids'], encoded['attention_mask'], upstream)
+    assert (scores[padding] == 0).all()
+
+
+def test_the_join_returns_zero_at_padding(tiny_model, downstream):
+    """The contract a report depends on, asserted on the join's own output."""
+    llm = _llm(tiny_model, 'cls')
+    encoded = _encode(llm, STRINGS, LENGTH * 2)
+    upstream = _stage_one_gradient(llm, encoded, downstream)
+    pad_id = llm.tokenizer.pad_token_id
+    padding = encoded['input_ids'] == pad_id
+    assert padding.any()
+
+    scores = text_cell_attributions(llm, encoded['input_ids'].cpu().numpy(),
+                                    torch.tensor([0, 1]), upstream, pad_id)
+    assert (scores[padding] == 0).all()
+    assert (scores[~padding] != 0).any(), 'all-zero scores would satisfy this vacuously'
+
+
+def test_the_cell_join_batches_without_changing_the_answer(tiny_model, downstream):
+    llm = _llm(tiny_model, 'cls')
+    encoded = _encode(llm, STRINGS, LENGTH)
+    upstream = _stage_one_gradient(llm, encoded, downstream)
+    pad_id = llm.tokenizer.pad_token_id
+    table = encoded['input_ids'].cpu().numpy()
+    rows = torch.tensor([0, 1, 1, 0])
+    grads = upstream[[0, 1, 1, 0]]
+
+    whole = text_cell_attributions(llm, table, rows, grads, pad_id, batch_size=8)
+    split = text_cell_attributions(llm, table, rows, grads, pad_id, batch_size=1)
+    assert torch.allclose(whole, split)

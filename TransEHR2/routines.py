@@ -37,6 +37,7 @@ import json
 import numpy as np
 import os
 import shutil
+import time
 import torch
 import torch.utils.tensorboard  # noqa: F401  (the annotations below name it)
 
@@ -344,6 +345,66 @@ def _mean_losses(records: Dict[str, List[float]]) -> Dict[str, float]:
     return out
 
 
+class PhaseTimer:
+    """Per-phase wall time inside a pretraining step, for the performance-dx branch.
+
+    Off unless ``TRANSEHR2_PHASE_TIMING`` is set to a positive integer, which is the
+    number of steps between reports. Nothing below the ``if timer:`` guards runs
+    otherwise, so the instrumented loop and the uninstrumented one are the same loop.
+
+    **Timing GPU phases requires synchronizing, and synchronizing changes what is
+    being timed.** CUDA launches are asynchronous, so without a barrier every phase
+    but the last would report only its launch cost. With one, phases that would have
+    overlapped are serialized, and the instrumented step is slower than the real one.
+    Read the *proportions*, not the totals, and read the step total against an
+    uninstrumented run.
+
+    ``loader`` is the gap between the end of one step and the next batch arriving.
+    With workers and prefetch it is time the loader failed to hide, not time the
+    loader took -- a zero there means prefetch kept up, not that reading was free.
+    """
+
+    def __init__(self, every: int, device: torch.device):
+        self.every = every
+        self.device = device
+        self.phases: Dict[str, float] = {}
+        self.steps = 0
+        self._last = time.perf_counter()
+
+    def _sync(self):
+        if self.device.type == 'cuda':
+            torch.cuda.synchronize()
+
+    def mark(self, phase: str) -> None:
+        """Charge the time since the last mark to `phase`."""
+        self._sync()
+        now = time.perf_counter()
+        self.phases[phase] = self.phases.get(phase, 0.0) + now - self._last
+        self._last = now
+
+    def step_done(self) -> None:
+        self.steps += 1
+        if self.steps % self.every == 0:
+            self.report()
+
+    def report(self) -> None:
+        total = sum(self.phases.values())
+        if not total:
+            return
+        per_step = 1000 * total / self.steps
+        parts = '  '.join(
+            f"{name} {100 * seconds / total:4.1f}%"
+            for name, seconds in sorted(self.phases.items(),
+                                        key=lambda kv: -kv[1]))
+        print(f"[phase] {self.steps} steps, {per_step:.0f} ms/step (synchronized): "
+              f"{parts}", flush=True)
+
+
+def _phase_timer(device: torch.device) -> Optional[PhaseTimer]:
+    every = int(os.environ.get('TRANSEHR2_PHASE_TIMING', '0') or 0)
+    return PhaseTimer(every, device) if every > 0 else None
+
+
 def _run_pretrain_batches(
     model: torch.nn.Module,
     loader: torch.utils.data.DataLoader,
@@ -371,9 +432,15 @@ def _run_pretrain_batches(
 
     records: Dict[str, List[float]] = {k: [] for k in _EMPTY_PRETRAIN_LOSSES}
 
+    timer = _phase_timer(device)
+
     with torch.set_grad_enabled(training):
         for i, batch in tqdm(enumerate(loader), desc=desc, leave=False):
+            if timer:
+                timer.mark('loader')
             batch = move_batch_to_device(batch, device=device)
+            if timer:
+                timer.mark('to_device')
             value_masks, _ = generate_record_masks(
                 batch,
                 feature_sample_rate=record_mask_ratio,
@@ -389,6 +456,9 @@ def _run_pretrain_batches(
                 compute_intensities=thp_loss_fn is not None,
                 thp_loss_mc_samples=thp_loss_mc_samples
             )
+
+            if timer:
+                timer.mark('forward')
 
             thp_type_preds, thp_time_preds = output.get(
                 'hawkes_predictions', (None, None))
@@ -422,12 +492,19 @@ def _run_pretrain_batches(
             records['Generator_Loss'].append(gen_loss.item())
             records['Discriminator_Loss'].append(disc_loss.item())
 
+            if timer:
+                timer.mark('loss')
+
             if training:
                 optimizer.zero_grad()
                 loss.backward()
+                if timer:
+                    timer.mark('backward')
                 torch.nn.utils.clip_grad_norm_(model.parameters(),
                                                max_norm=1.0)
                 optimizer.step()
+                if timer:
+                    timer.mark('optimizer')
 
             if mem_test_mode and i == 1:
                 print(f"Memory usage during {desc.lower()}:", flush=True)
@@ -435,7 +512,11 @@ def _run_pretrain_batches(
                 break
 
             del output, batch
+            if timer:
+                timer.step_done()
 
+    if timer:
+        timer.report()
     return _mean_losses(records)
 
 

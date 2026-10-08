@@ -24,6 +24,13 @@ Stages, each answerable on its own:
              help; if it lands far below, the cost is host-side and they will.
 ``device``   Host-to-device copy for one batch, which pinning and prefetch hide
              only if there is compute to hide them behind.
+``batch``    The same loader swept over batch size instead of workers. Epoch time
+             flat in batch size is an independent signature of an I/O bound, and
+             it does not share the worker sweep's failure modes.
+``profile``  cProfile over ``Dataset.__getitem__`` alone. The worker sweep says
+             whether the cost is host-side; this says which part of it is, which
+             matters because the one-hot expansion for categorical and ordinal
+             features builds dense rows per item across the whole feature set.
 ``padding``  How much of what was read is padding. Every dense array is T wide for
              every episode regardless of length, so this bounds what truncating
              the extraction can win before anyone writes code for it.
@@ -43,7 +50,7 @@ import _path  # noqa: F401  (repository root on sys.path)
 from TransEHR2.data.preprocessing import load_dataset, prepare_dataloaders
 from TransEHR2.utils import move_batch_to_device
 
-STAGES = ('raw', 'loader', 'device', 'padding')
+STAGES = ('raw', 'loader', 'batch', 'device', 'padding', 'profile')
 GIB = 1024 ** 3
 
 
@@ -108,9 +115,20 @@ def report_raw(args, rows):
             block = np.asarray(array[picked])
             total_bytes += block.nbytes
     seconds = time.perf_counter() - start
+    rate = total_bytes / seconds
     print(f"{args.batches:>8}  {total_bytes / GIB:8.2f}  {seconds:8.2f}  "
-          f"{total_bytes / GIB / seconds:8.2f}")
-    return total_bytes / seconds
+          f"{rate / GIB:8.2f}")
+    # Pages written by the extraction, or by an earlier stage, are still resident,
+    # and a read that never leaves RAM is not a storage ceiling. There is no way to
+    # drop caches without root, so the guard is the number itself: past roughly
+    # 8 GiB/s this is measuring memory.
+    if rate / GIB > 8:
+        print("  NOTE: above ~8 GiB/s this is page cache, not storage. Re-run with")
+        print("        --batches large enough to read well past node RAM, or treat")
+        print("        this as a floor on the real cold-read cost rather than a")
+        print("        ceiling on throughput.")
+    print(f"  read {total_bytes / GIB:.1f} GiB; compare against the node's RAM")
+    return rate
 
 
 def report_loader(args, n_train, raw_rate):
@@ -153,6 +171,70 @@ def report_loader(args, n_train, raw_rate):
               f"{steps * seconds / 60:10.1f}")
     if raw_rate:
         print(f"  raw ceiling for the same bytes: {raw_rate / GIB:.2f} GiB/s")
+
+
+def report_batch(args, n_train):
+    """The loader swept over batch size at one worker setting.
+
+    A second, independent read on the same question the worker sweep asks. If
+    seconds-per-episode is flat across batch sizes the step is paying per byte,
+    which is storage; if it falls, there is per-batch overhead to amortize.
+    """
+    print()
+    print(f"batch: prepare_dataloaders at {args.workers_for_device} workers")
+    header = (f"{'batch':>8}  {'s/batch':>9}  {'ms/episode':>11}  {'GiB/s':>8}  "
+              f"{'epoch min':>10}")
+    print(header)
+    print('-' * len(header))
+
+    for batch_size in [int(b) for b in args.batch_sizes.split(',')]:
+        loaders = prepare_dataloaders(args.data_dir, args.fold, batch_size,
+                                      num_workers=args.workers_for_device,
+                                      prefetch_factor=args.prefetch_factor)
+        iterator = iter(loaders[0])
+        batch = next(iterator)
+        per_batch = nbytes(batch)
+        timings = []
+        for _ in range(args.batches):
+            start = time.perf_counter()
+            try:
+                next(iterator)
+            except StopIteration:
+                break
+            timings.append(time.perf_counter() - start)
+        del iterator, loaders
+        if not timings:
+            continue
+        seconds = statistics.median(timings)
+        steps = max(1, -(-n_train // batch_size))
+        print(f"{batch_size:>8}  {seconds:9.3f}  {1000 * seconds / batch_size:11.2f}  "
+              f"{per_batch / GIB / seconds:8.2f}  {steps * seconds / 60:10.1f}")
+
+
+def report_profile(args):
+    """Where the time inside one ``__getitem__`` goes.
+
+    Profiled on the main process with no workers, because a profile across worker
+    processes reports the parent doing nothing. The ranking is what matters, not
+    the absolute times -- profiling overhead inflates both.
+    """
+    import cProfile
+    import pstats
+
+    dataset = load_dataset(args.extracted, fold=None)
+    rng = np.random.default_rng(args.seed)
+    picks = rng.permutation(dataset.n_episodes)[:args.profile_items]
+
+    profiler = cProfile.Profile()
+    profiler.enable()
+    for i in picks:
+        dataset[int(i)]
+    profiler.disable()
+
+    print()
+    print(f"profile: {len(picks)} __getitem__ calls, cumulative time")
+    stats = pstats.Stats(profiler)
+    stats.sort_stats('cumulative').print_stats(15)
 
 
 def report_device(args, device):
@@ -223,6 +305,10 @@ def main(argv=None):
     parser.add_argument('--workers-for-device', type=int, default=4)
     parser.add_argument('--prefetch-factor', type=int, default=2)
     parser.add_argument('--repeats', type=int, default=5)
+    parser.add_argument('--batch-sizes', default='50,100,200,400',
+                        help='Batch sizes for the batch stage.')
+    parser.add_argument('--profile-items', type=int, default=200,
+                        help='__getitem__ calls to profile.')
     parser.add_argument('--padding-sample', type=int, default=20000)
     parser.add_argument('--device', default='auto')
     parser.add_argument('--stages', default='all',
@@ -247,8 +333,12 @@ def main(argv=None):
         raw_rate = report_raw(args, rows)
     if 'loader' in stages:
         report_loader(args, n_episodes, raw_rate)
+    if 'batch' in stages:
+        report_batch(args, n_episodes)
     if 'device' in stages:
         report_device(args, device)
+    if 'profile' in stages:
+        report_profile(args)
     if 'padding' in stages:
         report_padding(args, args.extracted)
     return 0

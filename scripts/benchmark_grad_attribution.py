@@ -198,6 +198,17 @@ def main(argv=None):
                              'the episode is measured end to end.')
     parser.add_argument('--stage1-batches', default='1,8,32',
                         help="batch sweep for --stage1")
+    parser.add_argument('--encoder-blocks', type=int, default=1,
+                        help="Encoder blocks in the value encoder, i.e. the experiment "
+                             "config's DISCRIMINATOR_ENCODER_N_ENCODER_BLOCKS. The classifier "
+                             'attribution runs over is built from the discriminator settings, '
+                             "so the generator's count does not enter this cost.")
+    parser.add_argument('--d-shared', default='256,128',
+                        help="DeepHit head's shared stack widths, per layer "
+                             '(DEEPHIT_HEAD_D_SHARED).')
+    parser.add_argument('--d-cause', default='128,64',
+                        help="DeepHit head's per-cause stack widths, per layer "
+                             '(DEEPHIT_HEAD_D_CAUSE).')
     parser.add_argument('--d-model', type=int, default=256,
                         help="value encoder width; experiment2_text.yaml's")
     parser.add_argument('--feat-width', type=int, default=4,
@@ -360,7 +371,8 @@ def dataset_widths(config_path, drug_width=128):
     return config['MAX_EPISODE_LEN_STEPS'], widths
 
 
-def build_stage1(steps, widths, d_model, text_width, device, n_causes, n_bins):
+def build_stage1(steps, widths, d_model, text_width, device, n_causes, n_bins,
+                 n_blocks=1, d_shared=(256, 128), d_cause=(128, 64)):
     """A MixedClassifier and a batch at the given shape, for timing only.
 
     Random weights, because a forward and backward cost the same whatever the weights say. The
@@ -384,7 +396,8 @@ def build_stage1(steps, widths, d_model, text_width, device, n_causes, n_bins):
     feat_dim = sum(widths) + text_width
     val_encoder = ValueDataEncoder(
         n_features=features, feat_dim=feat_dim, d_model=d_model, n_heads=2,
-        n_encoder_blocks=1, dim_feedforward=d_model, dropout=0.0, norm='LayerNorm')
+        n_encoder_blocks=n_blocks, dim_feedforward=d_model, dropout=0.0,
+        norm='LayerNorm')
     width = MixedClassifier.encoding_width(d_event_enc=0, d_val_enc=d_model, d_statics=0)
     model = MixedClassifier(
         event_encoder=EventDataEncoder(num_types=1, d_model=16, d_inner=32, n_layers=1,
@@ -392,7 +405,8 @@ def build_stage1(steps, widths, d_model, text_width, device, n_causes, n_bins):
         val_encoder=val_encoder, d_event_enc=0, d_val_enc=d_model, d_statics=0,
         num_classes=n_causes * n_bins, aggr='mean', use_lookup=True,
         head=DeepHitHead(d_in=width, n_causes=n_causes, n_bins=n_bins,
-                         d_shared=128, d_cause=64, dropout=0.0)).to(device)
+                         d_shared=d_shared, d_cause=d_cause,
+                         dropout=0.0)).to(device)
     model.eval()
     return model
 
@@ -480,8 +494,10 @@ def _report_one_shape(args, device, steps, widths, source, cause, n_causes, n_bi
     from TransEHR2.tsr import feature_index, saliency
 
     features = len(widths) + 1
+    d_shared = [int(v) for v in args.d_shared.split(',')]
+    d_cause = [int(v) for v in args.d_cause.split(',')]
     model = build_stage1(steps, widths, args.d_model, args.text_width, device,
-                         n_causes, n_bins)
+                         n_causes, n_bins, args.encoder_blocks, d_shared, d_cause)
 
     def measure(batch_size, horizon_bin):
         batch = stage1_batch(batch_size, steps, widths, args.text_width, device,
@@ -503,7 +519,8 @@ def _report_one_shape(args, device, steps, widths, source, cause, n_causes, n_bi
     print()
     print(f"stage 1: TransEHR2 forward+backward, T={steps}, N={features}, "
           f"feat_dim={sum(widths) + args.text_width}, d_model={args.d_model}, "
-          f"DeepHit head {n_causes}x{n_bins}")
+          f"{args.encoder_blocks} encoder block(s), DeepHit head {n_causes}x{n_bins} "
+          f"shared {args.d_shared} cause {args.d_cause}")
     print(f"widths: {source}")
     print(f"target: log-odds of readmission by {cuts_days[-1]:g} d (the last bin)")
     header = f"{'batch':>6}  {'ms/pass':>9}  {'ms/pass/item':>13}  {'peak MiB':>9}"

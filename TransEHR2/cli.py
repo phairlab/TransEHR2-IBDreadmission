@@ -19,6 +19,14 @@ from typing import List, Optional
 # one task now, and it is less a task name than a description of the model.
 TASK = 'competing_risks'
 
+# The fold hyperparameter tuning runs on, held out of every reported result.
+# Selecting hyperparameters on a fold and then reporting that fold's score
+# spends the cross-validation on the choice it is meant to be independent
+# of, so IBDdataprep's split.py cuts one extra fold and the entry points
+# below drop this one by default. Naming a fold explicitly on the command
+# line overrides that, which is how the sweep itself reaches fold0.
+TUNING_FOLD = 'fold0'
+
 
 def get_fold_names(data_dir: str,
                    exclude: Optional[List[str]] = None) -> List[str]:

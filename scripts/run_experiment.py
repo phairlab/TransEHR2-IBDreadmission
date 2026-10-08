@@ -26,7 +26,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 import _path  # noqa: F401  (repository root on sys.path)
 
-from TransEHR2.cli import TASK, get_fold_names, resolve_device
+from TransEHR2.cli import (
+    TASK, TUNING_FOLD, get_fold_names, resolve_device
+)
 from TransEHR2.data.preprocessing import (
     compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
     value_encoder_dims
@@ -246,7 +248,13 @@ def main():
                 variable_properties[feature]['size']
             )
 
-    fold_name_list = args.folds or get_fold_names(DATA_DIR)
+    # TUNING_FOLD is excluded from the default sweep over folds, not from
+    # the script: naming it with --folds runs it, which is what the
+    # hyperparameter sweep does. The default is what a reported result
+    # comes from, and that must not include the fold the settings were
+    # chosen on.
+    fold_name_list = args.folds or get_fold_names(DATA_DIR,
+                                                  exclude=[TUNING_FOLD])
     if not fold_name_list:
         raise FileNotFoundError(f'No fold directories found in {DATA_DIR}')
 

@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 
 import _path  # noqa: F401  (repository root on sys.path)
 
+from TransEHR2.cli import TUNING_FOLD
 from TransEHR2.survival import (
     DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES, DEFAULT_CUTS_DAYS,
     TimeGrid, brier_times, cause_specific_brier, cause_specific_concordance,
@@ -38,10 +39,17 @@ SPLITS = ('train', 'val', 'test')
 TASK = 'competing_risks'
 
 
-def get_fold_names(experiment_dir: str) -> List[str]:
-    """Fold subdirectories of an experiment's model directory, sorted."""
+def get_fold_names(experiment_dir: str,
+                   exclude: Optional[List[str]] = None) -> List[str]:
+    """Fold subdirectories of an experiment's model directory, sorted.
+
+    ``TUNING_FOLD`` is excluded by default. These are the numbers that get
+    quoted, and the fold the hyperparameters were chosen on is not one of
+    them. It only appears here at all if it was dumped deliberately.
+    """
+    exclude = [TUNING_FOLD] if exclude is None else exclude
     folds = [d for d in os.listdir(experiment_dir)
-             if re.match(r'fold\d+$', d)
+             if d not in exclude and re.match(r'fold\d+$', d)
              and os.path.isdir(os.path.join(experiment_dir, d))]
     folds.sort(key=lambda d: int(d[4:]))
     return folds

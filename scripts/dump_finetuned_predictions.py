@@ -39,7 +39,9 @@ from typing import Dict, List, Tuple
 
 import _path  # noqa: F401  (repository root on sys.path)
 
-from TransEHR2.cli import TASK, get_fold_names, resolve_device
+from TransEHR2.cli import (
+    TASK, TUNING_FOLD, get_fold_names, resolve_device
+)
 from TransEHR2.data.preprocessing import (
     compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
     value_encoder_dims
@@ -259,7 +261,11 @@ def main():
     static_dim = sum(
         compute_static_feat_dims(variable_properties, STATIC_FEATS))
 
-    fold_name_list = args.folds or get_fold_names(DATA_DIR)
+    # Excluded for the same reason run_experiment.py excludes it: these
+    # predictions are what the reported metrics are computed from, and the
+    # tuning fold has no place in them. --folds reaches it when wanted.
+    fold_name_list = args.folds or get_fold_names(DATA_DIR,
+                                                  exclude=[TUNING_FOLD])
 
     # The whole lookup family, whenever the extraction carries it: see
     # run_experiment.py. The weights being loaded here were built from

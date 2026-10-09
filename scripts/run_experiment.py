@@ -23,6 +23,7 @@ import torch
 import yaml
 
 from torch.utils.tensorboard import SummaryWriter
+from typing import Any, Dict
 
 import _path  # noqa: F401  (repository root on sys.path)
 
@@ -72,6 +73,45 @@ def pretraining_is_done(pretrained_dir: str, expect_event_encoder: bool) -> bool
                for f in needed)
 
 
+def write_pretraining_evaluation(
+    pretrained_dir: str,
+    experiment_name: str,
+    fold_name: str,
+    settings: Dict[str, Any],
+    train_losses: Dict[str, float],
+    val_losses: Dict[str, float]
+) -> str:
+    """Record the best epoch's pretraining losses beside the weights.
+
+    Pretraining otherwise leaves nothing a later process can rank. The
+    losses reach the console and TensorBoard, and the weights reach disk,
+    but a sweep over learning rate and decay is decided on
+    ``val_losses['Optimization_Loss']`` and had no file to read it from.
+
+    The path carries the fold, unlike the retired sweep script's, because
+    a trial is one (experiment, fold) pair and the reader addresses it
+    that way. ``settings`` records what produced these numbers: the losses
+    alone do not say which schedule they belong to, and the trial config
+    can drift from the run once a sweep is regenerated.
+    """
+    evaluation_dir = os.path.join(pretrained_dir, 'evaluation')
+    os.makedirs(evaluation_dir, exist_ok=True)
+    path = os.path.join(evaluation_dir, 'evaluation_pretrained.yaml')
+
+    with open(path, 'w') as f_out:
+        yaml.safe_dump({
+            'task': 'pretrain',
+            'fold': fold_name,
+            'experiment': experiment_name,
+            'settings': convert_to_python_types(settings),
+            'train_losses': convert_to_python_types(train_losses),
+            'val_losses': convert_to_python_types(val_losses),
+        }, f_out, sort_keys=False)
+
+    print(f"Wrote pretraining losses to {path}")
+    return path
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Pretrain and fit the competing-risks model, per fold'
@@ -97,6 +137,13 @@ def main():
     parser.add_argument(
         '--force_pretrain', action='store_true',
         help='Pretrain even if pretrained weights are found'
+    )
+    parser.add_argument(
+        '--pretrain_only', action='store_true',
+        help='Stop after pretraining, before the head is fitted. A sweep '
+             'over learning rate and decay is ranked on the pretraining '
+             'loss, so finetuning those trials would cost GPU time that '
+             'no selection reads.'
     )
     parser.add_argument(
         '--num_workers', type=int, default=0,
@@ -397,7 +444,7 @@ def main():
             writer = SummaryWriter(log_dir)
 
             timer.start_phase('pretrain')
-            pretrain_model(
+            best_pretrain_train, best_pretrain_val = pretrain_model(
                 model=electra,
                 save_path=f'{model_save_dir}/pretrained.pt',
                 loaders=dataloader_list,
@@ -423,10 +470,43 @@ def main():
             )
             timer.end_phase('pretrain')
 
+            write_pretraining_evaluation(
+                pretrained_dir=model_save_dir,
+                experiment_name=EXPERIMENT_NAME,
+                fold_name=fold_name,
+                settings={
+                    'learning_rate': PRETRAIN_LEARNING_RATE,
+                    'lr_half_life': PRETRAIN_LR_HALF_LIFE,
+                    'total_epoch': PRETRAIN_TOTAL_EPOCH,
+                    'disc_loss_weight': DISC_LOSS_WEIGHT,
+                    'record_mask_ratio': RECORD_MASK_RATIO,
+                    'obs_unobs_sample_ratio': OBS_UNOBS_SAMPLE_RATIO,
+                    'cmpnt_mask_ratio': CMPNT_MASK_RATIO,
+                    'generator_encoder_blocks':
+                        GENERATOR_ENCODER_N_ENCODER_BLOCKS,
+                    'discriminator_encoder_blocks':
+                        DISCRIMINATOR_ENCODER_N_ENCODER_BLOCKS,
+                    'use_thp': USE_THP,
+                },
+                train_losses=best_pretrain_train,
+                val_losses=best_pretrain_val,
+            )
+
             writer.close()
             del electra, generator, discriminator, hawkes, writer
             gc.collect()
             torch.cuda.empty_cache()
+
+        if args.pretrain_only:
+            # Before the finetuning block rather than inside it: a trial
+            # ranked on the pretraining loss has nothing to gain from a
+            # head, and the fold is finished as far as this run is
+            # concerned. The skip path above reaches here too, so an
+            # already-pretrained fold costs nothing rather than refitting.
+            print(f"\n--pretrain_only: stopping after pretraining for "
+                  f"{fold_name}.\n")
+            timer.end_fold()
+            continue
 
         # ---------------------------------------------------------- finetune
         finetuned_model_path = f'{model_save_dir}/finetuned_{TASK}.pt'

@@ -107,7 +107,11 @@ def report_warm(args):
     for name in names:
         array = np.load(os.path.join(args.extracted, name), mmap_mode='r')
         for begin in range(0, array.shape[0], WARM_ROWS):
-            total += int(np.asarray(array[begin:begin + WARM_ROWS]).nbytes)
+            # np.array and not np.asarray: a basic slice of a memmap is a view,
+            # so asarray returns the mapping itself and nothing is paged in. The
+            # copy is what touches the pages, which is the entire point here --
+            # the version that did not read 34.4 GiB in 0.1 s.
+            total += int(np.array(array[begin:begin + WARM_ROWS]).nbytes)
         del array
     seconds = time.perf_counter() - start
     print()
@@ -115,6 +119,12 @@ def report_warm(args):
           f"({total / GIB / seconds:.2f} GiB/s)")
     print("  the cohort is now resident, so every stage below measures the warm")
     print("  path -- the one a training run is on after its first epoch")
+    # Above main memory's own bandwidth nothing was read: that is what a version
+    # of this loop that produced views rather than copies reported, and the
+    # arithmetic looked entirely reasonable until the rate did not.
+    if total / GIB / seconds > 50:
+        print("  WARNING: that is faster than memory. Nothing was paged in and")
+        print("           the stages below are NOT warm.")
 
 
 def report_raw(args, rows):

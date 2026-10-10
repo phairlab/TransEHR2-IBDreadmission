@@ -6,7 +6,7 @@
 #SBATCH --mem=200G
 #SBATCH --gpus=h200:1
 #SBATCH --nodes=1
-#SBATCH --time=0-01:30:00
+#SBATCH --time=0-02:30:00
 #SBATCH --output=log/diagnose_%j.out
 #SBATCH --error=log/diagnose_%j.err
 #SBATCH --qos=normal
@@ -53,6 +53,11 @@
 # Read 2 against 1: if they are close, the storage is the limit and more workers
 # will not help. Read 5 against the epoch time: if the compute floor is a small
 # fraction of it, the model is not what the epochs are measuring.
+#
+# Section 1 runs first and leaves the rows it read in page cache, so sections 2-4
+# are the warm case and section 1 is a cold-read floor rather than a ceiling on
+# them. That is the right way round for a steady-state epoch whenever the cohort
+# fits in --mem, which section 1 now prints the size for.
 
 set -uo pipefail
 
@@ -74,7 +79,11 @@ DATA_DIR="${DATA_DIR:-${PROJECT_ROOT}/data}"
 DATASET_CONFIG="${DATASET_CONFIG:-TransEHR2/configs/datasets/RMT23345.yaml}"
 FOLD="${FOLD:-fold0}"
 BATCH_SIZE="${BATCH_SIZE:-200}"
-BATCHES="${BATCHES:-20}"
+# Enough to outrun the prefetch queue. With 16 workers and prefetch_factor 2 the loader
+# hands back 32 batches before producing anything, so a 20-batch run measured the queue
+# draining and reported 588 GiB/s. The timing is over the whole run now, but the run still
+# has to be long enough for production to dominate it.
+BATCHES="${BATCHES:-200}"
 WORKERS="${WORKERS:-0,4,8,16}"
 PREFETCH_FACTOR="${PREFETCH_FACTOR:-2}"
 STEPS="${STEPS:-300}"
@@ -82,6 +91,9 @@ N_FEATURES="${N_FEATURES:-149}"
 CHUNK="${CHUNK:-1024}"
 DENSITY="${DENSITY:-0.056}"
 BATCH_SIZES="${BATCH_SIZES:-50,100,200,400}"
+# Each LazyArray opens its memmap once per process, so a short profile charges ~165 one-time
+# opens to a couple of hundred items and reads as if opening files were a per-item cost.
+PROFILE_ITEMS="${PROFILE_ITEMS:-2000}"
 STAGES="${STAGES:-all}"
 SMI_INTERVAL="${SMI_INTERVAL:-10}"
 
@@ -124,6 +136,7 @@ python scripts/diagnose_dataloading.py \
     --workers "${WORKERS}" \
     --prefetch-factor "${PREFETCH_FACTOR}" \
     --batch-sizes "${BATCH_SIZES}" \
+    --profile-items "${PROFILE_ITEMS}" \
     --stages "${STAGES}"
 status=$?
 

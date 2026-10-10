@@ -105,3 +105,17 @@ def test_padding_is_reported_against_the_array_width(extracted, capsys):
     assert _run(extracted, 'padding') == 0
     out = capsys.readouterr().out
     assert 'padding' in out and '% of every byte read' in out
+
+def test_a_loader_run_the_prefetch_queue_covers_is_marked(extracted, capsys):
+    """The failure mode that made a 16-worker sweep read 588 GiB/s.
+
+    A DataLoader hands back ``workers * prefetch_factor`` batches before it has
+    produced anything, so a short run times the queue draining. The timing is
+    over the whole run now rather than a median of per-call gaps, but a run too
+    short for production to dominate is still not a measurement -- so it has to
+    say so rather than print a number that looks like one.
+    """
+    assert _run(extracted, 'loader') == 0
+    out = capsys.readouterr().out
+    assert '*' in out, 'a two-batch run was not marked'
+    assert 'prefetch queue' in out, 'the mark was not explained'

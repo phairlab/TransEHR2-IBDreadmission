@@ -127,8 +127,49 @@ def report_raw(args, rows):
         print("        --batches large enough to read well past node RAM, or treat")
         print("        this as a floor on the real cold-read cost rather than a")
         print("        ceiling on throughput.")
-    print(f"  read {total_bytes / GIB:.1f} GiB; compare against the node's RAM")
+    on_disk = sum(
+        os.path.getsize(os.path.join(args.extracted, name))
+        for name in os.listdir(args.extracted) if name.endswith('.npy')
+    )
+    print(f"  read {total_bytes / GIB:.1f} GiB of {on_disk / GIB:.1f} GiB on disk")
+    # Whatever this pass leaves resident, the loader stages read from RAM. So this
+    # is a floor on the cold cost and they are an estimate of the warm one -- and
+    # when the cohort fits in the job's memory, every epoch after the first is the
+    # warm case regardless, which makes the warm number the one that matters.
+    print("  the loader stages re-read this cohort, so they run against whatever")
+    print("  this pass left in page cache: warm, not cold. Compare the size above")
+    print("  against --mem to see which case a steady-state epoch is in.")
     return rate
+
+
+def time_batches(loader, batches):
+    """Seconds per batch, timed over the whole run rather than per call.
+
+    A DataLoader with ``w`` workers and ``prefetch_factor`` p fills a queue of
+    ``w * p`` batches before the first ``next`` returns, so the first ``w * p``
+    gaps measure a dequeue and not the production being asked about. The median
+    of the gaps lands inside that region whenever the run is short, which is how
+    a 16-worker sweep over 20 batches once reported 588 GiB/s -- three orders
+    above the storage under it. Total elapsed over the batches actually taken
+    converges on the production rate instead.
+
+    Returns ``(seconds per batch, batches taken, bytes per batch)``, the count so
+    the caller can mark a row the queue was still covering.
+    """
+    iterator = iter(loader)
+    batch = next(iterator)                           # startup, not timed
+    per_batch = nbytes(batch)
+    start = time.perf_counter()
+    taken = 0
+    for _ in range(batches):
+        try:
+            next(iterator)
+        except StopIteration:
+            break
+        taken += 1
+    elapsed = time.perf_counter() - start
+    del iterator
+    return (elapsed / taken if taken else None), taken, per_batch
 
 
 def report_loader(args, n_train, raw_rate):
@@ -146,29 +187,25 @@ def report_loader(args, n_train, raw_rate):
     print(header)
     print('-' * len(header))
 
+    covered = False
     for workers in [int(w) for w in args.workers.split(',')]:
         loaders = prepare_dataloaders(args.data_dir, args.fold, args.batch_size,
                                       num_workers=workers,
                                       prefetch_factor=args.prefetch_factor)
-        iterator = iter(loaders[0])
-        batch = next(iterator)                       # startup, not timed
-        per_batch = nbytes(batch)
-        timings = []
-        for _ in range(args.batches):
-            start = time.perf_counter()
-            try:
-                batch = next(iterator)
-            except StopIteration:
-                break
-            timings.append(time.perf_counter() - start)
-        del iterator, loaders
-        if not timings:
+        seconds, taken, per_batch = time_batches(loaders[0], args.batches)
+        del loaders
+        if seconds is None:
             continue
-        seconds = statistics.median(timings)
+        queued = max(1, workers) * args.prefetch_factor
+        covered = covered or taken <= 2 * queued
         steps = max(1, -(-n_train // args.batch_size))
         print(f"{workers:>8}  {seconds:9.3f}  {per_batch / GIB:10.3f}  "
               f"{per_batch / GIB / seconds:8.2f}  "
-              f"{steps * seconds / 60:10.1f}")
+              f"{steps * seconds / 60:10.1f}"
+              f"{'  *' if taken <= 2 * queued else ''}")
+    if covered:
+        print("  * fewer batches than twice the prefetch queue, so the run never")
+        print("    outran what was queued before timing began. Raise --batches.")
     if raw_rate:
         print(f"  raw ceiling for the same bytes: {raw_rate / GIB:.2f} GiB/s")
 
@@ -191,21 +228,10 @@ def report_batch(args, n_train):
         loaders = prepare_dataloaders(args.data_dir, args.fold, batch_size,
                                       num_workers=args.workers_for_device,
                                       prefetch_factor=args.prefetch_factor)
-        iterator = iter(loaders[0])
-        batch = next(iterator)
-        per_batch = nbytes(batch)
-        timings = []
-        for _ in range(args.batches):
-            start = time.perf_counter()
-            try:
-                next(iterator)
-            except StopIteration:
-                break
-            timings.append(time.perf_counter() - start)
-        del iterator, loaders
-        if not timings:
+        seconds, taken, per_batch = time_batches(loaders[0], args.batches)
+        del loaders
+        if seconds is None:
             continue
-        seconds = statistics.median(timings)
         steps = max(1, -(-n_train // batch_size))
         print(f"{batch_size:>8}  {seconds:9.3f}  {1000 * seconds / batch_size:11.2f}  "
               f"{per_batch / GIB / seconds:8.2f}  {steps * seconds / 60:10.1f}")

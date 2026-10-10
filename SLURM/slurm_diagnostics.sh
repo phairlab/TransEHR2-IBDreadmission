@@ -36,7 +36,8 @@
 #
 # Sections, in order:
 #
-#   1. raw      episode rows straight off the memmaps -- the storage ceiling
+#   0. warm     the whole cohort read once, so the sweeps below are comparable
+#   1. raw      episode rows straight off the memmaps -- a sample, warm
 #   2. loader   the real prepare_dataloaders path, swept over worker counts
 #   3. device   host-to-device copy for one batch
 #   4. padding  how much of what was read is padding, and what a shorter
@@ -54,10 +55,14 @@
 # will not help. Read 5 against the epoch time: if the compute floor is a small
 # fraction of it, the model is not what the epochs are measuring.
 #
-# Section 1 runs first and leaves the rows it read in page cache, so sections 2-4
-# are the warm case and section 1 is a cold-read floor rather than a ceiling on
-# them. That is the right way round for a steady-state epoch whenever the cohort
-# fits in --mem, which section 1 now prints the size for.
+# Section 0 exists because the sweep arms are otherwise not exchangeable: the
+# first reads cold and leaves the cohort resident for the rest. Two runs of the
+# same sweep, one on a node a previous job had warmed and one on a cold node,
+# differed 2.3x at 8 workers for no other reason. With the cohort read once up
+# front every arm measures the warm path, which is the one a training run is on
+# after its first epoch -- and section 0's own rate is the cold cost of that
+# first epoch. Compare the size it prints against --mem to confirm the cohort
+# stays resident at all.
 
 set -uo pipefail
 

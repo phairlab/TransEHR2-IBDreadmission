@@ -50,8 +50,9 @@ import _path  # noqa: F401  (repository root on sys.path)
 from TransEHR2.data.preprocessing import load_dataset, prepare_dataloaders
 from TransEHR2.utils import move_batch_to_device
 
-STAGES = ('raw', 'loader', 'batch', 'device', 'padding', 'profile')
+STAGES = ('warm', 'raw', 'loader', 'batch', 'device', 'padding', 'profile')
 GIB = 1024 ** 3
+WARM_ROWS = 4096
 
 
 def nbytes(obj) -> int:
@@ -86,6 +87,34 @@ def dense_arrays(extracted):
         path = os.path.join(extracted, name)
         paths.append((os.path.getsize(path), path))
     return [p for _, p in sorted(paths, reverse=True)]
+
+
+def report_warm(args):
+    """Read the whole cohort once, so every stage below starts from one cache state.
+
+    Without it the arms of a sweep are not exchangeable. The first arm reads cold
+    and leaves what it touched resident for the rest, which flatters whichever ran
+    last -- and at 200 batches each arm touches a third of this cohort, so by the
+    third arm most of it is in RAM. Two runs of the same sweep on a warm and a cold
+    node differed 2.3x at 8 workers for no other reason.
+
+    It is also the honest cold number: the whole cohort rather than the sample the
+    raw stage draws, which is what a training run pays once in its first epoch
+    before every later epoch runs warm.
+    """
+    names = sorted(n for n in os.listdir(args.extracted) if n.endswith('.npy'))
+    total, start = 0, time.perf_counter()
+    for name in names:
+        array = np.load(os.path.join(args.extracted, name), mmap_mode='r')
+        for begin in range(0, array.shape[0], WARM_ROWS):
+            total += int(np.asarray(array[begin:begin + WARM_ROWS]).nbytes)
+        del array
+    seconds = time.perf_counter() - start
+    print()
+    print(f"warm: {len(names)} array(s), {total / GIB:.1f} GiB read in {seconds:.1f} s "
+          f"({total / GIB / seconds:.2f} GiB/s)")
+    print("  the cohort is now resident, so every stage below measures the warm")
+    print("  path -- the one a training run is on after its first epoch")
 
 
 def report_raw(args, rows):
@@ -354,6 +383,8 @@ def main(argv=None):
     print(f"data      {args.extracted}")
     print(f"episodes  {n_episodes}   fold {args.fold}   device {device}")
 
+    if 'warm' in stages:
+        report_warm(args)
     raw_rate = None
     if 'raw' in stages:
         raw_rate = report_raw(args, rows)

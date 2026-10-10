@@ -71,7 +71,7 @@ def _run(mini, stages, extra=()):
     ])
 
 
-@pytest.mark.parametrize('stage', ['raw', 'loader', 'batch', 'device',
+@pytest.mark.parametrize('stage', ['warm', 'raw', 'loader', 'batch', 'device',
                                   'padding', 'profile'])
 def test_every_stage_runs_against_a_real_extraction(extracted, stage, capsys):
     assert _run(extracted, stage) == 0
@@ -81,7 +81,7 @@ def test_every_stage_runs_against_a_real_extraction(extracted, stage, capsys):
 def test_all_stages_run_in_one_invocation(extracted, capsys):
     assert _run(extracted, 'all') == 0
     out = capsys.readouterr().out
-    for heading in ('raw:', 'loader:', 'batch:', 'padding:', 'profile:'):
+    for heading in ('warm:', 'raw:', 'loader:', 'batch:', 'padding:', 'profile:'):
         assert heading in out, heading
 
 

@@ -30,8 +30,9 @@
 #                 each table, fold in the LAB variable properties. Steps 3-8 are the Python
 #                 half. Use 3 to keep the prepared tables, or 6 with CLEAN_ROOT=0 to keep the
 #                 per-patient root as well
-#   RAW_DIR=P     the raw extract (default data/ibd/RMT23345). Read-only: nothing here writes
-#                 to it, and PREPARED_DIR is a subdirectory of it rather than a copy.
+#   RAW_DIR=P     the raw extract (default data/ibd/RMT23345, a symlink to the RDSS copy).
+#                 Read-only: nothing here writes to it, and PREPARED_DIR sits beside it rather
+#                 than under it, so the prepared tables stay on local disk.
 #   CALIBRATE=1   after extraction, measure what the outlier rules would remove (default 0).
 #                 Reports only. The filter itself is a cut table applied at load time, so
 #                 nothing here reads or writes one.
@@ -68,10 +69,12 @@ PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 IBDDATAPREP_DIR="${IBDDATAPREP_DIR:-${PROJECT_ROOT}/IBDdataprep}"
 TRANSEHR2_DIR="${TRANSEHR2_DIR:-${PROJECT_ROOT}/TransEHR2}"
 DATA_DIR="${DATA_DIR:-${PROJECT_ROOT}/data}"
-# The raw extract, read and never written. Nothing in this pipeline opens it for writing, and
-# the prepared tables go in a subdirectory of it rather than over it.
+# The raw extract, read and never written. It is a symlink to the RDSS copy, so the prepared
+# tables go beside it in data/ibd rather than under it: that keeps them on local disk, and it
+# is where IBDdataprep/slurm_prepare_RMT23345.sh writes when one table is re-prepared on its
+# own, which is only the same table if both scripts name the same directory.
 RAW_DIR="${RAW_DIR:-${DATA_DIR}/ibd/RMT23345}"
-PREPARED_DIR="${PREPARED_DIR:-${RAW_DIR}/RMT23345_prepared}"
+PREPARED_DIR="${PREPARED_DIR:-${DATA_DIR}/ibd/RMT23345_prepared}"
 DATASET_CONFIG="${DATASET_CONFIG:-${TRANSEHR2_DIR}/TransEHR2/configs/datasets/RMT23345.yaml}"
 VARIABLE_PROPERTIES="${VARIABLE_PROPERTIES:-${DATA_DIR}/ibd/variable_properties.yaml}"
 RESOURCES_DIR="${RESOURCES_DIR:-${DATA_DIR}/resources}"
@@ -130,10 +133,11 @@ if [ "${FIRST_STEP}" -gt 1 ] && [ ! -d "${PREPARED_DIR}" ]; then
     echo "       ${PREPARED_DIR} to read. Start from step 0." >&2
     exit 1
 fi
-# PREPARED_DIR is an rm -rf target below when the R stage runs. A mis-set RAW_DIR would
-# otherwise aim it somewhere expensive.
+# PREPARED_DIR is an rm -rf target below when the R stage runs. A mis-set one would otherwise
+# aim it somewhere expensive -- data/ibd among them, since that is its parent now and holds
+# the raw symlink.
 case "${PREPARED_DIR}" in
-    "${RAW_DIR}"|"${DATA_DIR}"|"${PROJECT_ROOT}"|/|"")
+    "${RAW_DIR}"|"${DATA_DIR}/ibd"|"${DATA_DIR}"|"${PROJECT_ROOT}"|/|"")
         echo "ERROR: PREPARED_DIR is ${PREPARED_DIR}, which is not a directory this script" >&2
         echo "       may remove. It must be a subdirectory of its own." >&2
         exit 1 ;;

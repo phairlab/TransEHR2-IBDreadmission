@@ -74,9 +74,16 @@ def main(argv=None):
         return 2
 
     if not 0 <= args.index < len(trials):
+        # An empty stage is a real condition, not a mistake: phase 1 ranks
+        # on the pretraining loss and finetunes nothing, so its finetune
+        # array is never submitted. Saying "valid indices 0--1" there reads
+        # like a typo.
+        extent = (f"valid indices 0-{len(trials) - 1}" if trials
+                  else "it has no trials, so no array should be submitted "
+                       "for it")
         print(
             f"ERROR: index {args.index} is out of range for the {args.stage} stage, which has "
-            f"{len(trials)} trials (valid indices 0-{len(trials) - 1}). Check the --array "
+            f"{len(trials)} trials ({extent}). Check the --array "
             f"range against `python {sys.argv[0]} {args.manifest} --stage {args.stage} "
             f"--count`.",
             file=sys.stderr

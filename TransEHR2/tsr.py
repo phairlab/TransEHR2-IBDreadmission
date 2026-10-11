@@ -85,7 +85,8 @@ import torch
 from torch import Tensor
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from TransEHR2.utils import densify_lookup_slots, resolve_lookup_embeddings
+from TransEHR2.utils import (densify_lookup_slots, densify_one_hot,
+                             resolve_lookup_embeddings)
 
 FAMILIES = ('numeric', 'categorical', 'ordinal', 'multilabel', 'lookup')
 
@@ -127,6 +128,7 @@ def _leaf_values(batch, copies: int = 1) -> Tuple[Dict, Dict[str, List[Tensor]]]
             back no gradient of its own.
     """
     densify_lookup_slots(batch)
+    densify_one_hot(batch)
     val_data = dict(batch['val_data'])
     leaves = {}
 
@@ -379,6 +381,7 @@ def _occupied(batch) -> Tensor:
     The column order is `feature_index`'s, which is the same iteration.
     """
     densify_lookup_slots(batch)
+    densify_one_hot(batch)
     val_data = batch['val_data']
     columns = []
     for family in FAMILIES:

@@ -325,20 +325,6 @@ class MixedDataset(Dataset):
             values /= self._span[f]
         return torch.from_numpy(values)
 
-    @staticmethod
-    def _one_hot(indices: np.ndarray, width: int) -> torch.Tensor:
-        """Expand the stored index codes to one-hot rows.
-
-        A negative index -- the ``-1`` sentinel, whether the timestep was
-        unobserved or its value was out of domain -- leaves an all-zero
-        row, which is exactly the state ``losses.py``'s
-        ``target.sum(dim=-1) > 0`` guards test for.
-        """
-        one_hot = np.zeros((indices.shape[0], width), dtype=np.float32)
-        in_domain = indices >= 0
-        one_hot[in_domain, indices[in_domain]] = 1.0
-        return torch.from_numpy(one_hot)
-
     def _gather_lookup(self, f: int, idx: int):
         """Gather one lookup feature's CSR slice for one episode.
 
@@ -416,23 +402,35 @@ class MixedDataset(Dataset):
             for f in range(len(self.val_numeric_values))
         ]
 
+        # Categorical and ordinal values stay as the stored index codes and
+        # are expanded to one-hot on the device, in
+        # ``utils.densify_one_hot``. The expansion is a 61x inflation --
+        # 37 categorical features over 1543 levels is 1.8 MiB per episode
+        # dense against 22 KiB of codes -- and every byte of it would
+        # otherwise be built in a worker and shipped across IPC once per
+        # epoch, on a step that measures 60% loader.
         item['val_categorical_indicators'] = torch.from_numpy(
             np.array(self.val_categorical_indicators[idx], dtype=np.float32)
         )
         item['val_categorical_values'] = [
-            self._one_hot(np.asarray(values[idx]), width)
-            for values, width in zip(self.val_categorical_values,
-                                     self.categorical_feat_dims)
+            torch.from_numpy(np.array(values[idx], dtype=np.int16))
+            for values in self.val_categorical_values
         ]
 
         item['val_ordinal_indicators'] = torch.from_numpy(
             np.array(self.val_ordinal_indicators[idx], dtype=np.float32)
         )
         item['val_ordinal_values'] = [
-            self._one_hot(np.asarray(values[idx]), width)
-            for values, width in zip(self.val_ordinal_values,
-                                     self.ordinal_feat_dims)
+            torch.from_numpy(np.array(values[idx], dtype=np.int16))
+            for values in self.val_ordinal_values
         ]
+
+        # The widths the codes expand to. They travel with the episode
+        # because the expansion happens past the worker boundary, where
+        # the dataset is no longer in reach; they are a few dozen ints
+        # against the megabytes they stand in for.
+        item['val_categorical_widths'] = list(self.categorical_feat_dims)
+        item['val_ordinal_widths'] = list(self.ordinal_feat_dims)
 
         item['val_multilabel_indicators'] = torch.from_numpy(
             np.array(self.val_multilabel_indicators[idx], dtype=np.float32)

@@ -1671,13 +1671,21 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
                 'indicators': val_numeric_ind,
                 'values': val_numeric_values,
             },
+            # ``values`` are (batch, max_ts) int16 index codes here, not the
+            # dense one-hot the model consumes: ``densify_one_hot`` expands
+            # them inside ``move_batch_to_device``, on the device the batch
+            # landed on, and ``widths`` is what it expands them to. A batch
+            # that has not been through that call is not the batch any model,
+            # loss or mask is handed.
             'categorical': {
                 'indicators': val_categorical_ind,
                 'values': val_categorical_values,
+                'widths': batch[0]['val_categorical_widths'],
             },
             'ordinal': {
                 'indicators': val_ordinal_ind,
                 'values': val_ordinal_values,
+                'widths': batch[0]['val_ordinal_widths'],
             },
             'multilabel': {
                 'indicators': val_multilabel_ind,

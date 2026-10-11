@@ -73,25 +73,46 @@ def dataset(one_patient):
 
 
 # --- the one-hot expansion and the -1 sentinel ---------
+#
+# The expansion moved to the device: __getitem__ hands back the stored
+# int16 codes and ``utils.densify_one_hot`` builds the rows inside
+# ``move_batch_to_device``. So the claims below are read off a collated,
+# moved batch -- which is the only form any model, loss or mask sees --
+# while the item itself is checked for the codes that make the move cheap.
+
+def test_the_item_carries_index_codes_not_one_hot_rows(dataset):
+    """The point of the move: a (ts_len,) int16 code per feature.
+
+    Dense rows here would be built in a worker and shipped across IPC
+    once per epoch, which for this cohort is a 61x inflation.
+    """
+    item = dataset[0]
+    for values in (item['val_categorical_values'],
+                   item['val_ordinal_values']):
+        for tensor in values:
+            assert tensor.dtype == torch.int16
+            assert tensor.dim() == 1
+
 
 def test_one_hot_width_is_the_declared_category_size(dataset):
     """``size`` is the number of categories for a
     categorical feature and the number of levels for an ordinal one, and
-    that is the width __getitem__ expands an index to."""
-    item = dataset[0]
+    that is the width the codes expand to."""
+    batch = collate_for_model([dataset[0]])
+    val = batch['val_data']
     # CAT has 2 categories; ORD has 3 levels and UB has 2.
-    assert [v.shape[-1] for v in item['val_categorical_values']] == [2]
-    assert [v.shape[-1] for v in item['val_ordinal_values']] == [3, 2]
+    assert [v.shape[-1] for v in val['categorical']['values']] == [2]
+    assert [v.shape[-1] for v in val['ordinal']['values']] == [3, 2]
 
 
 def test_category_index_becomes_a_one_hot_row(dataset):
     """An in-domain index k sets column k and nothing else."""
-    item = dataset[0]
+    val = collate_for_model([dataset[0]])['val_data']
     # The series is right-aligned, so the index time is the final column.
     # one_patient's last row is CAT 'L' (category 0) and ORD '1-24'
     # (level 1).
-    assert item['val_categorical_values'][0][-1].tolist() == [1.0, 0.0]
-    assert item['val_ordinal_values'][0][-1].tolist() == [0.0, 1.0, 0.0]
+    assert val['categorical']['values'][0][0, -1].tolist() == [1.0, 0.0]
+    assert val['ordinal']['values'][0][0, -1].tolist() == [0.0, 1.0, 0.0]
 
 
 def test_unobserved_index_expands_to_an_all_zero_row(dataset):
@@ -99,12 +120,13 @@ def test_unobserved_index_expands_to_an_all_zero_row(dataset):
     row is all zero, which np.zeros storage could not have expressed --
     it would have said category 0."""
     item = dataset[0]
+    val = collate_for_model([item])['val_data']
     # one_patient's first timestep carries a drug and no valued feature.
     assert item['val_categorical_indicators'][0, 0] == 0.0
-    assert item['val_categorical_values'][0][0].sum() == 0.0
+    assert val['categorical']['values'][0][0, 0].sum() == 0.0
     # And its last timestep has no UB value.
     assert item['val_ordinal_indicators'][-1, 1] == 0.0
-    assert item['val_ordinal_values'][1][-1].sum() == 0.0
+    assert val['ordinal']['values'][1][0, -1].sum() == 0.0
 
 
 def test_out_of_domain_index_expands_to_an_all_zero_row(mini):
@@ -122,10 +144,36 @@ def test_out_of_domain_index_expands_to_an_all_zero_row(mini):
         stays=[('DAD', '2019-01-01T00:00:00Z', '2019-01-02T00:00:00Z')],
     )
     item = extracted(mini)[0]
+    values = collate_for_model([item])['val_data']['categorical']['values']
     assert item['val_categorical_indicators'][-1, 0] == 1.0, "observed"
-    assert item['val_categorical_values'][0][-1].sum() == 0.0
+    assert values[0][0, -1].sum() == 0.0
     # The timestep before it holds a value that does map.
-    assert item['val_categorical_values'][0][-2].tolist() == [1.0, 0.0]
+    assert values[0][0, -2].tolist() == [1.0, 0.0]
+
+
+def test_a_negative_code_claims_no_class_at_all(mini):
+    """The sentinel survives the move to the device.
+
+    ``_expand_codes`` has to clamp the ``-1`` to keep ``scatter_`` from
+    rejecting it, which aims the write at column 0; only the source
+    carrying validity keeps that row empty. This is the end-to-end probe
+    that it does.
+    """
+    mini.add_patient(
+        1001,
+        timeseries=[
+            ['2019-01-01T00:00:00Z', 1.0, '', '0', 'Few', '', ''],
+            ['2019-01-02T00:00:00Z', 1.0, 'U', '0', 'Few', '', ''],
+        ],
+        stays=[('DAD', '2019-01-01T00:00:00Z', '2019-01-02T00:00:00Z')],
+    )
+    item = extracted(mini)[0]
+    assert item['val_categorical_values'][0][-2] == -1, "the sentinel"
+    values = collate_for_model([item])['val_data']['categorical']['values']
+    # CAT's last class is index 1. The unobserved row must not claim it.
+    assert values[0][0, -2].tolist() == [0.0, 0.0]
+    # While a real 'U' at the next timestep does set exactly that column.
+    assert values[0][0, -1].tolist() == [0.0, 1.0]
 
 
 def test_the_losses_guard_still_fires_on_a_zero_row(mini):
@@ -143,7 +191,9 @@ def test_the_losses_guard_still_fires_on_a_zero_row(mini):
         stays=[('DAD', '2019-01-01T00:00:00Z', '2019-01-02T00:00:00Z')],
     )
     dataset = extracted(mini)
-    batch = collate_tensorized([dataset[0]])
+    # Through the move, because the guard runs against what the loss is
+    # handed and the rows are built on the device now.
+    batch = collate_for_model([dataset[0]])
 
     target = batch['val_data']['categorical']['values'][0]
     valid = target.sum(dim=-1) > 0

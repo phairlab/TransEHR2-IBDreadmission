@@ -272,6 +272,73 @@ def densify_lookup_slots(batch: MixedTensorDataset) -> MixedTensorDataset:
     return batch
 
 
+def _expand_codes(codes: Tensor, width: int) -> Tensor:
+    """One-hot rows for ``(batch, ts_len)`` index codes.
+
+    A negative code -- the ``-1`` sentinel, whether the timestep was
+    unobserved or its value was out of domain -- leaves an all-zero row,
+    which is exactly the state ``losses.py``'s ``target.sum(dim=-1) > 0``
+    guards test for.
+
+    Two things make that true, and they are doing different jobs.
+    ``scatter_`` rejects a negative index outright -- ``index -1 is out of
+    bounds`` -- so the clamp is what keeps the write legal at all; without
+    it the first batch holding an unobserved cell raises, which is to say
+    essentially the first batch. Carrying the validity in the *source*
+    instead of the index is what then leaves the clamped row empty rather
+    than setting column 0.
+    """
+    dense = torch.zeros(*codes.shape, width, dtype=torch.float32,
+                        device=codes.device)
+    index = codes.clamp(min=0).unsqueeze(-1).long()
+    source = (codes >= 0).unsqueeze(-1).to(dense.dtype)
+    return dense.scatter_(2, index, source)
+
+
+def densify_one_hot(batch: MixedTensorDataset) -> MixedTensorDataset:
+    """Expand the categorical and ordinal index codes to one-hot.
+
+    ``collate_tensorized`` ships the stored ``int16`` codes rather than
+    the dense rows the model consumes. For this cohort the dense form is
+    a 61x inflation -- 37 categorical features over 1543 levels and 16
+    ordinal over 73, which is 1.9 MiB per episode against 31 KiB of codes
+    -- and it is 59% of every collated batch.
+
+    This runs inside ``move_batch_to_device``, so the rows are built
+    wherever the batch has just landed. VRAM is unchanged, because those
+    tensors were already built there; what it saves is the construction
+    in the worker and the IPC behind it, on a step that measures 60%
+    loader.
+
+    Idempotent, and keyed on rank rather than a flag: codes are
+    ``(batch, ts_len)`` and dense rows are ``(batch, ts_len, width)``, so
+    a batch that has already been expanded -- or one a test built dense
+    by hand -- is returned untouched.
+
+    Args:
+        batch: A collated batch. Families that are absent, already dense,
+            or carry no feature are left alone.
+
+    Returns:
+        The same batch, with dense one-hot values in place of the codes.
+    """
+    val_data = (batch.get('val_data') if isinstance(batch, dict) else None)
+    if not isinstance(val_data, dict):
+        return batch
+
+    for family in ('categorical', 'ordinal'):
+        entry = val_data.get(family)
+        if not isinstance(entry, dict) or not entry.get('values'):
+            continue
+        if entry['values'][0].dim() != 2:
+            continue
+        entry['values'] = [
+            _expand_codes(codes, width)
+            for codes, width in zip(entry['values'], entry['widths'])
+        ]
+    return batch
+
+
 def move_batch_to_device(batch: MixedTensorDataset, device: torch.device) -> MixedTensorDataset:
     """Recursively move all tensors in a batch to the specified device.
     
@@ -300,8 +367,9 @@ def move_batch_to_device(batch: MixedTensorDataset, device: torch.device) -> Mix
             return obj
 
     # Densified after the move, so the dense tensors are allocated on the
-    # target device and only the family's records cross the boundary.
-    return densify_lookup_slots(_move_to_device(batch))
+    # target device and only the family's records -- and the categorical
+    # and ordinal index codes -- cross the boundary.
+    return densify_one_hot(densify_lookup_slots(_move_to_device(batch)))
 
 
 def ensure_float32(data: MixedDataset) -> MixedDataset:
@@ -516,6 +584,13 @@ def generate_record_masks(
     # `slot_values`, and a caller reading a collated batch directly would otherwise fail on a
     # missing key. The call is idempotent and free once the tensors exist.
     densify_lookup_slots(data)
+
+    # Categorical and ordinal reach them dense for the same reason, and a
+    # sharper one: the value masks below are `zeros_like` the values, and
+    # `_gen_val_assoc_feat_mask` reads each feature's width off them. Given
+    # codes it would build `(batch, ts_len)` masks and mask the whole
+    # episode instead of one one-hot row.
+    densify_one_hot(data)
 
     # Get batch dimensions from the collated data structure
     batch_size, max_ts_len = data['val_data']['times'].shape

@@ -130,9 +130,7 @@ python scripts/run_experiment.py \
 ```
 
 An experiment is pretraining, finetuning, and evaluation on a held-out test
-set, repeated per fold. [`tune_hyperparameters.py`](scripts/tune_hyperparameters.py)
-takes the same two config arguments and sweeps one pretraining
-hyperparameter at a time instead of training once.
+set, repeated per fold.
 
 Parameters live in `TransEHR2/configs/`: one file per dataset under
 `datasets/`, one per experiment under `experiments/`. **The paths in the

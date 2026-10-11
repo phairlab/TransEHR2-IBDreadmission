@@ -27,7 +27,6 @@ REPO_ROOT = os.path.dirname(
 
 ENTRY_POINTS = [
     os.path.join('scripts', 'run_experiment.py'),
-    os.path.join('scripts', 'tune_hyperparameters.py'),
     os.path.join('scripts', 'dump_finetuned_predictions.py'),
 ]
 

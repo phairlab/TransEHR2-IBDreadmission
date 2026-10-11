@@ -50,7 +50,8 @@ import _path  # noqa: F401  (repository root on sys.path)
 from TransEHR2.data.preprocessing import load_dataset, prepare_dataloaders
 from TransEHR2.utils import move_batch_to_device
 
-STAGES = ('warm', 'raw', 'loader', 'batch', 'device', 'padding', 'profile')
+STAGES = ('warm', 'raw', 'loader', 'batch', 'bytes', 'device', 'padding',
+          'profile')
 GIB = 1024 ** 3
 WARM_ROWS = 4096
 
@@ -64,6 +65,62 @@ def nbytes(obj) -> int:
     if isinstance(obj, (list, tuple)):
         return sum(nbytes(v) for v in obj)
     return 0
+
+
+def byte_tree(obj, path=''):
+    """``(path, bytes)`` per tensor, keeping the nesting in the name.
+
+    The same walk ``nbytes`` does, reported leaf by leaf. A per-feature list
+    collapses to one row with its length, because 94 rows of one number each
+    says less than one row saying there are 94 of them.
+    """
+    if torch.is_tensor(obj):
+        return [(path or '<tensor>', obj.element_size() * obj.nelement())]
+    if isinstance(obj, dict):
+        return [row for key, value in obj.items()
+                for row in byte_tree(value, f'{path}.{key}' if path else str(key))]
+    if isinstance(obj, (list, tuple)):
+        total = sum(nbytes(v) for v in obj)
+        return [(f'{path}[{len(obj)}]', total)] if total else []
+    return []
+
+
+def report_bytes(args, n_episodes):
+    """What the collated batch is made of, against what it was read from.
+
+    The loader moves every one of these bytes from a worker to the main
+    process, so a batch that is some multiple of what it was read from is
+    paying that multiple in IPC. This says which tensors the multiple is in.
+    """
+    on_disk = sum(
+        os.path.getsize(os.path.join(args.extracted, name))
+        for name in os.listdir(args.extracted) if name.endswith('.npy')
+    )
+    loaders = prepare_dataloaders(args.data_dir, args.fold, args.batch_size,
+                                  num_workers=0,
+                                  prefetch_factor=args.prefetch_factor)
+    batch = next(iter(loaders[0]))
+    rows = sorted(byte_tree(batch), key=lambda row: -row[1])
+    total = sum(size for _, size in rows)
+    del loaders
+
+    print()
+    print(f"bytes: one collated batch of {args.batch_size}, largest first")
+    header = f"{'tensor':<44}  {'MiB':>9}  {'share':>6}  {'KiB/episode':>12}"
+    print(header)
+    print('-' * len(header))
+    for name, size in rows:
+        if size / total < 0.005:
+            continue
+        print(f"{name:<44}  {size / 2**20:9.1f}  {size / total:6.1%}  "
+              f"{size / args.batch_size / 1024:12.1f}")
+    stored = on_disk / n_episodes
+    collated = total / args.batch_size
+    print(f"{'TOTAL':<44}  {total / 2**20:9.1f}  {1.0:6.1%}  "
+          f"{collated / 1024:12.1f}")
+    print(f"  {stored / 1024:.1f} KiB/episode on disk -> "
+          f"{collated / 1024:.1f} KiB/episode collated ({collated / stored:.1f}x)")
+    print("  every byte of the collated figure crosses worker IPC once per epoch")
 
 
 def pick_device(requested):
@@ -402,6 +459,8 @@ def main(argv=None):
         report_loader(args, n_episodes, raw_rate)
     if 'batch' in stages:
         report_batch(args, n_episodes)
+    if 'bytes' in stages:
+        report_bytes(args, n_episodes)
     if 'device' in stages:
         report_device(args, device)
     if 'profile' in stages:

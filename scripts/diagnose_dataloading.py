@@ -38,6 +38,7 @@ Stages, each answerable on its own:
 
 import argparse
 import os
+import pickle
 import statistics
 import sys
 import time
@@ -50,8 +51,8 @@ import _path  # noqa: F401  (repository root on sys.path)
 from TransEHR2.data.preprocessing import load_dataset, prepare_dataloaders
 from TransEHR2.utils import move_batch_to_device
 
-STAGES = ('warm', 'raw', 'loader', 'batch', 'bytes', 'device', 'padding',
-          'profile')
+STAGES = ('warm', 'raw', 'loader', 'batch', 'bytes', 'pin', 'device',
+          'padding', 'profile')
 GIB = 1024 ** 3
 WARM_ROWS = 4096
 
@@ -80,6 +81,13 @@ def byte_tree(obj, path=''):
         return [row for key, value in obj.items()
                 for row in byte_tree(value, f'{path}.{key}' if path else str(key))]
     if isinstance(obj, (list, tuple)):
+        # A long per-feature list collapses: 94 rows of one number each says
+        # less than one row saying there are 94 of them. A short one does not,
+        # because a two-element lookup list is text and drug -- different
+        # answers to what to do about it, pooled into one number.
+        if 0 < len(obj) <= 4:
+            return [row for i, value in enumerate(obj)
+                    for row in byte_tree(value, f'{path}[{i}]')]
         total = sum(nbytes(v) for v in obj)
         return [(f'{path}[{len(obj)}]', total)] if total else []
     return []
@@ -121,6 +129,57 @@ def report_bytes(args, n_episodes):
     print(f"  {stored / 1024:.1f} KiB/episode on disk -> "
           f"{collated / 1024:.1f} KiB/episode collated ({collated / stored:.1f}x)")
     print("  every byte of the collated figure crosses worker IPC once per epoch")
+
+    # A one-hot is its feature's level count wide in float32 where the stored
+    # index is 2 bytes, so the expansion is levels * 2. Whether that is spread
+    # over every feature or carried by a few decides whether the fix is to move
+    # the expansion to the GPU or to look at a handful of columns.
+    with open(os.path.join(args.extracted, 'metadata.pkl'), 'rb') as handle:
+        metadata = pickle.load(handle)
+    for family in ('categorical', 'ordinal'):
+        dims = metadata.get(f'{family}_feat_dims') or []
+        feats = metadata.get(f'{family}_feats') or []
+        if not dims:
+            continue
+        widest = sorted(zip(feats, dims), key=lambda pair: -pair[1])
+        total_levels = sum(dims)
+        print(f"  {family}: {len(dims)} feature(s), {total_levels} level(s) "
+              f"in all, widest " +
+              ', '.join(f'{name} {width}' for name, width in widest[:5]))
+
+
+def report_pin(args, n_train):
+    """The same loader with pinning on and off.
+
+    Pinning copies every byte the workers produced into page-locked memory, in
+    the main process, once per batch. The worker sweep going flat past four
+    workers says the main process is the limit; this says how much of that limit
+    is the pin. If the gap is large the bytes are the problem and sending fewer
+    of them is the fix; if it is small the cost is the handoff itself, and the
+    same conclusion follows for a different reason -- which is why both arms are
+    worth one run.
+    """
+    print()
+    print(f"pin: prepare_dataloaders at {args.workers_for_device} workers")
+    header = (f"{'pin_memory':>10}  {'s/batch':>9}  {'GiB/s':>8}  "
+              f"{'epoch min':>10}")
+    print(header)
+    print('-' * len(header))
+
+    for pin in (True, False):
+        loaders = prepare_dataloaders(args.data_dir, args.fold, args.batch_size,
+                                      num_workers=args.workers_for_device,
+                                      pin_memory=pin,
+                                      prefetch_factor=args.prefetch_factor)
+        seconds, taken, per_batch = time_batches(loaders[0], args.batches)
+        del loaders
+        if seconds is None:
+            continue
+        steps = max(1, -(-n_train // args.batch_size))
+        print(f"{str(pin):>10}  {seconds:9.3f}  "
+              f"{per_batch / GIB / seconds:8.2f}  {steps * seconds / 60:10.1f}")
+    print("  pinning is what makes the host-to-device copy fast, so off is a")
+    print("  measurement and not a setting to adopt on its own")
 
 
 def pick_device(requested):
@@ -461,6 +520,8 @@ def main(argv=None):
         report_batch(args, n_episodes)
     if 'bytes' in stages:
         report_bytes(args, n_episodes)
+    if 'pin' in stages:
+        report_pin(args, n_episodes)
     if 'device' in stages:
         report_device(args, device)
     if 'profile' in stages:

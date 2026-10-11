@@ -72,7 +72,7 @@ def _run(mini, stages, extra=()):
 
 
 @pytest.mark.parametrize('stage', ['warm', 'raw', 'loader', 'batch', 'bytes',
-                                  'device', 'padding', 'profile'])
+                                  'pin', 'device', 'padding', 'profile'])
 def test_every_stage_runs_against_a_real_extraction(extracted, stage, capsys):
     assert _run(extracted, stage) == 0
     assert capsys.readouterr().out.strip(), f'{stage} printed nothing'
@@ -81,8 +81,8 @@ def test_every_stage_runs_against_a_real_extraction(extracted, stage, capsys):
 def test_all_stages_run_in_one_invocation(extracted, capsys):
     assert _run(extracted, 'all') == 0
     out = capsys.readouterr().out
-    for heading in ('warm:', 'raw:', 'loader:', 'batch:', 'bytes:', 'padding:',
-                    'profile:'):
+    for heading in ('warm:', 'raw:', 'loader:', 'batch:', 'bytes:', 'pin:',
+                    'padding:', 'profile:'):
         assert heading in out, heading
 
 
@@ -120,3 +120,27 @@ def test_a_loader_run_the_prefetch_queue_covers_is_marked(extracted, capsys):
     out = capsys.readouterr().out
     assert '*' in out, 'a two-batch run was not marked'
     assert 'prefetch queue' in out, 'the mark was not explained'
+
+
+def test_the_lookup_family_is_split_by_feature(extracted, capsys):
+    """Text and drug want different fixes, so one pooled number is no answer."""
+    assert _run(extracted, 'bytes') == 0
+    out = capsys.readouterr().out
+    assert 'lookup.sparse[0]' in out and 'lookup.sparse[1]' in out, out
+
+
+def test_a_long_per_feature_list_stays_collapsed():
+    """94 rows of one number each would bury the two rows that matter.
+
+    Checked on the walk rather than through a run, because the fixture has one
+    numeric feature and so cannot produce a list long enough to collapse.
+    """
+    import torch
+
+    from diagnose_dataloading import byte_tree
+
+    short = {'lookup': [torch.ones(2, 2), torch.ones(2, 2)]}
+    long = {'numeric': [torch.ones(2, 2) for _ in range(94)]}
+    assert [name for name, _ in byte_tree(short)] == ['lookup[0]', 'lookup[1]']
+    assert [name for name, _ in byte_tree(long)] == ['numeric[94]']
+    assert byte_tree(long)[0][1] == 94 * 4 * 4

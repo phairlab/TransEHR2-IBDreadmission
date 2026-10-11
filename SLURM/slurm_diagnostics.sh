@@ -44,6 +44,8 @@
 #               extraction would win
 #   5. stage 1  the GPU compute floor at 1 and at 2 encoder blocks, data
 #               resident, which is the block question with the I/O removed
+#   6. phase    the real pretraining step attributed phase by phase, at 0 and
+#               at 8 dataloader workers -- the only section that is not a proxy
 #
 # Sections 1-4 answer where the time goes around the model. What they cannot see
 # is the step itself: for that, run pretraining with TRANSEHR2_PHASE_TIMING set to
@@ -162,6 +164,67 @@ for blocks in 1 2; do
         --ig-steps 0
     status=$(( status || $? ))
 done
+
+echo
+echo "########## 6: the real pretraining step, phase by phase ##########"
+#
+# Sections 1-5 are proxies: the loader measured without a model, the model
+# measured without a loader. This is the step itself, and it is the only thing
+# that can confirm the share the rest imply.
+#
+# Run at two worker counts because run_experiment.py defaults --num_workers to
+# 0, and section 2 puts 0 workers at 2.7x the cost of 4. If the pretraining jobs
+# have been taking that default, the cheapest available change is a flag.
+#
+# The config is generated, not edited: PRETRAIN_TOTAL_EPOCH and
+# FINETUNE_TOTAL_EPOCH come down to 1, and MODEL_DIR and EXPERIMENT_NAME are
+# redirected into the log directory so a timing run cannot overwrite a real
+# checkpoint. --force_pretrain because a run that finds existing weights skips
+# pretraining, which is the half being timed.
+#
+# The timer synchronizes CUDA to attribute GPU phases, so the step total runs
+# long by construction. Read the proportions; read the total against section 5.
+
+PHASE_WORKERS="${PHASE_WORKERS:-0,8}"
+PHASE_EVERY="${PHASE_EVERY:-100}"
+EXPERIMENT_CONFIG="${EXPERIMENT_CONFIG:-TransEHR2/configs/experiments/experiment1_baseline.yaml}"
+PHASE_DIR="${PROJECT_ROOT}/log/phase_timing_${SLURM_JOB_ID:-0}"
+
+if [ ! -f "${EXPERIMENT_CONFIG}" ]; then
+    echo "SKIPPED: no ${EXPERIMENT_CONFIG} to derive a timing config from." >&2
+else
+    mkdir -p "${PHASE_DIR}"
+    python - "${EXPERIMENT_CONFIG}" "${PHASE_DIR}" <<'PYEOF'
+import sys
+import yaml
+
+source, phase_dir = sys.argv[1], sys.argv[2]
+with open(source) as handle:
+    config = yaml.safe_load(handle)
+config['PRETRAIN_TOTAL_EPOCH'] = 1
+config['FINETUNE_TOTAL_EPOCH'] = 1
+config['MODEL_DIR'] = phase_dir
+config['EXPERIMENT_NAME'] = 'phase_timing'
+with open(f'{phase_dir}/experiment.yaml', 'w') as handle:
+    yaml.safe_dump(config, handle)
+print(f"timing config written to {phase_dir}/experiment.yaml")
+PYEOF
+    for workers in $(echo "${PHASE_WORKERS}" | tr ',' ' '); do
+        echo
+        echo "---------- pretraining, ${workers} dataloader worker(s) ----------"
+        TRANSEHR2_PHASE_TIMING="${PHASE_EVERY}" \
+        python scripts/run_experiment.py \
+            "${DATASET_CONFIG}" \
+            "${PHASE_DIR}/experiment.yaml" \
+            --folds "${FOLD}" \
+            --num_workers "${workers}" \
+            --force_pretrain
+        status=$(( status || $? ))
+    done
+    echo
+    echo "Timing checkpoints are under ${PHASE_DIR} and are not a trained model;"
+    echo "remove it once the numbers above have been read."
+fi
 
 echo
 echo "GPU sampling written to log/diagnose_gpu_${SLURM_JOB_ID:-0}.csv"

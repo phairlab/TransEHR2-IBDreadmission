@@ -1,0 +1,50 @@
+# Phase 1: the pretraining schedule, for both temporal encoding arms.
+#
+# A factorial, not an additive sweep. Learning rate and decay interact --
+# the best rate under a fast decay is not the best under a flat schedule --
+# so the best combination is not the combination of individual bests.
+#
+# Both axes select on the pretraining loss, so no trial in this phase is
+# finetuned. Learning rate and decay leave the objective intact, which is
+# what makes that loss comparable across cells; the masking ratios in
+# phase 3 do not, which is why those move downstream.
+
+SPEC_NAME: phase1
+DESIGN: factorial
+FOLD: fold0            # held out of every reported result, see TransEHR2.cli
+
+BASE_CONFIG: phase1_base.yaml
+DATASET_CONFIG: ../../datasets/RMT23345.yaml
+OUTPUT_DIR: phase1
+MANIFEST: phase1_manifest.yaml
+
+# The encoding arms. An arm's overrides are merged into every trial, so the
+# whole grid runs once per encoding from one shared centre. Both are carried
+# forward: each one's winning cell becomes the encoder its own finetuning
+# grid is measured on, so neither encoding is judged under settings tuned
+# for the other.
+ARMS:
+  additive:
+    POSITION_ENCODING: 'additive'
+  rope:
+    POSITION_ENCODING: 'rope'
+
+# Derived from the MIMIC manuscript grid (LR [2e-4, 6e-4, 6e-5, 2e-3] x
+# half-life [160, 60, 20, 480]) with three edits: the 20-epoch half-life
+# dropped, the slowest rate dropped, and no-decay added so that this grid
+# and phase 2's have the same shape.
+#
+# The first value of each list is the default, which is what the shared
+# centre sits at.
+GRID:
+  PRETRAIN_LEARNING_RATE:
+    values: [0.002, 0.0006, 0.0002]
+    select_on: pretrain
+  PRETRAIN_LR_HALF_LIFE:
+    # null is a flat rate: resolve_decay_factor returns 1.0 for it.
+    values: [480, 160, 60, null]
+    select_on: pretrain
+
+ALIASES:
+  PRETRAIN_LEARNING_RATE: lr
+  PRETRAIN_LR_HALF_LIFE: hl

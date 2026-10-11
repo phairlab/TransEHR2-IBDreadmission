@@ -1,0 +1,379 @@
+spec_name: phase1
+spec_path: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1_spec.yaml
+base_config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1_base.yaml
+config_dir: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1
+dataset_config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/datasets/RMT23345.yaml
+model_dir: /uhome/pr3/projects/p60290_2/TransEHR2/models
+fold: fold0
+arms:
+- additive
+- rope
+design: factorial
+grid:
+  PRETRAIN_LEARNING_RATE:
+    values:
+    - 0.002
+    - 0.0006
+    - 0.0002
+    default: 0.002
+    select_on: pretrain
+  PRETRAIN_LR_HALF_LIFE:
+    values:
+    - 480
+    - 160
+    - 60
+    - null
+    default: 480
+    select_on: pretrain
+selection_criteria:
+  pretrain:
+    task: pretrain
+    evaluation_file: evaluation_pretrained.yaml
+    block: val_losses
+    metric: Optimization_Loss
+    direction: min
+    needs_finetune: false
+  readmission:
+    task: competing_risks
+    evaluation_file: evaluation_competing_risks.yaml
+    block: validation_scores
+    metric: Readmission_Integrated_Brier
+    direction: min
+    needs_finetune: true
+trials:
+- name: phase1_additive_lr_0p002_hl_480
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p002_hl_480.yaml
+  arm: additive
+  is_centre: true
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.002
+    PRETRAIN_LR_HALF_LIFE: 480
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p002_hl_160
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p002_hl_160.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.002
+    PRETRAIN_LR_HALF_LIFE: 160
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p002_hl_60
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p002_hl_60.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.002
+    PRETRAIN_LR_HALF_LIFE: 60
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p002_hl_none
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p002_hl_none.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.002
+    PRETRAIN_LR_HALF_LIFE: null
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p0006_hl_480
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p0006_hl_480.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0006
+    PRETRAIN_LR_HALF_LIFE: 480
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p0006_hl_160
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p0006_hl_160.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0006
+    PRETRAIN_LR_HALF_LIFE: 160
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p0006_hl_60
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p0006_hl_60.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0006
+    PRETRAIN_LR_HALF_LIFE: 60
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p0006_hl_none
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p0006_hl_none.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0006
+    PRETRAIN_LR_HALF_LIFE: null
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p0002_hl_480
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p0002_hl_480.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: 480
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p0002_hl_160
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p0002_hl_160.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: 160
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p0002_hl_60
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p0002_hl_60.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: 60
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_additive_lr_0p0002_hl_none
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_additive_lr_0p0002_hl_none.yaml
+  arm: additive
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: null
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p002_hl_480
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p002_hl_480.yaml
+  arm: rope
+  is_centre: true
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.002
+    PRETRAIN_LR_HALF_LIFE: 480
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p002_hl_160
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p002_hl_160.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.002
+    PRETRAIN_LR_HALF_LIFE: 160
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p002_hl_60
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p002_hl_60.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.002
+    PRETRAIN_LR_HALF_LIFE: 60
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p002_hl_none
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p002_hl_none.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.002
+    PRETRAIN_LR_HALF_LIFE: null
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p0006_hl_480
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p0006_hl_480.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0006
+    PRETRAIN_LR_HALF_LIFE: 480
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p0006_hl_160
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p0006_hl_160.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0006
+    PRETRAIN_LR_HALF_LIFE: 160
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p0006_hl_60
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p0006_hl_60.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0006
+    PRETRAIN_LR_HALF_LIFE: 60
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p0006_hl_none
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p0006_hl_none.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0006
+    PRETRAIN_LR_HALF_LIFE: null
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p0002_hl_480
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p0002_hl_480.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: 480
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p0002_hl_160
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p0002_hl_160.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: 160
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p0002_hl_60
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p0002_hl_60.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: 60
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''
+- name: phase1_rope_lr_0p0002_hl_none
+  config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1/phase1_rope_lr_0p0002_hl_none.yaml
+  arm: rope
+  is_centre: false
+  hyperparameter: null
+  value: null
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: null
+  covers: []
+  needs_finetune: false
+  is_extra: false
+  select_on: pretrain
+  description: ''

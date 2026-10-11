@@ -82,12 +82,23 @@ FINETUNE_LR_HALF_LIFE: 132
 # a patient who dies cannot be readmitted, so scoring the two separately
 # would describe a cohort that does not exist.
 
-# The right edges of the discrete time bins, in days. Six bins: 30, 60 and
-# 90 days, then 1, 3 and 5 years. The last cut is the horizon -- an event
-# beyond it is an episode observed through the whole grid without one.
-# See development/reports/event_time_distribution.html for where the events
-# actually fall.
-TIME_GRID_CUTS_DAYS: [30, 60, 90, 365, 1095, 1825]
+# The right edges of the discrete time bins, in days: the sextiles of
+# observed readmission time over the drawn episodes, from
+# ``scripts/time_grid_cuts.py --step 0.1666666666666667`` (25,655
+# readmissions, 4,276 or 4,275 in each bin by construction). Quantile cuts
+# rather than round numbers because a bin with no events in it contributes
+# a softmax slot and nothing else.
+#
+# The last cut is the largest observed readmission time, so it is the
+# horizon rather than a choice: an event at or beyond it is an episode
+# observed through the whole grid without one, which ``discretize()``
+# enforces by taking ``t < horizon`` strictly. BRIER_INTEGRATION_DAYS must
+# not exceed it.
+#
+# Note that no cut falls at one year. The integrated Brier score reaches
+# 365 days by interpolating inside the 178.67--435.09 bin, which the
+# monotone cubic fill below is there to make legitimate.
+TIME_GRID_CUTS_DAYS: [46.45, 178.67, 435.09, 898.92, 1736.54, 6454.83]
 
 # Which EVENT_TYPEs the model treats as competing causes, in output order.
 # Anything absent is censoring, so dropping "out_migration" here gives the

@@ -97,6 +97,19 @@ def test_an_empty_episode_is_skipped_entirely():
     assert measured['min_step_gap'] is None
 
 
+def test_an_empty_episode_among_real_ones_warns_nothing(recwarn):
+    """Half the cohort carries no event record, so this is the common case.
+
+    An all-NaN row is what such an episode becomes after masking, and
+    ``nanmin`` warns on one. The answer was right regardless, but a real
+    run printed a RuntimeWarning per chunk over an expected condition.
+    """
+    measured = spans_of(episode(30, 20), episode(), episode(9, 4, 1))
+    assert measured['n_episodes'] == 2
+    assert measured['max_span'] == pytest.approx(10.0)
+    assert not [w for w in recwarn if issubclass(w.category, RuntimeWarning)]
+
+
 def test_chunking_does_not_change_the_answer():
     """The arrays are memory-mapped and read in blocks."""
     rows = [episode(40, 20, 5), episode(9, 2), episode(100, 99)]

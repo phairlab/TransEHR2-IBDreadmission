@@ -98,12 +98,20 @@ def measure_spans(times, masks, chunk: int = 4096) -> dict:
         if not valid.any():
             continue
 
+        # Rows with no record at all are dropped before the reduction, not
+        # filtered after it. An all-NaN row is what an episode carrying no
+        # record in this stream looks like, and nanmin warns on one -- the
+        # answer would still be right, but the run would print a page of
+        # RuntimeWarnings over an expected case.
+        has_record = valid.any(axis=1)
+        if not has_record.any():
+            continue
+
         # By the mask, never by value: 0 is the index time, not padding.
-        masked = np.where(valid, block, np.nan)
-        with np.errstate(invalid='ignore'):
-            lo = np.nanmin(masked, axis=1)
-            hi = np.nanmax(masked, axis=1)
-        episode_spans = (hi - lo)[np.isfinite(hi - lo)]
+        masked = np.where(valid[has_record], block[has_record], np.nan)
+        lo = np.nanmin(masked, axis=1)
+        hi = np.nanmax(masked, axis=1)
+        episode_spans = hi - lo
         if episode_spans.size:
             spans.append(episode_spans)
             max_span = max(max_span, float(episode_spans.max()))

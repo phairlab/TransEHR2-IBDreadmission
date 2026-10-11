@@ -622,6 +622,27 @@ def _build_pretrain_losses(
     return gen_loss_fn, disc_loss_fn, thp_loss_fn
 
 
+def _timed_epochs(epochs, phase: str):
+    """Yield each epoch, printing its wall clock. For the performance-dx branch.
+
+    `PhaseTimer` cannot answer "how long will the real run take": it synchronizes
+    CUDA to attribute phases, so its step total is long by construction. This
+    measures nothing and changes nothing -- the generator resumes when the body
+    has finished and reads the clock -- which is why its number is the one that
+    extrapolates to an experiment's runtime.
+
+    Epoch 1 carries dataloader worker spawn and whatever was not already in page
+    cache, so the steady-state figure is epoch 2 onward. An epoch cut short by
+    early stopping does not print, because the generator is closed rather than
+    resumed.
+    """
+    for epoch in epochs:
+        started = time.perf_counter()
+        yield epoch
+        print(f"[epoch] {phase} {epoch + 1} in "
+              f"{time.perf_counter() - started:.1f} s", flush=True)
+
+
 def pretrain_model(
     model: torch.nn.Module,
     save_path: str,
@@ -726,7 +747,8 @@ def pretrain_model(
     best_val_loss = best_val_losses['Optimization_Loss']
     early_stopping_counter = metadata.get('early_stopping_counter', 0)
 
-    for epoch in tqdm(range(start_epoch, total_epoch)):
+    for epoch in _timed_epochs(tqdm(range(start_epoch, total_epoch)),
+                               'pretrain'):
         train_losses = pretrain_one_epoch(
             model=model, loader=train_loader, optimizer=optimizer,
             gen_loss_fn=gen_loss_fn, disc_loss_fn=disc_loss_fn,
@@ -1227,7 +1249,8 @@ def pretrain_with_hyperparameter(
     best_test_loss = best_test_losses['Optimization_Loss']
     early_stopping_counter = metadata.get('early_stopping_counter', 0)
 
-    for epoch in tqdm(range(start_epoch, total_epoch)):
+    for epoch in _timed_epochs(tqdm(range(start_epoch, total_epoch)),
+                               'finetune'):
         train_losses = pretrain_one_epoch(
             model=model, loader=train_loader, optimizer=optimizer,
             gen_loss_fn=gen_loss_fn, disc_loss_fn=disc_loss_fn,

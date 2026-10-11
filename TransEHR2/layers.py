@@ -8,6 +8,58 @@ from typing import Optional, Tuple
 from TransEHR2.constants import PAD
 
 
+def build_frequency_ladder(n_bands: int, p_min: float, p_max: float) -> Tensor:
+    r"""A ladder of band time-constants, spaced log-uniformly in period.
+
+    .. math::
+        P_m = P_{min} \left(\frac{P_{max}}{P_{min}}\right)^{(m-1)/(M-1)}, \quad
+        \lambda_m = \frac{P_m}{2\pi}, \quad m = 1 \ldots M
+
+    Args:
+        n_bands (int): The number of bands, M.
+        p_min (float): The shortest period, in the units of the timestamps --
+            days here, since ``MixedDataset._days`` divides by 1440 before
+            anything sees a timestamp.
+        p_max (float): The longest period, likewise.
+
+    Returns:
+        Tensor: A [n_bands] tensor of :math:`\lambda`, ascending.
+
+    Raises:
+        ValueError: If ``n_bands`` is not positive, ``p_min`` is not
+            positive, or ``p_max`` is not greater than ``p_min``.
+
+    Note:
+        The buffer holds :math:`\lambda` rather than the period because
+        every consumer computes ``t / lambda``. A band carries usable
+        information about a gap :math:`\Delta` only while its phase change
+        is neither frozen nor wrapped, :math:`0.1 \le \Delta / \lambda \le
+        \pi`, which in periods is :math:`2\Delta \le P \le 20\pi\Delta`.
+        Hence the bounds this is called with, which
+        ``scripts/measure_ladder_bounds.py`` reports from the extracted
+        timestamps: :math:`P_{min} = 2\Delta_{min}` and :math:`P_{max} =
+        20\pi\Delta_{max}`.
+
+        For contrast, the constant this replaces --
+        ``exp(m log(1e4) / d_model)`` -- is a :math:`\lambda` ladder running
+        1 to 9,330. Read as days that is a longest period of 160 years,
+        against episodes whose observed spans reach 18.
+    """
+    if n_bands < 1:
+        raise ValueError(f'n_bands must be positive, got {n_bands}.')
+    if p_min <= 0:
+        raise ValueError(f'p_min must be positive, got {p_min}.')
+    if p_max <= p_min:
+        raise ValueError(
+            f'p_max ({p_max}) must be greater than p_min ({p_min}).')
+
+    steps = torch.arange(n_bands, dtype=torch.float64)
+    # A one-band ladder has no range to span; it sits at p_min.
+    exponent = steps / (n_bands - 1) if n_bands > 1 else steps
+    periods = p_min * (p_max / p_min) ** exponent
+    return (periods / (2.0 * math.pi)).to(torch.float32)
+
+
 def build_key_padding_attention_mask(non_padding_mask: Tensor) -> Tensor:
     r"""Turn a per-timestep padding mask into a self-attention mask.
 
@@ -470,18 +522,54 @@ class TemporalPositionEncoding(torch.nn.Module):
         dropout (float): The dropout rate to apply to the output.
     """
 
-    def __init__(self, d_model: int, dropout: Optional[float] = None):
+    def __init__(
+        self,
+        d_model: int,
+        dropout: Optional[float] = None,
+        p_min: Optional[float] = None,
+        p_max: Optional[float] = None,
+        additive: bool = True
+    ):
         """Initialize an instance.
-        
+
         Args:
             d_model (int): The dimension of embedded vectors in the input sequence.
             dropout (float, optional): The dropout rate to apply to the output. Defaults to None.
+            p_min (float, optional): The shortest band period, in the units
+                of the timestamps. Must be given with ``p_max``. If both are
+                None the ladder is the inherited ``exp(m log(1e4)/d_model)``
+                progression. Defaults to None.
+            p_max (float, optional): The longest band period. Defaults to None.
+            additive (bool, optional): Whether to add the encoding to the
+                input. False keeps only the dropout and the padding mask,
+                which is what the rotary arm needs: the rotation happens
+                inside the attention, but the regularizer and the zeroing of
+                padded positions have to stay, or the two arms differ in
+                more than their encoding. Defaults to True.
+
+        Raises:
+            ValueError: If exactly one of ``p_min`` and ``p_max`` is given,
+                or if the pair is invalid.
         """
 
         super().__init__()
-        m = torch.arange(0, d_model, 2, dtype=torch.float32)
-        position_encoding = torch.exp((m * math.log(1.e4) / d_model))
-        self.register_buffer('position_encoding', position_encoding)  # Store as non-trainable tensor the state dict.
+        if (p_min is None) != (p_max is None):
+            raise ValueError(
+                'p_min and p_max must be given together, or neither.')
+
+        self.additive = additive
+        if p_min is None:
+            m = torch.arange(0, d_model, 2, dtype=torch.float32)
+            position_encoding = torch.exp((m * math.log(1.e4) / d_model))
+        else:
+            position_encoding = build_frequency_ladder(d_model // 2,
+                                                       p_min, p_max)
+        # Non-persistent: re-spanning the ladder changes its values but not
+        # its shape, so a persistent buffer would let a checkpoint written
+        # before the change silently overwrite the new ladder with the old
+        # one -- no error, and the arm running is not the arm intended.
+        self.register_buffer('position_encoding', position_encoding,
+                             persistent=False)
         self.dropout = torch.nn.Dropout(dropout) if dropout is not None else None
 
 
@@ -501,13 +589,170 @@ class TemporalPositionEncoding(torch.nn.Module):
             times = times.unsqueeze(-1)
         if non_padding_mask.dim() == 2:
             non_padding_mask = non_padding_mask.unsqueeze(-1)
-        pos_enc = torch.zeros_like(x)
-        scaled_times = torch.div(times, self.position_encoding)
-        pos_enc[:, :, 0::2] = torch.sin(scaled_times)
-        pos_enc[:, :, 1::2] = torch.cos(scaled_times)
-        output = x + pos_enc
+        if self.additive:
+            pos_enc = torch.zeros_like(x)
+            scaled_times = torch.div(times, self.position_encoding)
+            pos_enc[:, :, 0::2] = torch.sin(scaled_times)
+            pos_enc[:, :, 1::2] = torch.cos(scaled_times)
+            output = x + pos_enc
+        else:
+            output = x
         output = self.dropout(output) * non_padding_mask if self.dropout is not None else output * non_padding_mask
         return output
+
+
+class RotaryTemporalEncoding(torch.nn.Module):
+    r"""Continuous-position RoPE: rotate q and k by the record timestamp.
+
+    Standard RoPE rotates by integer token index. This rotates by the
+    timestamp itself, so the attention score between two records is a
+    function of the elapsed time between them rather than of how many
+    records separate them -- which is what an irregularly sampled series
+    needs. It is a departure from the published method and is worth naming
+    as one.
+
+    Install it as a ``query_key_transform`` on ``MultiHeadAttention``,
+    whose contract it implements.
+
+    Attributes:
+        n_head (int): The number of attention heads.
+        d_head (int): The per-head width of q and k. Must be even; each band
+            occupies one channel pair.
+        bands_per_head (int): ``d_head // 2``.
+        lambdas (Tensor): A [n_head, bands_per_head] non-persistent buffer
+            of band time-constants.
+
+    Note:
+        **Bands are partitioned across heads, not repeated.** A rotation
+        acts on two-dimensional blocks of the *per-head* q and k, so one
+        head holds only ``d_head / 2`` bands where the additive encoding
+        holds ``d_model / 2``. Giving every head the same ladder would
+        leave the rotary arm with a spectral deficit against the additive
+        arm on the same gap range, and an additive win could then be read
+        as a win for twice the bands rather than for the mechanism.
+        Instead one ladder of ``n_head * d_head / 2`` bands is cut into
+        contiguous per-head slices, head 0 taking the fastest. Each head
+        resolves part of the timescale range rather than all of it --
+        specialization rather than a defect, and the same idea as ALiBi's
+        per-head slopes, but it needs a sentence in Methods.
+
+        Parity with the additive arm therefore needs ``n_head * d_head ==
+        d_model``. The value encoder gets that for free, since ``d_head``
+        is derived as ``d_model // n_heads``. The event encoder does not:
+        it takes ``d_k`` as its own config value, and ``THP_ENCODER_D_K``
+        is 128 rather than 64 for exactly this reason. ``d_v`` stays 64 --
+        only q and k are rotated, so only their width sets the band count,
+        and an asymmetric ``d_k``/``d_v`` is fine because the softmax
+        temperature is ``d_k ** 0.5`` either way. Lowering ``d_k`` reopens
+        the deficit silently, so check ``band_count`` against ``d_model / 2``
+        rather than assuming it.
+    """
+
+    def __init__(self, n_head: int, d_head: int, p_min: float, p_max: float):
+        r"""Initialize an instance.
+
+        Args:
+            n_head (int): The number of attention heads.
+            d_head (int): The per-head width of the query and key vectors.
+            p_min (float): The shortest band period, in timestamp units.
+            p_max (float): The longest band period.
+
+        Raises:
+            ValueError: If ``d_head`` is odd, or the ladder bounds are invalid.
+        """
+        super().__init__()
+        if d_head % 2 != 0:
+            raise ValueError(
+                f'd_head must be even so that each band owns a channel '
+                f'pair, got {d_head}.'
+            )
+        self.n_head = n_head
+        self.d_head = d_head
+        self.bands_per_head = d_head // 2
+        ladder = build_frequency_ladder(n_head * self.bands_per_head,
+                                        p_min, p_max)
+        # Non-persistent for the same reason as TemporalPositionEncoding's
+        # ladder: re-spanning changes the values but not the shape, so a
+        # stale checkpoint would overwrite it in silence.
+        self.register_buffer('lambdas',
+                             ladder.view(n_head, self.bands_per_head),
+                             persistent=False)
+
+    @property
+    def band_count(self) -> int:
+        """Distinct frequencies in the ladder, for comparison against the
+        additive arm."""
+        return self.n_head * self.bands_per_head
+
+    def forward(self, q: Tensor, k: Tensor,
+                positions: Optional[Tensor]) -> Tuple[Tensor, Tensor]:
+        r"""Rotate the query and key tensors by their record timestamps.
+
+        Args:
+            q (Tensor): Queries, [batch_size, n_head, seq_len, d_head].
+            k (Tensor): Keys, [batch_size, n_head, seq_len, d_head].
+            positions (Tensor): Record timestamps, [batch_size, seq_len].
+
+        Returns:
+            Tuple[Tensor, Tensor]: The rotated q and k, same shapes.
+
+        Raises:
+            ValueError: If ``positions`` is None or does not match the
+                sequence length of ``q`` and ``k``.
+        """
+        if positions is None:
+            raise ValueError(
+                'RotaryTemporalEncoding needs the record timestamps; the '
+                'encoder must pass positions through to the attention layer.'
+            )
+        if q.size(2) != positions.size(1) or k.size(2) != positions.size(1):
+            raise ValueError(
+                f'positions has sequence length {positions.size(1)}, but q '
+                f'and k have {q.size(2)} and {k.size(2)}.'
+            )
+
+        cos, sin = self._sinusoids(positions, q.dtype)
+        return self._rotate(q, cos, sin), self._rotate(k, cos, sin)
+
+    def _sinusoids(self, positions: Tensor,
+                   dtype: torch.dtype) -> Tuple[Tensor, Tensor]:
+        r"""Cosine and sine of ``t / lambda``.
+
+        Shape [batch_size, n_head, seq_len, bands_per_head].
+
+        Note:
+            The angle is reduced modulo the period in float64 before the
+            cosine and sine are taken. Against the fastest band of this
+            ladder ``t / lambda`` reaches order 1e7 radians at the far end
+            of an eighteen-year span, where float32 resolves a phase barely
+            at all; reduced into [0, 2*pi) it is exact to 1e-7 instead.
+            ``torch.remainder`` follows the sign of the divisor, which is
+            what makes these timestamps work: they are non-positive, zero
+            at the index time and negative before it.
+        """
+        lambdas = self.lambdas.to(torch.float64)
+        periods = lambdas * (2.0 * math.pi)
+        times = positions.to(torch.float64)[:, None, :, None]
+        angle = torch.remainder(times, periods[None, :, None, :])
+        angle = angle / lambdas[None, :, None, :]
+        angle = angle.to(dtype)
+        return torch.cos(angle), torch.sin(angle)
+
+    @staticmethod
+    def _rotate(x: Tensor, cos: Tensor, sin: Tensor) -> Tensor:
+        r"""Turn each adjacent channel pair of ``x`` through the given angle.
+
+        Note:
+            Pairs are adjacent channels, (0, 1), (2, 3), ..., which matches
+            the interleaving ``TemporalPositionEncoding`` already uses for
+            its sine and cosine channels. The half-split convention some
+            implementations use would be equally valid but would not line
+            the two arms' ladders up channel for channel.
+        """
+        even, odd = x[..., 0::2], x[..., 1::2]
+        rotated = torch.stack(
+            [even * cos - odd * sin, even * sin + odd * cos], dim=-1)
+        return rotated.flatten(start_dim=-2)
 
 
 class TransformerBatchNormEncoderLayer(torch.nn.Module):

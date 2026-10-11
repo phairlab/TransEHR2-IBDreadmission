@@ -40,6 +40,30 @@ THP_ENCODER_D_V: 64
 THP_ENCODER_DROPOUT: 0.1
 THP_ENCODER_NORM_FIRST: True
 
+# ---- Temporal encoding arm --------------------------------------------------
+#
+# 'additive' adds TemporalPositionEncoding to the embedding, as submitted.
+# 'rope' rotates the same ladder into q and k instead, so the attention score
+# between two records depends on the gap between them rather than on how many
+# records separate them. Both arms span one ladder, which is what lets them
+# share a hyperparameter grid.
+POSITION_ENCODING: 'additive'
+
+# The ladder's bounds, in DAYS -- not hours. Timestamps are stored as int32
+# minutes and divided by 1440 at __getitem__, so the MIMIC fork's constants
+# would be out by a factor of 24.
+#
+# Measured by scripts/measure_ladder_bounds.py over the extracted arrays:
+# P_MIN = 2 x shortest observed gap, P_MAX = 20*pi x longest observed span.
+# The value stream spans 18.0 y at most (median 7.8 y) with a 1-minute
+# resolution floor; the event stream 16.6 y, and only half the episodes carry
+# an ADMIT_DAD record at all. Re-measure after any re-extraction: a bound
+# carried over from a different draw is wrong in silence.
+VALUE_LADDER_P_MIN: 0.00138889
+VALUE_LADDER_P_MAX: 412357.0
+EVENT_LADDER_P_MIN: 0.0680556
+EVENT_LADDER_P_MAX: 379993.0
+
 GENERATOR_D_MODEL: 256
 GENERATOR_DIM_FEEDFORWARD: 256
 

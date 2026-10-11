@@ -247,6 +247,12 @@ def main():
     THP_ENCODER_DROPOUT = experiment_config['THP_ENCODER_DROPOUT']
     THP_ENCODER_NORM_FIRST = experiment_config.get('THP_ENCODER_NORM_FIRST', True)
     PREDICTOR_AGGREGATION_METHOD = experiment_config['PREDICTOR_AGGREGATION_METHOD']
+    POSITION_ENCODING = experiment_config.get('POSITION_ENCODING', 'additive')
+    VALUE_LADDER_P_MIN = experiment_config.get('VALUE_LADDER_P_MIN')
+    VALUE_LADDER_P_MAX = experiment_config.get('VALUE_LADDER_P_MAX')
+    EVENT_LADDER_P_MIN = experiment_config.get('EVENT_LADDER_P_MIN')
+    EVENT_LADDER_P_MAX = experiment_config.get('EVENT_LADDER_P_MAX')
+
     DEEPHIT_HEAD_D_SHARED = experiment_config.get('DEEPHIT_HEAD_D_SHARED', [256, 128])
     DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', [128, 64])
     DEEPHIT_HEAD_DROPOUT = experiment_config.get('DEEPHIT_HEAD_DROPOUT', 0.1)
@@ -285,7 +291,10 @@ def main():
                 d_inner=THP_ENCODER_D_INNER, n_layers=THP_ENCODER_N_LAYERS,
                 n_head=THP_ENCODER_N_HEADS, d_k=THP_ENCODER_D_K,
                 d_v=THP_ENCODER_D_V, dropout=THP_ENCODER_DROPOUT,
-                normalize_before=THP_ENCODER_NORM_FIRST),
+                normalize_before=THP_ENCODER_NORM_FIRST,
+                position_encoding=POSITION_ENCODING,
+                ladder_p_min=EVENT_LADDER_P_MIN,
+                ladder_p_max=EVENT_LADDER_P_MAX),
             val_encoder=ValueDataEncoder(
                 n_features=n_val_feats, feat_dim=tot_val_feat_dim,
                 d_model=DISCRIMINATOR_ENCODER_D_MODEL,
@@ -295,7 +304,10 @@ def main():
                 dropout=DISCRIMINATOR_ENCODER_DROPOUT,
                 activation=DISCRIMINATOR_ENCODER_ACTIVATION,
                 norm=DISCRIMINATOR_ENCODER_NORM,
-                normalize_before=DISCRIMINATOR_ENCODER_NORM_FIRST),
+                normalize_before=DISCRIMINATOR_ENCODER_NORM_FIRST,
+                position_encoding=POSITION_ENCODING,
+                ladder_p_min=VALUE_LADDER_P_MIN,
+                ladder_p_max=VALUE_LADDER_P_MAX),
             d_event_enc=THP_ENCODER_D_MODEL,
             d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
             d_statics=static_dim,

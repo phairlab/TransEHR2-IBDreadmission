@@ -245,6 +245,15 @@ def main():
     DEEPHIT_RANK_WEIGHT = experiment_config.get('DEEPHIT_RANK_WEIGHT', 1.0)
     DEEPHIT_SIGMA = experiment_config.get('DEEPHIT_SIGMA', 0.1)
     DEEPHIT_CAUSE_WEIGHTS = experiment_config.get('DEEPHIT_CAUSE_WEIGHTS', None)
+    # The temporal encoding arm, and the ladder both arms span. The bounds
+    # come from scripts/measure_ladder_bounds.py over the extracted
+    # timestamps; 'rope' refuses to run without them.
+    POSITION_ENCODING = experiment_config.get('POSITION_ENCODING', 'additive')
+    VALUE_LADDER_P_MIN = experiment_config.get('VALUE_LADDER_P_MIN')
+    VALUE_LADDER_P_MAX = experiment_config.get('VALUE_LADDER_P_MAX')
+    EVENT_LADDER_P_MIN = experiment_config.get('EVENT_LADDER_P_MIN')
+    EVENT_LADDER_P_MAX = experiment_config.get('EVENT_LADDER_P_MAX')
+
     DEEPHIT_HEAD_D_SHARED = experiment_config.get('DEEPHIT_HEAD_D_SHARED', [256, 128])
     DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', [128, 64])
     DEEPHIT_HEAD_DROPOUT = experiment_config.get('DEEPHIT_HEAD_DROPOUT', 0.1)
@@ -326,7 +335,10 @@ def main():
             n_features=n_val_feats, feat_dim=tot_val_feat_dim, d_model=d_model,
             n_heads=n_heads, n_encoder_blocks=n_blocks, dim_feedforward=dim_ff,
             dropout=dropout, activation=activation, norm=norm,
-            normalize_before=norm_first)
+            normalize_before=norm_first,
+            position_encoding=POSITION_ENCODING,
+            ladder_p_min=VALUE_LADDER_P_MIN,
+            ladder_p_max=VALUE_LADDER_P_MAX)
 
     def build_event_encoder():
         return EventDataEncoder(
@@ -334,7 +346,10 @@ def main():
             d_inner=THP_ENCODER_D_INNER, n_layers=THP_ENCODER_N_LAYERS,
             n_head=THP_ENCODER_N_HEADS, d_k=THP_ENCODER_D_K,
             d_v=THP_ENCODER_D_V, dropout=THP_ENCODER_DROPOUT,
-            normalize_before=THP_ENCODER_NORM_FIRST)
+            normalize_before=THP_ENCODER_NORM_FIRST,
+            position_encoding=POSITION_ENCODING,
+            ladder_p_min=EVENT_LADDER_P_MIN,
+            ladder_p_max=EVENT_LADDER_P_MAX)
 
     def build_predictor():
         """A fresh competing-risks model with untrained encoders."""

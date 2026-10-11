@@ -1064,7 +1064,7 @@ def finetune_model(
                                -np.inf if higher_is_better else np.inf)
     early_stopping_counter = metadata.get('early_stopping_counter', 0)
 
-    for epoch in range(start_epoch, total_epoch):
+    for epoch in _timed_epochs(range(start_epoch, total_epoch), 'finetune'):
         model.train()
         logits, times, types, losses = [], [], [], []
 
@@ -1250,7 +1250,7 @@ def pretrain_with_hyperparameter(
     early_stopping_counter = metadata.get('early_stopping_counter', 0)
 
     for epoch in _timed_epochs(tqdm(range(start_epoch, total_epoch)),
-                               'finetune'):
+                               'pretrain-hp'):
         train_losses = pretrain_one_epoch(
             model=model, loader=train_loader, optimizer=optimizer,
             gen_loss_fn=gen_loss_fn, disc_loss_fn=disc_loss_fn,

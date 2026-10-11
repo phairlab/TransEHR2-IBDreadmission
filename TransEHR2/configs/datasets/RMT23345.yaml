@@ -186,7 +186,7 @@ STATIC_FEATS: []
 # Data preprocessing parameters
 # Timesteps per episode: the most recent MAX_EPISODE_LEN_STEPS records at
 # or before INDEX_TIME. This is the T in every extracted array's shape.
-MAX_EPISODE_LEN_STEPS: 500
+MAX_EPISODE_LEN_STEPS: 300
 
 # Minimum episode length in timesteps. There is no real minimum: every
 # INDEX_TIME is guaranteed upstream to name a timeseries.csv row, so this

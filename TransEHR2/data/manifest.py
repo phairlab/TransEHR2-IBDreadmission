@@ -46,11 +46,21 @@ MANIFEST_PATH = os.path.join(PROJECT_ROOT, 'manifest.csv')
 
 
 def data_root() -> str:
-    """``SHARED_DATA_ROOT``, else ``<project root>/../data``."""
+    """``SHARED_DATA_ROOT``, else ``<project root>/../data``.
+
+    Symlinks resolved, because the cluster offers the same tree under two
+    spellings -- ``/uhome/pr3/projects/p60290_2/...`` and
+    ``/projects/p60290_2/...`` -- and ``manifest_key`` compares this
+    against a path built from the dataset config. Left unresolved the two
+    look like different trees, every table reads as "outside DATA_ROOT",
+    and the checksums are skipped rather than failed: a stale
+    ``text_embeddings.npy`` is the right shape with the wrong contents,
+    and this is the check that would catch it.
+    """
     shared = os.environ.get('SHARED_DATA_ROOT')
     if shared:
-        return os.path.abspath(shared)
-    return os.path.abspath(os.path.join(PROJECT_ROOT, os.pardir, 'data'))
+        return os.path.realpath(shared)
+    return os.path.realpath(os.path.join(PROJECT_ROOT, os.pardir, 'data'))
 
 
 def manifest_key(path: str) -> Optional[str]:
@@ -60,7 +70,8 @@ def manifest_key(path: str) -> Optional[str]:
     slashes, which is what ``setup_data.sh`` writes and reads.
     """
     root = data_root()
-    absolute = os.path.abspath(path)
+    # realpath, to match data_root: see there for why.
+    absolute = os.path.realpath(path)
     if os.path.commonpath([root, absolute]) != root:
         return None
     return os.path.relpath(absolute, root).replace(os.sep, '/')

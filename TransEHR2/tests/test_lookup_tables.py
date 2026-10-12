@@ -391,6 +391,35 @@ def test_a_table_outside_data_root_is_reported_not_refused(
     assert 'not checksum-verified' in capsys.readouterr().out
 
 
+
+
+def test_a_symlinked_spelling_of_data_root_still_verifies(tmp_path,
+                                                          monkeypatch):
+    """The cluster offers one tree under two names.
+
+    ``/uhome/pr3/projects/p60290_2/...`` and ``/projects/p60290_2/...`` are
+    the same directory, and the dataset config uses the first while
+    ``data_root`` derives the second. Compared without resolving symlinks
+    they look like different trees, so every table read as "outside
+    DATA_ROOT" and its checksum was skipped -- not failed, skipped, which
+    is the quiet direction.
+    """
+    real = tmp_path / 'real'
+    (real / 'lookup_tables').mkdir(parents=True)
+    table = real / 'lookup_tables' / 'text_embeddings.npy'
+    table.write_bytes(b'contents')
+    link = tmp_path / 'link'
+    link.symlink_to(real)
+
+    monkeypatch.setenv('SHARED_DATA_ROOT', str(real))
+    through_link = link / 'lookup_tables' / 'text_embeddings.npy'
+    assert manifest.manifest_key(str(through_link)) == 'lookup_tables/text_embeddings.npy'
+
+    # And a file genuinely outside is still refused.
+    outside = tmp_path / 'elsewhere.npy'
+    outside.write_bytes(b'x')
+    assert manifest.manifest_key(str(outside)) is None
+
 def test_the_loader_verifies_the_checksum_at_use(
     one_patient, tmp_path_factory, monkeypatch
 ):

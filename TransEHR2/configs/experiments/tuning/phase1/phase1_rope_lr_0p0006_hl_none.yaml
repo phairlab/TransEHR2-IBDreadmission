@@ -50,7 +50,7 @@ MODELLED_CAUSES:
 - readmission
 - death
 - out_migration
-MODEL_DIR: /uhome/pr3/projects/p60290_2/TransEHR2/models
+MODEL_DIR: /uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/models
 OBS_UNOBS_SAMPLE_RATIO: 10.0
 POSITION_ENCODING: rope
 PREDICTOR_AGGREGATION_METHOD: mean

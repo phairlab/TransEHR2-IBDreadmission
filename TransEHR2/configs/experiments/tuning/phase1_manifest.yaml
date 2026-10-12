@@ -3,7 +3,7 @@ spec_path: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/conf
 base_config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1_base.yaml
 config_dir: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1
 dataset_config: /Users/pr3/Projects/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/datasets/RMT23345.yaml
-model_dir: /uhome/pr3/projects/p60290_2/TransEHR2/models
+model_dir: /uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/models
 fold: fold0
 arms:
 - additive

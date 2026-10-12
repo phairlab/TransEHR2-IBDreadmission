@@ -512,7 +512,7 @@ def test_standardize_saves_statistics_without_scaling_the_values(
         'val_numeric_values': [values.copy()],
     }
     path = tmp_path / 'summary_statistics_fold0.npz'
-    standardize_feats(arrays, dims, np.array([0, 1]), str(path))
+    standardize_feats(arrays, dims.n_numeric_feats, np.array([0, 1]), str(path))
 
     assert (arrays['val_numeric_values'][0] == values).all(), "untouched"
     stats = np.load(path)

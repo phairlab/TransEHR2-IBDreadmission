@@ -298,6 +298,16 @@ class MixedDataset(Dataset):
                               - np.asarray(numeric_stats['p5'], np.float32))
             self._degenerate = self._span == 0
 
+        # Bounds on the stored values, in original units, measured by
+        # ``calibrate_outlier_filter.py`` and carried in the same file as the
+        # statistics above so that the two cannot be applied separately.
+        # Absent from statistics written before a table existed, which is the
+        # same thing as a table that cuts nothing.
+        self._cut_low = self._cut_high = None
+        if numeric_stats is not None and 'cut_low' in numeric_stats:
+            self._cut_low = np.asarray(numeric_stats['cut_low'], np.float32)
+            self._cut_high = np.asarray(numeric_stats['cut_high'], np.float32)
+
     def __len__(self) -> int:
         return self.n_episodes
 
@@ -307,15 +317,42 @@ class MixedDataset(Dataset):
             np.asarray(minutes, dtype=np.float32) / MINUTES_PER_DAY
         )
 
-    def _numeric_values(self, f: int, idx: int) -> torch.Tensor:
-        """One numeric feature's row, scaled by the fold's statistics.
+    def _numeric_values(
+        self, f: int, idx: int, observed: np.ndarray
+    ) -> torch.Tensor:
+        """One numeric feature's row, clipped to its cuts and scaled.
 
-        Subtract the mean and divide by the scale, in that order and over
-        the whole row. A zero scale means the feature is constant wherever
-        it is observed, so it carries nothing beyond its own occurrence and
-        the indicator already says that; the row is zeroed there.
+        Clip first, then subtract the mean and divide by the scale, in that
+        order and over the whole row. A zero scale means the feature is
+        constant wherever it is observed, so it carries nothing beyond its
+        own occurrence and the indicator already says that; the row is
+        zeroed there.
+
+        **The clip applies only where the feature was observed.** An
+        unobserved position is stored as 0, which for a test whose low cut
+        sits above zero -- any strictly positive assay -- a blind clip would
+        raise to that cut and turn into a fabricated reading. ``observed`` is
+        the indicator column the item has already read, passed in rather than
+        fetched again: this runs once per feature per episode.
+
+        The value is clipped rather than dropped. The indicator stays 1,
+        because the test was ordered and that is worth knowing even when the
+        number it returned is not; this is the same "observed, out of domain"
+        state a categorical feature reaches with an all-zero one-hot.
+
+        Args:
+            f: Feature index.
+            idx: Episode row.
+            observed: ``(T,)`` indicator column for this feature, 1 where a
+                record exists.
         """
         values = np.array(self.val_numeric_values[f][idx], dtype=np.float32)
+        if self._cut_low is not None:
+            values = np.where(
+                observed[:, None] == 1.0,
+                np.clip(values, self._cut_low[f], self._cut_high[f]),
+                values
+            )
         if self._span is None:
             return torch.from_numpy(values)
         if self._degenerate[f]:
@@ -394,11 +431,12 @@ class MixedDataset(Dataset):
             np.array(self.val_masks[idx], dtype=np.float32)
         )
 
-        item['val_numeric_indicators'] = torch.from_numpy(
-            np.array(self.val_numeric_indicators[idx], dtype=np.float32)
+        numeric_indicators = np.array(
+            self.val_numeric_indicators[idx], dtype=np.float32
         )
+        item['val_numeric_indicators'] = torch.from_numpy(numeric_indicators)
         item['val_numeric_values'] = [
-            self._numeric_values(f, idx)
+            self._numeric_values(f, idx, numeric_indicators[:, f])
             for f in range(len(self.val_numeric_values))
         ]
 

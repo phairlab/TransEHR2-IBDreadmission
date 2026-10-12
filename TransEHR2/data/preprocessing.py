@@ -2149,11 +2149,61 @@ def feature_scale(norms: np.ndarray) -> float:
     return span if span > 0.0 else 0.0
 
 
+def read_numeric_cuts(
+    path: str, names: List[str]
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Read the cut table ``calibrate_outlier_filter.py --emit_cuts`` writes.
+
+    ``FEATURE,LOW,HIGH`` in **original units**, one row per feature the rule
+    acts on. A feature the table does not mention is left alone, so an empty
+    table and no table mean the same thing -- which is why the bounds default
+    to infinite rather than to the feature's observed range.
+
+    Args:
+        path: The emitted cut table.
+        names: ``metadata['numeric_feats']``, in extraction order. The
+            returned arrays are aligned with it.
+
+    Returns:
+        ``(low, high)``, each ``(len(names),)`` float32.
+
+    Raises:
+        ValueError: If the table names a feature this extraction does not
+            have. That means the table was measured against different arrays,
+            and applying the rest of it would cut the wrong features silently.
+    """
+    low = np.full(len(names), -np.inf, dtype=np.float32)
+    high = np.full(len(names), np.inf, dtype=np.float32)
+    index = {name: f for f, name in enumerate(names)}
+
+    unknown = []
+    with open(path) as f_in:
+        for line in f_in:
+            line = line.strip()
+            if not line or line.startswith('#') or line.startswith('FEATURE,'):
+                continue
+            name, low_text, high_text = line.split(',')
+            if name not in index:
+                unknown.append(name)
+                continue
+            low[index[name]] = float(low_text)
+            high[index[name]] = float(high_text)
+
+    if unknown:
+        raise ValueError(
+            f"{path} cuts {len(unknown)} feature(s) this extraction does not "
+            f"have ({', '.join(unknown[:5])}). Regenerate it against "
+            f"these arrays rather than applying part of it."
+        )
+    return low, high
+
+
 def standardize_feats(
     arrays: Dict[str, Union[np.ndarray, List[np.ndarray]]],
-    dims: TensorDimensions,
+    n_feats: int,
     rows: np.ndarray,
-    save_path: str
+    save_path: str,
+    cuts: Optional[Tuple[np.ndarray, np.ndarray]] = None
 ) -> None:
     """Compute and save one fold's numeric standardization statistics.
 
@@ -2166,21 +2216,34 @@ def standardize_feats(
     the given rows only, which must be that fold's *training* rows --
     computing them over the whole cohort would leak val and test.
 
+    **Cuts are applied before anything is measured.** ``means`` is the one
+    statistic here that is not robust -- ``feature_scale`` reads percentiles,
+    which a sentinel cannot move, but a single impossible laboratory value
+    drags the mean that every value is then centred on. Statistics measured
+    over uncut values would therefore mis-centre a feature the loader goes on
+    to cut, so the two must see the same values.
+
     Args:
         arrays: The pre-allocated output arrays.
-        dims: Tensor dimensions, for ``n_numeric_feats``.
+        n_feats: Number of numeric features.
         rows: int64 row indices of the fold's training episodes.
         save_path: ``summary_statistics_fold{i}.npz`` to write. It carries
             ``scale`` beside the percentiles: the 5th-to-95th range is
             degenerate for a feature reported at a detection limit, and
             ``feature_scale`` widens it rather than leaving the caller to
-            zero the feature.
+            zero the feature. When ``cuts`` is given it also carries
+            ``cut_low`` and ``cut_high``, so that the statistics and the
+            bounds they were measured under travel as one artifact and the
+            loader cannot apply one without the other.
+        cuts: ``(low, high)`` per feature in original units, from
+            ``read_numeric_cuts``, or None to measure the values as stored.
+            None is the extraction-time case: the table is calibrated from
+            the finished arrays, so it does not exist yet on that pass.
 
     Returns:
         None. Nothing in ``arrays`` is modified.
     """
 
-    n_feats = dims.n_numeric_feats
     means = np.zeros(n_feats, dtype=np.float32)
     p5 = np.zeros(n_feats, dtype=np.float32)
     p95 = np.zeros(n_feats, dtype=np.float32)
@@ -2197,6 +2260,10 @@ def standardize_feats(
 
         if mask.any():
             observed = values[mask]
+            if cuts is not None:
+                # Out of place: ``arrays`` is the extractor's own output and
+                # the cohort's, while these statistics are one fold's.
+                observed = np.clip(observed, cuts[0][f], cuts[1][f])
             means[f] = observed.mean()
             norms = np.linalg.norm(observed, ord=2, axis=-1)
             p5[f] = np.percentile(norms, 5)
@@ -2206,7 +2273,10 @@ def standardize_feats(
     # ``p5`` and ``p95`` are kept beside ``scale`` because they are what the
     # outlier calibration reports against, and because a reader comparing two
     # folds wants the percentiles, not only the divisor they usually imply.
-    np.savez(save_path, means=means, p5=p5, p95=p95, scale=scale)
+    saved = {'means': means, 'p5': p5, 'p95': p95, 'scale': scale}
+    if cuts is not None:
+        saved['cut_low'], saved['cut_high'] = cuts
+    np.savez(save_path, **saved)
 
 
 def get_text_counts_from_dataset_vectorized(dataset) -> np.ndarray:
@@ -2430,7 +2500,8 @@ def extract_data(
         stats_path = os.path.join(
             output_path, f'summary_statistics_{fold_name}.npz'
         )
-        standardize_feats(arrays, dims, np.asarray(rows), stats_path)
+        standardize_feats(arrays, dims.n_numeric_feats,
+                          np.asarray(rows), stats_path)
         print(f"Wrote {stats_path}")
 
     _report_extraction(

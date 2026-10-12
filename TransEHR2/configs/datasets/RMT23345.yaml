@@ -195,3 +195,23 @@ MAX_EPISODE_LEN_STEPS: 300
 # output.
 MIN_EPISODE_LEN_STEPS: 1
 
+
+# Outlier filter for the numeric (LAB) features. calibrate_outlier_filter.py
+# measures all three rules and emits a cut table under the one named here;
+# apply_numeric_cuts.py then re-measures each fold's standardization
+# statistics with the cuts applied, and the loader clips to them. The values
+# on disk are never changed, so re-tuning this costs one pass over
+# extracted/ rather than a re-extraction.
+#
+# 'standardized' is the rule that answers the training question rather than
+# the clinical one: a value is cut by how large it becomes once standardized,
+# which is the quantity the generator's squared error sees. The other two
+# ('tail_gap', 'robust') ask whether a value is clinically possible.
+#
+# NUMERIC_CUT_U is that rule's threshold, in spans of the scale the loader
+# divides by, measured from the feature's median. At 20 a clipped value
+# contributes about 400 to a squared-error sum where a typical value
+# contributes about 1 -- against the 1e10 an uncut laboratory sentinel
+# contributed before any of this existed.
+NUMERIC_CUT_RULE: standardized
+NUMERIC_CUT_U: 20.0

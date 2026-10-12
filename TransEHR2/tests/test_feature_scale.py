@@ -81,10 +81,6 @@ def test_the_widening_order_favours_typical_values():
 # Through standardize_feats, which is what decides whether the values survive
 # ------------------------------------------------------------------------------------------
 
-class _Dims:
-    n_numeric_feats = 3
-
-
 def _arrays():
     """Three features: a two-level assessment, a result at a limit with a tail, a constant."""
     n_episodes, n_steps = 200, 5
@@ -115,7 +111,7 @@ def _scaled(arrays, stats_path, rows=None):
     n_episodes = arrays['val_numeric_indicators'].shape[0]
     if rows is None:
         rows = np.arange(n_episodes)
-    standardize_feats(arrays, _Dims(), rows, stats_path)
+    standardize_feats(arrays, 3, rows, stats_path)
 
     stats = dict(np.load(stats_path))
     means = stats['means']

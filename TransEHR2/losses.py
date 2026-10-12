@@ -659,13 +659,32 @@ class MaskedDiscriminatorLoss(torch.nn.Module):
         self.bce_loss = torch.nn.BCEWithLogitsLoss(reduction='none')
     
     def forward(
-        self, 
-        predictions: Dict[str, Tensor], 
-        record_masks: Dict[str, Dict[str, Union[Tensor, List[Tensor]]]]
+        self,
+        predictions: Dict[str, Tensor],
+        record_masks: Dict[str, Dict[str, Union[Tensor, List[Tensor]]]],
+        padding_mask: Tensor
     ) -> Tensor:
         """
         Compute discriminator loss for distinguishing real vs generated features.
-        
+
+        Every position of a real timestep is scored, masked or not. That is ELECTRA's
+        design and the source of its sample efficiency: the discriminator judges the whole
+        sequence, where the generator only reconstructs the positions it was given.
+
+        **Padded timesteps are not scored.** An episode shorter than the batch's longest is
+        padded out to it, and those positions hold nothing -- no record was masked there, so
+        the label is 0, and a model that learns to answer 0 wherever the sequence has ended
+        is answering a question about the collation rather than the data. Counting them
+        divides the loss by a denominator set by the longest episode in the batch, which is
+        why this once reported a discriminator term one to two orders of magnitude below the
+        generator's. They are dropped from the sum as well as the count: leaving them in the
+        numerator while taking them out of the denominator would inflate the loss instead of
+        correcting it.
+
+        The two terms still carry different denominators -- the generator normalizes per
+        masked component, this per scored position -- so they remain incommensurable by
+        design, and ``DISC_LOSS_WEIGHT`` is what relates them.
+
         Args:
             predictions (Dict[str, Tensor]): Output from MaskedTokenDiscriminator with predictions for each feature type.
                 Expected structure:
@@ -677,13 +696,21 @@ class MaskedDiscriminatorLoss(torch.nn.Module):
             record_masks (Dict): Dictionary of masks indicating which values were masked during generation.
                 A value of 1 indicates a record was masked (and should be predicted as generated),
                 0 indicates it was not masked (and should be predicted as real).
-                
+            padding_mask (Tensor): ``(batch_size, max_ts_len)``, 1 at a real timestep and 0 at
+                padding -- ``batch['val_data']['masks']``, the same tensor
+                ``generate_record_masks`` samples within. Required rather than optional: a
+                default would silently restore the behaviour this argument exists to remove.
+
         Returns:
             Tensor: Scalar loss value for the discriminator
         """
         total_loss = 0.0
         n_predictions = 0
-        
+        keep = padding_mask.unsqueeze(-1).to(torch.bool)  # (batch_size, max_ts_len, 1)
+        # Counted once, not once per family: `.sum()` on a device tensor read into Python
+        # synchronizes, and five families would pay that five times in every step.
+        n_timesteps = int(keep.sum())
+
         # Process each feature type
         for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'lookup']:
             if feat_type not in predictions or feat_type not in record_masks:
@@ -694,10 +721,11 @@ class MaskedDiscriminatorLoss(torch.nn.Module):
             targets = indicator_mask.float()
             # Calculate BCE loss for all positions
             feature_loss = self.bce_loss(pred_logits, targets)  # (batch_size, max_ts_len, n_features)
-            # Sum loss across all dimensions
-            total_loss += feature_loss.sum()
-            n_predictions += feature_loss.numel()
-        
+            # Zero the padded timesteps rather than index them out: the product keeps the
+            # gradient at zero there without materializing a copy of the kept entries.
+            total_loss += (feature_loss * keep).sum()
+            n_predictions += n_timesteps * feature_loss.shape[-1]
+
         # Normalize by number of predictions
         if n_predictions > 0:
             total_loss = total_loss / n_predictions

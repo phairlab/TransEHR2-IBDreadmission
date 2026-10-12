@@ -1064,8 +1064,6 @@ class MaskedTokenDiscriminator(torch.nn.Module):
             Dict[str, Tensor]: A dictionary containing predictions about whether or not the input was simulated for     
                 each feature type.
         """
-        # NOTE Xu et al. didn't use static data for pretraining in the final model. It's probably a good idea to use it, though, because static data may be important for learning the relationships between time-varying features. In fact, they should be used by the generator as well, and Xu et al. didn't allow for static features in their generator definition. I follow Xu et al. in not using static data to pretrain the models, but future studies should consider using the static data in the generator and discriminator. 
-
         inds_to_concat = []
         vals_to_concat = []
 

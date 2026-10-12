@@ -264,8 +264,17 @@ def test_the_refactored_path_reproduces_the_baseline_bitwise(gate, tmp_path):
     current['gen_loss'] = gen_loss_fn(
         out['generator'], out['masked_targets'], gate['record_masks']
     ).detach()
+    # The padding mask the discriminator loss now takes did not exist when the
+    # baseline was recorded, and this batch is padded, so the production call no
+    # longer reproduces the stored number. That is the intended change of
+    # objective, not a regression, and the gate may not be re-recorded to absorb
+    # it -- so the comparison is made under the convention the baseline was
+    # captured under, every timestep scored. The new behaviour is held by
+    # test_discriminator_padding.py, and by the test below this one, which is
+    # what keeps this substitution from being vacuous.
+    every_timestep = torch.ones_like(gate['batch']['val_data']['masks'])
     current['disc_loss'] = MaskedDiscriminatorLoss()(
-        out['discriminator'], gate['record_masks']
+        out['discriminator'], gate['record_masks'], every_timestep
     ).detach()
 
     # A fresh batch: the ELECTRA forward mutates its own in place.
@@ -283,6 +292,25 @@ def test_the_refactored_path_reproduces_the_baseline_bitwise(gate, tmp_path):
             f"{name}: max |delta| = "
             f"{(actual - expected).abs().max().item():.3e}"
         )
+
+
+def test_the_gate_batch_is_padded_enough_for_that_substitution_to_matter(gate):
+    """The gate above scores every timestep to meet a baseline recorded before
+    the discriminator loss took a padding mask. That substitution is only
+    honest while this batch actually has padding -- otherwise the two calls
+    agree, and the comment above claims a difference that does not exist."""
+    masks = gate['batch']['val_data']['masks']
+    assert masks.min() == 0, "no padding in the gate batch"
+
+    out = gate['electra'](
+        gate['batch'], gate['record_masks'], device='cpu',
+        compute_intensities=False
+    )
+    loss_fn = MaskedDiscriminatorLoss()
+    scored_all = loss_fn(out['discriminator'], gate['record_masks'],
+                         torch.ones_like(masks))
+    production = loss_fn(out['discriminator'], gate['record_masks'], masks)
+    assert not torch.equal(scored_all, production)
 
 
 def test_the_gate_masks_a_text_record(gate):
@@ -557,7 +585,8 @@ def test_the_family_trains_end_to_end_with_a_drug_feature(drug_gate):
         ordinal_features=dims['ordinal'] or None
     )(out['generator'], out['masked_targets'], drug_gate['record_masks'])
     disc_loss = MaskedDiscriminatorLoss()(
-        out['discriminator'], drug_gate['record_masks']
+        out['discriminator'], drug_gate['record_masks'],
+        drug_gate['batch']['val_data']['masks']
     )
     (gen_loss + disc_loss).backward()
 

@@ -51,6 +51,7 @@ from TransEHR2.losses import (
 from TransEHR2.models import MixedClassifier
 from TransEHR2.survival import TimeGrid, survival_metrics
 from TransEHR2.utils import Timer
+from TransEHR2.utils import describe_loss_spike
 from TransEHR2.utils import format_pretraining_performance_table
 from TransEHR2.utils import generate_record_masks, move_batch_to_device
 from TransEHR2.utils import print_peak_memory
@@ -67,6 +68,15 @@ IMPROVEMENT_THRESHOLD = 1e-4
 
 # Epochs without improvement before a run stops.
 EARLY_STOPPING_PATIENCE = 30
+
+# When a step's generator loss is worth describing. The epoch mean records that a spike
+# happened, not what was in it, and the tensors that would say are gone by the time the
+# mean is printed. A step is judged against the running median of the steps so far --
+# which needs a few steps before it means anything -- and the reports are capped so that
+# a pathological epoch cannot fill the log.
+SPIKE_MIN_STEPS = 10
+SPIKE_FACTOR = 10.0
+SPIKE_REPORT_LIMIT = 3
 
 # Which validation number selects the finetuned model. They disagree often
 # enough to matter: the ranking term rewards ordering the cohort, the
@@ -326,22 +336,18 @@ _EMPTY_PRETRAIN_LOSSES = {
 
 
 def _mean_losses(records: Dict[str, List[float]]) -> Dict[str, float]:
-    """Epoch means, with the generator term trimmed.
+    """Epoch means, one per recorded term.
 
-    The generator term is the only unbounded one in the objective -- numeric features are
-    scored by squared error, everything else by cross-entropy, BCE or a cosine distance in
-    [0, 1]. A single step with a large residual therefore moves the epoch mean a long way,
-    and the median is the summary that survives it.
+    The generator term was once summarized by the median here, on the grounds that it is
+    the only unbounded term in the objective -- numeric features are scored by squared
+    error -- so one step with a large residual moves the mean a long way. But
+    ``Optimization_Loss`` is the *mean* of generator plus discriminator, so the two were
+    different statistics reported side by side under one heading, and they disagreed by
+    exactly the tail that was worth seeing. ``describe_loss_spike`` reports that tail
+    where it can be acted on, naming the step and the magnitudes in it.
     """
-    out = {}
-    for name, values in records.items():
-        if not values:
-            out[name] = float('nan')
-        elif name == 'Generator_Loss':
-            out[name] = float(np.median(values))
-        else:
-            out[name] = float(np.mean(values))
-    return out
+    return {name: float(np.mean(values)) if values else float('nan')
+            for name, values in records.items()}
 
 
 def _run_pretrain_batches(
@@ -370,6 +376,7 @@ def _run_pretrain_batches(
     model.train() if training else model.eval()
 
     records: Dict[str, List[float]] = {k: [] for k in _EMPTY_PRETRAIN_LOSSES}
+    spikes_reported = 0
 
     with torch.set_grad_enabled(training):
         for i, batch in tqdm(enumerate(loader), desc=desc, leave=False):
@@ -395,7 +402,8 @@ def _run_pretrain_batches(
 
             gen_loss = gen_loss_fn(output['generator'],
                                    output['masked_targets'], value_masks)
-            disc_loss = disc_loss_fn(output['discriminator'], value_masks)
+            disc_loss = disc_loss_fn(output['discriminator'], value_masks,
+                                     batch['val_data']['masks'])
             loss = gen_loss + disc_loss
 
             if thp_loss_fn is not None and 'thp_intensities' in output:
@@ -418,8 +426,25 @@ def _run_pretrain_batches(
                             'THP_Time_Loss'):
                     records[key].append(0.0)
 
+            gen_value = gen_loss.item()
+            if (spikes_reported < SPIKE_REPORT_LIMIT
+                    and len(records['Generator_Loss']) >= SPIKE_MIN_STEPS):
+                reference = float(np.median(records['Generator_Loss']))
+                if reference > 0 and gen_value > SPIKE_FACTOR * reference:
+                    spikes_reported += 1
+                    try:
+                        print(f"\n  {desc} step {i}: generator loss spike\n"
+                              + describe_loss_spike(
+                                  output['generator'], output['masked_targets'],
+                                  value_masks, gen_value, reference), flush=True)
+                    except Exception as error:
+                        # A diagnostic must never be the reason a trial dies.
+                        print(f"\n  {desc} step {i}: generator loss {gen_value:.1f} "
+                              f"against a median of {reference:.4f}; could not describe "
+                              f"it ({error})", flush=True)
+
             records['Optimization_Loss'].append(loss.item())
-            records['Generator_Loss'].append(gen_loss.item())
+            records['Generator_Loss'].append(gen_value)
             records['Discriminator_Loss'].append(disc_loss.item())
 
             if training:

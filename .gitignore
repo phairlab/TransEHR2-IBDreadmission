@@ -114,3 +114,17 @@ notes.md
 *.pt
 *.pth
 *.ckpt
+
+# ======================
+# Tuning manifests
+# ======================
+# generate_tuning_configs.py resolves every path at generation time and
+# writes them absolute, so a manifest is bound to the machine that made it:
+# one written here sends the cluster's array tasks to /Users/... and fails
+# all of them. Regenerate it wherever the sweep runs --
+#
+#     python scripts/generate_tuning_configs.py <spec> --overwrite
+#
+# The spec, the base config and the generated cell configs are tracked, so
+# the manifest is reproducible from them and nothing is lost by its absence.
+TransEHR2/configs/experiments/tuning/*_manifest.yaml

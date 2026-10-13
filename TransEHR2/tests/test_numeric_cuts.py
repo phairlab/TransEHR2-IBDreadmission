@@ -172,6 +172,24 @@ def test_an_unobserved_zero_is_not_raised_to_the_low_cut():
     assert out[1].item() == pytest.approx(1.5)
 
 
+def test_a_feature_with_no_cut_skips_the_clip_entirely():
+    """The table names 19 of 94 features. The other 75 carry infinite bounds,
+    so clipping them is three numpy calls per episode that cannot change a
+    value -- in a worker, on a step that is close to loader-bound."""
+    values = np.array([[[9.0]]], dtype=np.float32)
+    indicators = np.ones((1, 1, 2), dtype=np.float32)
+
+    dataset = _dataset(values, indicators, {
+        'means': np.array([1.0, 1.0], np.float32),
+        'p5': np.array([0.0, 0.0], np.float32),
+        'p95': np.array([2.0, 2.0], np.float32),
+        'scale': np.array([2.0, 2.0], np.float32),
+        'cut_low': np.array([0.0, -np.inf], np.float32),
+        'cut_high': np.array([4.0, np.inf], np.float32)})
+
+    assert dataset._cut_active.tolist() == [True, False]
+
+
 def test_statistics_without_cuts_leave_the_values_as_they_were():
     """The back-compat path, which every fold is on until the table lands."""
     values = np.array([[[9.0]]], dtype=np.float32)

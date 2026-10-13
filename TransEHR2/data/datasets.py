@@ -303,10 +303,19 @@ class MixedDataset(Dataset):
         # statistics above so that the two cannot be applied separately.
         # Absent from statistics written before a table existed, which is the
         # same thing as a table that cuts nothing.
+        # ``_cut_active`` is what keeps this free for the features it does not
+        # touch. The table holds only the features the rule acts on -- 19 of
+        # 94 at the chosen threshold -- and the rest carry infinite bounds, so
+        # clipping them is three numpy calls per feature per episode that
+        # cannot change a value. That is 75 features of pure overhead on every
+        # item, in a worker, on a step that is close to loader-bound.
         self._cut_low = self._cut_high = None
+        self._cut_active = None
         if numeric_stats is not None and 'cut_low' in numeric_stats:
             self._cut_low = np.asarray(numeric_stats['cut_low'], np.float32)
             self._cut_high = np.asarray(numeric_stats['cut_high'], np.float32)
+            self._cut_active = (np.isfinite(self._cut_low)
+                                | np.isfinite(self._cut_high))
 
     def __len__(self) -> int:
         return self.n_episodes
@@ -347,7 +356,7 @@ class MixedDataset(Dataset):
                 record exists.
         """
         values = np.array(self.val_numeric_values[f][idx], dtype=np.float32)
-        if self._cut_low is not None:
+        if self._cut_active is not None and self._cut_active[f]:
             values = np.where(
                 observed[:, None] == 1.0,
                 np.clip(values, self._cut_low[f], self._cut_high[f]),

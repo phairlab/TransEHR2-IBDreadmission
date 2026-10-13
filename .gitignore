@@ -128,3 +128,7 @@ notes.md
 # The spec, the base config and the generated cell configs are tracked, so
 # the manifest is reproducible from them and nothing is lost by its absence.
 TransEHR2/configs/experiments/tuning/*_manifest.yaml
+# Phase 2's bases are the phase-1 winners' own configs, written by
+# select_tuned_cell.py. Derived from a ranking, like the manifests.
+# phase1_base.yaml is tracked: it is the authored centre of phase 1.
+TransEHR2/configs/experiments/tuning/phase[2-9]*_base.yaml

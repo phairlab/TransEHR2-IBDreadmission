@@ -1,0 +1,55 @@
+# Phase 2: the finetuning schedule, on the additive arm.
+#
+# One spec per encoding arm rather than one with an ARMS block, because the
+# two arms do not share a centre here. Each inherits a base carrying *its own*
+# phase-1 winning cell, so neither encoding is judged under a pretraining
+# schedule tuned for the other. That is the whole point of carrying both arms
+# this far: the encoding decision is made at each arm's own optimum, not at a
+# shared one.
+#
+# The base is written by select_tuned_cell.py from the phase-1 manifest and is
+# therefore NOT tracked -- it is the winning trial's own config, renamed, and
+# regenerating it is how this spec stays true if phase 1 is re-ranked.
+#
+# TPE, the additive temporal positional encoding.
+#
+# No trial here pretrains. SLURM/run_phase2.sh symlinks the arm's winning
+# encoder into every cell's model directory first, so pretraining_is_done
+# short-circuits and each cell fits a head on bit-identical weights.
+
+SPEC_NAME: phase2
+DESIGN: factorial
+FOLD: fold0            # held out of every reported result, see TransEHR2.cli
+
+# One arm, named so the trials carry it. Its POSITION_ENCODING restates what
+# the base already holds -- the base is the winning phase-1 cell's own config
+# -- but naming it here is what puts the arm in every trial name and keeps the
+# two halves of phase 2 from colliding in one model directory.
+ARMS:
+  additive:
+    POSITION_ENCODING: 'additive'
+
+BASE_CONFIG: phase2_additive_base.yaml
+DATASET_CONFIG: ../../datasets/RMT23345.yaml
+OUTPUT_DIR: phase2_additive
+MANIFEST: phase2_additive_manifest.yaml
+
+# Derived from the MIMIC manuscript grid (LR [5e-5, 2.2e-5, 1e-5, 4.5e-6] x
+# half-life [160, 60, 20, 480, None]) with two edits: the 20-epoch half-life
+# dropped and the slowest rate dropped. No-decay was already in that grid --
+# it is there because it performed best in the manuscript.
+#
+# The first value of each list is the default, which is what the shared
+# centre sits at.
+GRID:
+  FINETUNE_LEARNING_RATE:
+    values: [0.00005, 0.000022, 0.00001]
+    select_on: readmission
+  FINETUNE_LR_HALF_LIFE:
+    # null is a flat rate: resolve_decay_factor returns 1.0 for it.
+    values: [480, 160, 60, null]
+    select_on: readmission
+
+ALIASES:
+  FINETUNE_LEARNING_RATE: lr
+  FINETUNE_LR_HALF_LIFE: hl

@@ -625,6 +625,118 @@ def integrated_brier(brier: np.ndarray, times: np.ndarray) -> float:
     return float(np.sum(0.5 * (y[:-1] + y[1:]) * np.diff(x)) / span)
 
 
+def aalen_johansen(
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    taus: np.ndarray,
+) -> np.ndarray:
+    r"""Marginal cumulative incidence of cause ``k``, read at ``taus``.
+
+    The covariate-free estimator: one curve for the whole cohort, which is what a model that
+    had learned nothing from its inputs could still predict. Aalen-Johansen rather than
+    Kaplan-Meier, because KM applied to one cause treats the others as censoring and so answers
+    "what if nobody could die" -- an incidence this cohort cannot realise, and a reference too
+    easy to beat.
+
+    .. math::
+        \hat F_k(t) = \sum_{t_i \le t} \hat S(t_{i-1}) \frac{d_{k,i}}{n_i}
+
+    ``S`` is the event-free survival over events of *any* cause, and it is evaluated just
+    before each event time -- a patient must still be event-free to fail of cause ``k`` at
+    ``t_i``. Censored episodes leave the risk set without contributing an increment.
+
+    Args:
+        times_days: (n,) event or censoring time of each episode, in days.
+        cause_index: (n,) which modelled cause, where an event occurred.
+        is_event: (n,) True where an event was observed rather than censoring.
+        k: The cause to estimate.
+        taus: (p,) ascending times to read the curve at.
+
+    Returns:
+        (p,) the marginal CIF, non-decreasing, starting at 0.
+    """
+    times_days = np.asarray(times_days, dtype=np.float64)
+    is_event = np.asarray(is_event, dtype=bool)
+    cause_index = np.asarray(cause_index)
+
+    event_times = np.unique(times_days[is_event])
+    if event_times.size == 0:
+        # A cohort in which nothing was observed to happen. The incidence is zero everywhere
+        # rather than undefined, and the step lookup below has no array to index.
+        return np.zeros(np.asarray(taus).size, dtype=np.float64)
+
+    survival, incidence = 1.0, 0.0
+    curve = np.zeros(event_times.size, dtype=np.float64)
+
+    for i, t in enumerate(event_times):
+        at_risk = int(np.sum(times_days >= t))
+        if at_risk == 0:
+            curve[i] = incidence
+            continue
+        at_t = (times_days == t) & is_event
+        # S is read *before* this time's events are removed, which is the whole content of the
+        # t_{i-1} in the formula: the increment is the hazard of cause k among those who
+        # reached t_i event-free.
+        incidence += survival * (int(np.sum(at_t & (cause_index == k))) / at_risk)
+        survival *= 1.0 - int(np.sum(at_t)) / at_risk
+        curve[i] = incidence
+
+    # A step function: the value at tau is the last increment at or before it, and 0 before the
+    # first event. `searchsorted` with 'right' puts a tau exactly on an event time after that
+    # event, which is the convention cause_specific_brier reads F at.
+    index = np.searchsorted(event_times, np.asarray(taus, dtype=np.float64),
+                            side='right') - 1
+    return np.where(index >= 0, curve[np.clip(index, 0, None)], 0.0)
+
+
+def marginal_reference_metrics(
+    time_to_event: np.ndarray,
+    event_type: np.ndarray,
+    grid: TimeGrid,
+) -> Dict[str, float]:
+    """What a model that used none of its inputs would score.
+
+    An integrated Brier score has no scale on its own -- it is dominated by how often the event
+    happens, so a rare outcome scores well under a prediction of nearly zero for everyone. This
+    is the number the model's is competing against, computed over the same episodes, the same
+    time grid and the same censoring weights, so the two are comparable term for term.
+
+    Reported beside it is the Index of Prediction Accuracy, ``1 - IBS_model / IBS_null``, which
+    is the fraction of the reference's error the model removes.
+
+    Args:
+        time_to_event: (n,) minutes, as ``labels.csv`` writes it.
+        event_type: (n,) EVENT_TYPE, as ``labels.csv`` writes it.
+        grid: The time grid the model was scored on.
+
+    Returns:
+        ``{<cause>_Integrated_Brier_Null: float, <cause>_Events: float}``, keyed as
+        ``survival_metrics`` keys its own, so a caller can divide one by the other without
+        rewriting either name.
+    """
+    t = torch.as_tensor(time_to_event, dtype=torch.float64)
+    e = torch.as_tensor(event_type)
+    _, cause_index, is_event = grid.discretize(t, e)
+
+    ci = cause_index.numpy()
+    ev = is_event.numpy().astype(bool)
+    days = event_times_days(t.numpy(), grid)
+    taus = brier_times(grid)
+
+    out: Dict[str, float] = {}
+    for k, name in enumerate(grid.cause_names):
+        key = metric_label(name)
+        reference = np.tile(aalen_johansen(days, ci, ev, k, taus),
+                            (days.size, 1))
+        out[f"{key}_Integrated_Brier_Null"] = integrated_brier(
+            cause_specific_brier(reference, days, ci, ev, k, taus), taus)
+        out[f"{key}_Events"] = float(np.sum(ev & (ci == k)))
+    out["Censored"] = float(np.sum(~ev))
+    return out
+
+
 def survival_metrics(
     logits: np.ndarray,
     time_to_event: np.ndarray,

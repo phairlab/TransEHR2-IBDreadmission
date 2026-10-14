@@ -50,11 +50,14 @@ Deviations from the reference, and why
   background. TransEHR2 has no such corner: absence here is the value zeroed *and* the indicator
   cleared, which is what the model was trained to read as missing. A zeroed value with the
   indicator still set is an observed zero, a different statement.
-* **The feature term is not scaled.** The reference min-max scales the feature profile within
-  each timestep, which pins that minute's least relevant feature at exactly 0 and leaves
-  magnitudes incomparable between minutes. ``delta_feature`` is already non-negative with a
-  meaningful origin -- zero means deleting that cell moved nothing -- so the scaling destroys a
-  real zero to manufacture one. It is dropped.
+* **The feature term is each cell's share of its own timestep.** The reference min-max scales
+  the profile within a timestep, which pins the least relevant feature at exactly 0 whether or
+  not deleting it moved anything, and leaves a timestep's total mass growing with the number of
+  features it happens to carry -- so the time term stops deciding how much a timestep gets.
+  Dividing by the timestep's own total makes the product a decomposition: the time term sets the
+  mass, the feature term only apportions it, and a timestep's cells sum to its time
+  contribution. A cell whose deletion moved nothing still reads zero; a timestep whose cells all
+  do reads zeros rather than dividing by one.
 * **The time term is divided by its maximum, not min-max scaled.** The bound is the only thing
   the scaling was buying. Min-max decomposes into subtracting the minimum and dividing by the
   range; the division is one constant per episode, so within an episode the subtraction is the
@@ -408,6 +411,32 @@ def _maxscale(values: Tensor) -> Tensor:
                        torch.zeros_like(values))
 
 
+# Below this a timestep's deltas are treated as having moved nothing. One constant for both
+# the test and the divisor floor in `_share`; see the note there for why they must agree.
+SHARE_EPS = 1e-12
+
+
+def _share(values: Tensor) -> Tensor:
+    """Each timestep's feature relevances as shares of their own total.
+
+    The deltas are sums of absolute differences and so are non-negative, which is what makes a
+    share well defined. A timestep none of whose cells moved the map has no total to divide by
+    and stays zeros -- it carries no information to apportion, and the time term has already
+    said so.
+
+    A timestep with one occupied cell takes 1 there without a special case, which is the
+    common shape in this cohort: a dispensation record carries the drug embedding and nothing
+    else, so there is no apportioning to do.
+    """
+    total = values.sum(dim=-1, keepdim=True)
+    # The threshold and the divisor floor are the same number deliberately. Testing `total > 0`
+    # and then dividing by `clamp(min=EPS)` would silently break the invariant this exists for:
+    # a total of 1e-15 passes the test, is divided by 1e-12, and sums to 1e-3 instead of 1.
+    # Below EPS a timestep is treated as having moved nothing, which is what it did.
+    return torch.where(total > SHARE_EPS, values / total.clamp(min=SHARE_EPS),
+                       torch.zeros_like(values))
+
+
 def tsr_scores(model, batch, target: Optional[Callable] = None,
                quantile: float = 0.0, gated_value: float = 0.0,
                chunk: int = 64, ig_steps: int = 0) -> Dict:
@@ -423,12 +452,11 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
             admits every timestep and costs ``1 + T + T*N``; the reference's 0.55 is a constant
             tuned on MNIST-shaped data, and is the setting to pass when the full map is too
             expensive.
-        gated_value (float, optional): What the feature contribution is held at for timesteps
-            below the gate. Defaults to 0, which erases them. Any positive constant orders those
-            cells identically -- by their time term alone, with every feature of a given minute
-            tied -- so the constant decides only where unmeasured cells sit among measured ones.
-            The reference's 0.1 was calibrated against a feature term scaled to [0, 1], which
-            this one is not, so it does not carry over.
+        gated_value (float, optional): How much of its time contribution a timestep below the
+            gate keeps, its features tied. Defaults to 0, which erases it. The reference's 0.1
+            floored a profile it had min-max scaled; under a share the same intent -- an
+            unmeasured timestep counts for less -- is a weight on the timestep's mass, so 0.1
+            here means a tenth of what it would have had, and 1 means all of it.
         chunk (int, optional): How many perturbations share one forward and backward. The pass
             is latency-bound well past 64 at the shapes this model runs at, so this is close to
             a pure speedup; what it costs is memory, since the batch is tiled `chunk` times.
@@ -443,7 +471,8 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
         dict: ``scores`` (batch, max_ts_len, n_features) rescaled saliency, ``baseline`` the
         unrescaled R(X), ``delta_time`` the raw time relevance, ``time_contribution`` it
         divided by its row maximum, ``feature_contribution`` (batch, max_ts_len, n_features)
-        holding the raw, unscaled feature relevance,
+        holding each cell's share of its timestep -- summing to 1 over a timestep any of whose
+        cells moved the map, and to 0 over one where none did,
         ``gate`` (batch, max_ts_len), ``lookup_grads`` from the unmasked pass -- the upstream
         gradients `attribution.token_attributions` consumes -- ``index`` from `feature_index`,
         ``occupied`` (batch, max_ts_len, n_features) bool, the cells a pass was worth taking
@@ -490,13 +519,23 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
         calls += len(alphas) * math.ceil(len(cells) / chunk)
         steps = torch.tensor([t for t, _ in cells], device=baseline.device)
         columns = torch.tensor([c for _, c in cells], device=baseline.device)
-        # Unscaled, so the magnitudes are comparable across timesteps and a cell reading zero
-        # is one whose deletion moved nothing. An item that did not admit this timestep keeps
-        # the floor even though the pass was taken for some other item that did.
+        # Raw deltas here; `_share` normalizes them per timestep below. An item that did not
+        # admit this timestep keeps the floor even though the pass was taken for some other
+        # item that did.
         feature_contribution[:, steps, columns] = torch.where(
             gate[:, steps], delta_feature,
             torch.full_like(delta_feature, gated_value))
 
+    feature_contribution = _share(feature_contribution)
+    if gated_value:
+        # After the share, not before. A constant held across a gated timestep's cells shares
+        # evenly, so without this the timestep would take its WHOLE time contribution and the
+        # gate would change only the split, never the weight -- the opposite of what the
+        # reference's floor was for. Applied here, `gated_value` scales the timestep's mass:
+        # 0 erases it, 0.1 leaves a tenth, 1 keeps it with its features tied.
+        feature_contribution = torch.where(
+            gate.unsqueeze(-1), feature_contribution,
+            feature_contribution * gated_value)
     scores = time_contribution.unsqueeze(-1) * feature_contribution
     return {'scores': scores, 'baseline': baseline, 'delta_time': delta_time,
             'time_contribution': time_contribution,

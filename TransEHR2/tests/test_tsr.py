@@ -17,7 +17,8 @@ changing the shapes.
 import pytest
 import torch
 
-from TransEHR2.tsr import FAMILIES, feature_index, saliency, tsr_scores
+from TransEHR2.tsr import (FAMILIES, SHARE_EPS, _share, feature_index, saliency,
+                          tsr_scores)
 
 BATCH, STEPS, WIDTH = 2, 5, 3
 N_NUMERIC, N_LOOKUP = 2, 1
@@ -159,15 +160,43 @@ def test_tsr_recomputes_the_feature_profile_at_every_passing_timestep(batch):
     assert 0 < passing < STEPS, 'the 0.55 gate should admit some timesteps and reject some'
 
 
-def test_the_score_is_the_scaled_time_term_times_the_raw_feature_term(batch):
+def test_the_score_is_the_scaled_time_term_times_the_feature_share(batch):
     result = tsr_scores(StubModel(), batch)
     expected = (result['time_contribution'].unsqueeze(-1)
                 * result['feature_contribution'])
     assert result['scores'].shape == (BATCH, STEPS, N_FEATURES)
     assert torch.allclose(result['scores'], expected, atol=1e-6)
-    # The feature term is the raw delta, not scaled within the timestep: nothing is pinned to
-    # zero by construction, and the magnitudes stay comparable between timesteps.
+    # Nothing is pinned to zero by construction, which min-max scaling within the timestep
+    # would do to the weakest cell of every one.
     assert (result['feature_contribution'] > 0).all()
+
+
+def test_a_timesteps_cells_sum_to_its_time_contribution(batch):
+    """The property the share exists for. The time term decides how much a timestep gets and
+    the feature term only apportions it, so a timestep carrying eight features cannot outweigh
+    one carrying a single feature by being busier."""
+    result = tsr_scores(StubModel(), batch)
+    assert torch.allclose(result['feature_contribution'].sum(dim=-1),
+                          torch.ones(BATCH, STEPS), atol=1e-6)
+    assert torch.allclose(result['scores'].sum(dim=-1),
+                          result['time_contribution'], atol=1e-6)
+
+
+def test_a_timestep_that_moved_nothing_takes_a_zero_share(batch):
+    """No total to divide by. The guard is what keeps that from being a division by one."""
+    from TransEHR2.tsr import _share
+    values = torch.tensor([[[0.0, 0.0, 0.0], [1.0, 3.0, 0.0]]])
+    shared = _share(values)
+    assert (shared[0, 0] == 0).all()
+    assert torch.allclose(shared[0, 1], torch.tensor([0.25, 0.75, 0.0]), atol=1e-6)
+
+
+def test_a_single_occupied_cell_takes_the_whole_timestep(batch):
+    """Which is the PIN case: a dispensation timestep carries the drug embedding and nothing
+    else, so there is no apportioning to do and the cell inherits the time term entire."""
+    from TransEHR2.tsr import _share
+    shared = _share(torch.tensor([[[0.0, 7.0, 0.0]]]))
+    assert torch.allclose(shared[0, 0], torch.tensor([0.0, 1.0, 0.0]), atol=1e-6)
 
 
 def test_the_time_term_is_divided_by_its_maximum_not_min_max_scaled(batch):
@@ -180,7 +209,8 @@ def test_the_time_term_is_divided_by_its_maximum_not_min_max_scaled(batch):
 
 
 def test_gated_timesteps_are_erased_not_floored(batch):
-    """The reference's 0.1 floor was calibrated against a [0, 1] feature term, which this is not."""
+    """The default erases a gated timestep outright. `gated_value` is what keeps a fraction of
+    it instead; see test_the_gate_weighs_a_timestep_down_rather_than_only_retying_it."""
     result = tsr_scores(StubModel(), batch, quantile=0.55)
     gated = ~result['gate']
     assert gated.any(), 'fixture should produce at least one gated timestep'
@@ -391,3 +421,87 @@ def test_midpoint_alphas_never_hit_zero_and_are_centred():
     assert midpoint_alphas(1) == [0.5]
     assert midpoint_alphas(4) == [0.125, 0.375, 0.625, 0.875]
     assert all(0 < a <= 1 for a in midpoint_alphas(50))
+
+
+# --- occupancy, which the dense fixture above cannot exercise -------------------------------
+
+@pytest.fixture
+def sparse_batch():
+    """One episode whose timesteps differ in how much they carry.
+
+    t0 holds a single feature -- the shape a PIN dispensation takes, and the one the share has
+    to handle without a special case. t2 holds nothing. The rest are mixed. Unobserved cells
+    carry zeros as they do on disk, which is what `_occupied` reads when an indicator is clear.
+    """
+    torch.manual_seed(0)
+    numeric = torch.zeros(1, STEPS, N_NUMERIC)
+    lookup = torch.zeros(1, STEPS, N_LOOKUP)
+    numeric[0, 0, 0] = 1                                   # singleton
+    numeric[0, 1, :] = 1; lookup[0, 1, 0] = 1              # all three
+    #                                                        t2 empty
+    numeric[0, 3, 0] = 1; lookup[0, 3, 0] = 1              # two
+    numeric[0, 4, :] = 1; lookup[0, 4, 0] = 1              # all three
+
+    values = [torch.randn(1, STEPS, WIDTH) * numeric[..., f].unsqueeze(-1)
+              for f in range(N_NUMERIC)]
+    slots = [torch.randn(1, STEPS, WIDTH) * lookup[..., 0].unsqueeze(-1)]
+    return {'val_data': {
+        'times': torch.arange(STEPS).float().unsqueeze(0),
+        'numeric': {'indicators': numeric, 'values': values},
+        'lookup': {'indicators': lookup, 'slot_values': slots,
+                   'doses': [None], 'masks': [None]},
+    }}
+
+
+def test_occupancy_is_what_the_fixture_says(sparse_batch):
+    """Guards every test below: they are claims about timesteps of a given occupancy."""
+    result = tsr_scores(StubModel(), sparse_batch)
+    assert result['occupied'][0].sum(dim=-1).tolist() == [1, 3, 0, 2, 3]
+
+
+def test_a_single_feature_timestep_takes_the_whole_share(sparse_batch):
+    """The PIN case. One cell, nothing to apportion, no perturbation that could say otherwise."""
+    result = tsr_scores(StubModel(), sparse_batch)
+    assert result['feature_contribution'][0, 0].tolist() == [1.0, 0.0, 0.0]
+
+
+def test_an_empty_timestep_takes_nothing_rather_than_dividing_by_zero(sparse_batch):
+    result = tsr_scores(StubModel(), sparse_batch)
+    assert (result['feature_contribution'][0, 2] == 0).all()
+    assert result['time_contribution'][0, 2] == 0
+
+
+def test_mass_follows_the_time_term_at_every_occupancy(sparse_batch):
+    """The property the share exists for, across a timestep carrying one feature, two, three
+    and none. A busier timestep cannot outweigh a sparser one by being busier."""
+    result = tsr_scores(StubModel(), sparse_batch)
+    assert torch.allclose(result['scores'][0].sum(dim=-1),
+                          result['time_contribution'][0], atol=1e-6)
+
+
+def test_an_unoccupied_cell_takes_no_share(sparse_batch):
+    """Deleting what is not there moves nothing, so it earns nothing -- even though it sits in
+    a timestep whose other cells divide the whole of it."""
+    result = tsr_scores(StubModel(), sparse_batch)
+    unoccupied = ~result['occupied']
+    assert (result['feature_contribution'][unoccupied] == 0).all()
+
+
+def test_a_total_below_the_epsilon_takes_no_share():
+    """The bug the shared constant prevents: testing `total > 0` and dividing by a clamped
+    floor passes a total of 1e-15 through and returns shares summing to 1e-3, not 1."""
+    assert (_share(torch.full((1, 1, 2), SHARE_EPS / 1000)) == 0).all()
+    ordinary = _share(torch.tensor([[[1.0, 3.0]]]))
+    assert torch.allclose(ordinary.sum(dim=-1), torch.ones(1, 1), atol=1e-6)
+
+
+def test_the_gate_weighs_a_timestep_down_rather_than_only_retying_it(sparse_batch):
+    """A constant across a timestep's cells shares evenly, so applying gated_value before the
+    share would hand a gated timestep its whole time term and change only the split."""
+    weighted = tsr_scores(StubModel(), sparse_batch, quantile=0.55, gated_value=0.1)
+    gated = ~weighted['gate'][0]
+    assert gated.any(), 'fixture should gate at least one timestep'
+
+    mass = weighted['scores'][0].sum(dim=-1)
+    expected = weighted['time_contribution'][0] * 0.1
+    assert torch.allclose(mass[gated], expected[gated], atol=1e-6)

@@ -65,6 +65,33 @@ SELECTION_CRITERIA = {
 }
 
 
+def axis_keys(entry: Dict[str, Any], hp_name: str) -> List[str]:
+    """The config keys one grid axis writes, which is usually just its own name.
+
+    ``sets`` exists for a hyperparameter the configs spell more than once. The encoder depth is
+    the case it was added for: one architectural choice that has to reach
+    ``GENERATOR_ENCODER_N_ENCODER_BLOCKS`` and ``DISCRIMINATOR_ENCODER_N_ENCODER_BLOCKS``
+    together. Sweeping them as two axes would cross them into four cells, two of which pair a
+    depth with a different depth -- configurations nobody meant to run and that no reading of
+    the result could untangle.
+    """
+    return list(entry.get('sets') or [hp_name])
+
+
+def expand_assignment(grid: Dict[str, Any],
+                      assignment: Dict[str, Any]) -> Dict[str, Any]:
+    """Turn ``{axis: value}`` into the config keys it sets.
+
+    Trials keep their ``cell`` keyed by axis so that a ranking reads one depth rather than two
+    equal numbers; only ``overrides``, which is what reaches the config file, is expanded.
+    """
+    out: Dict[str, Any] = {}
+    for name, value in assignment.items():
+        for key in axis_keys(grid[name], name):
+            out[key] = value
+    return out
+
+
 def slugify_value(value: Any) -> str:
     """Render a hyperparameter value as a filesystem- and path-safe token.
 
@@ -83,6 +110,11 @@ def slugify_value(value: Any) -> str:
         return 'none'
     if isinstance(value, bool):
         return 'true' if value else 'false'
+    if isinstance(value, (list, tuple)):
+        # A layer-width list, which `str` would render as '[256, 128]' -- brackets are glob
+        # characters, so that name would be expanded by any shell that handled it unquoted.
+        # Joined instead, which reads as the stack it describes.
+        return 'x'.join(slugify_value(item) for item in value)
     if isinstance(value, float):
         text = f'{value:g}'
     else:
@@ -133,6 +165,18 @@ def load_spec(spec_path: str) -> Dict[str, Any]:
                 f"{spec_path}: grid entry {hp_name!r} selects on {criterion!r}; "
                 f"expected one of {sorted(SELECTION_CRITERIA)}"
             )
+        if 'sets' in entry:
+            keys = entry['sets']
+            if (not isinstance(keys, list) or not keys
+                    or not all(isinstance(key, str) for key in keys)):
+                raise ValueError(
+                    f"{spec_path}: grid entry {hp_name!r} has a 'sets' that is not a non-empty "
+                    f"list of config key names: {keys!r}"
+                )
+            if len(set(keys)) != len(keys):
+                raise ValueError(
+                    f"{spec_path}: grid entry {hp_name!r} repeats a key in 'sets': {keys}"
+                )
         values = entry['values']
         if len(set(map(repr, values))) != len(values):
             raise ValueError(
@@ -140,6 +184,17 @@ def load_spec(spec_path: str) -> Dict[str, Any]:
                 f"entry is the default and is run once as the shared centre, so a repeat "
                 f"would silently collapse two trials into one."
             )
+
+    # Two axes writing one config key would make the grid order decide which wins, silently.
+    written: Dict[str, str] = {}
+    for hp_name, entry in spec['GRID'].items():
+        for key in axis_keys(entry, hp_name):
+            if key in written:
+                raise ValueError(
+                    f"{spec_path}: grid entries {written[key]!r} and {hp_name!r} both set "
+                    f"{key!r}. One config key can belong to one axis."
+                )
+            written[key] = hp_name
 
     if spec['DESIGN'] == 'factorial':
         criteria = sorted({entry['select_on'] for entry in spec['GRID'].values()})
@@ -174,7 +229,10 @@ def load_spec(spec_path: str) -> Dict[str, Any]:
                 f"{where} overrides nothing, so it would duplicate the centre it is meant to "
                 f"be compared against."
             )
-        collides = sorted(set(extra['overrides']) & set(spec['GRID']))
+        grid_keys = set()
+        for grid_name, grid_entry in spec['GRID'].items():
+            grid_keys.update(axis_keys(grid_entry, grid_name))
+        collides = sorted(set(extra['overrides']) & grid_keys)
         if collides:
             raise ValueError(
                 f"{where} overrides {collides}, which the grid also sweeps. An extra trial is "
@@ -296,7 +354,8 @@ def _factorial_cells(
             'is_centre': all(cell[name] == defaults[name] for name in hp_names),
             'hyperparameter': None,
             'value': None,
-            'overrides': dict(arm_overrides, **cell),
+            'overrides': dict(arm_overrides,
+                              **expand_assignment(grid, cell)),
             'cell': cell,
             'covers': [],
             'needs_finetune': needs_finetune,
@@ -343,7 +402,8 @@ def expand_trials(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
             'is_centre': True,
             'hyperparameter': None,
             'value': None,
-            'overrides': dict(arm_overrides, **defaults),
+            'overrides': dict(arm_overrides,
+                              **expand_assignment(grid, defaults)),
             'cell': None,
             # The centre is the default trial for every hyperparameter at once.
             'covers': [{'hyperparameter': name, 'value': defaults[name]} for name in hp_names],
@@ -360,8 +420,8 @@ def expand_trials(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
             alias = aliases.get(hp_name, hp_name.lower())
             criterion = SELECTION_CRITERIA[grid[hp_name]['select_on']]
             for value in grid[hp_name]['values'][1:]:
-                overrides = dict(arm_overrides, **defaults)
-                overrides[hp_name] = value
+                overrides = dict(arm_overrides, **expand_assignment(
+                    grid, dict(defaults, **{hp_name: value})))
                 trials.append({
                     'name': f"{spec['SPEC_NAME']}_{arm_name}_{alias}_{slugify_value(value)}",
                     'arm': arm_name,

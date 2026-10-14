@@ -1,0 +1,50 @@
+# Phase 3: masking and encoder depth, on the chosen encoding.
+#
+# A complete cross of three axes. Unlike phases 1 and 2, every cell here
+# pretrains as well as finetunes: the mask ratios rescale the pretraining
+# objective, so a model masked at 0.75 is not solving the same problem as one
+# masked at 0.25 and their pretraining losses are not comparable. Selection
+# therefore moves downstream to the finetuned validation score.
+#
+# The base is written by select_tuned_cell.py from phase 2's manifest and is
+# not tracked: it is the winning cell's own config, carrying the encoding and
+# both tuned schedules.
+
+SPEC_NAME: phase3
+DESIGN: factorial
+FOLD: fold0            # held out of every reported result, see TransEHR2.cli
+
+# One arm. The encoding was decided after phase 2, at each arm's own tuned
+# optimum, and phases 3 and 4 run on the winner alone.
+ARMS:
+  rope:
+    POSITION_ENCODING: 'rope'
+
+BASE_CONFIG: phase3_base.yaml
+DATASET_CONFIG: ../../datasets/RMT23345.yaml
+OUTPUT_DIR: phase3
+MANIFEST: phase3_manifest.yaml
+
+GRID:
+  CMPNT_MASK_RATIO:
+    values: [0.25, 0.5, 0.75]
+    select_on: readmission
+  RECORD_MASK_RATIO:
+    values: [0.15, 0.25, 0.35]
+    select_on: readmission
+  # One architectural choice the configs spell twice. `sets` is what keeps it
+  # from being crossed with itself: as two axes this would be four depth
+  # combinations, two of them pairing a generator depth with a different
+  # discriminator depth. The predictor's trunk inherits the discriminator's,
+  # so the depth is fixed at pretraining time and cannot move in phase 4.
+  N_ENCODER_BLOCKS:
+    values: [1, 2]
+    sets:
+      - GENERATOR_ENCODER_N_ENCODER_BLOCKS
+      - DISCRIMINATOR_ENCODER_N_ENCODER_BLOCKS
+    select_on: readmission
+
+ALIASES:
+  CMPNT_MASK_RATIO: cmask
+  RECORD_MASK_RATIO: rmask
+  N_ENCODER_BLOCKS: blocks

@@ -1,0 +1,48 @@
+# Phase 4: DeepHit head depth, on phase 3's winning encoder.
+#
+# The head is fitted during finetuning and nowhere else, which is what makes
+# this phase separable and cheap: no cell pretrains, and all four load the
+# same encoder by symlink. The encoder depth is NOT here -- the predictor's
+# trunk inherits the discriminator's, so it is fixed at pretraining time and
+# phase 3 is where it was decided.
+#
+# Four cells, not three. The (2, 2) corner repeats phase 3's winning head, so
+# its result is known; it is generated anyway so that this phase's manifest
+# ranks on its own, without a comparison reaching back into another phase's
+# manifest that the selection tooling has no way to make. It runs concurrently
+# with the other three and so costs no wall clock.
+#
+# The one-layer widths are the stacks' output widths, which makes the (1, 1)
+# corner the head exactly as it stood before a397d1d -- the narrow stack
+# inherited from the MIMIC fork. The phase therefore measures whether
+# deepening the head bought anything against the architecture it replaced,
+# rather than against an arbitrary shallower one.
+
+SPEC_NAME: phase4
+DESIGN: factorial
+FOLD: fold0            # held out of every reported result, see TransEHR2.cli
+
+ARMS:
+  rope:
+    POSITION_ENCODING: 'rope'
+
+BASE_CONFIG: phase4_base.yaml
+DATASET_CONFIG: ../../datasets/RMT23345.yaml
+OUTPUT_DIR: phase4
+MANIFEST: phase4_manifest.yaml
+
+GRID:
+  DEEPHIT_HEAD_D_SHARED:
+    values:
+      - [256, 128]
+      - [128]
+    select_on: readmission
+  DEEPHIT_HEAD_D_CAUSE:
+    values:
+      - [128, 64]
+      - [64]
+    select_on: readmission
+
+ALIASES:
+  DEEPHIT_HEAD_D_SHARED: shared
+  DEEPHIT_HEAD_D_CAUSE: cause

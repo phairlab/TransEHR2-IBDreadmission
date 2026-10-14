@@ -19,6 +19,11 @@
 
 SPEC_NAME: phase2
 DESIGN: factorial
+
+# These cells do not pretrain: each loads an encoder chosen upstream, so the
+# pretraining stage is empty and the submitter refuses to queue it rather than
+# putting jobs on the cluster that would each skip straight to finetuning.
+PRETRAINS: false
 FOLD: fold0            # held out of every reported result, see TransEHR2.cli
 
 # One arm, named so the trials carry it. Its POSITION_ENCODING restates what

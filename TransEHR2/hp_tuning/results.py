@@ -379,7 +379,8 @@ def progress(manifest: Dict[str, Any]) -> Dict[str, Any]:
     for criterion, stage in (('pretrain', 'pretrain'), ('readmission', 'finetune')):
         trials = [
             t for t in manifest['trials']
-            if criterion == 'pretrain' or t['needs_finetune']
+            if (t.get('needs_pretrain', True) if criterion == 'pretrain'
+                else t['needs_finetune'])
         ]
         pending = [
             t['name'] for t in trials

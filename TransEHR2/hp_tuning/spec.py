@@ -150,6 +150,16 @@ def load_spec(spec_path: str) -> Dict[str, Any]:
     if not spec['GRID']:
         raise ValueError(f"{spec_path} defines no grid")
 
+    # Whether this sweep's cells pretrain at all. A phase that tunes the finetuning schedule
+    # or the head loads an encoder chosen upstream, so its cells have no pretraining job and
+    # no pretraining loss -- and counting them against a stage they never run reports every
+    # one of them as outstanding forever. Absent means true, which is what every sweep written
+    # before this did.
+    if 'PRETRAINS' in spec and not isinstance(spec['PRETRAINS'], bool):
+        raise ValueError(
+            f"{spec_path} sets PRETRAINS to {spec['PRETRAINS']!r}; expected true or false"
+        )
+
     spec['DESIGN'] = spec.get('DESIGN', 'additive')
     if spec['DESIGN'] not in DESIGNS:
         raise ValueError(
@@ -359,6 +369,7 @@ def _factorial_cells(
             'cell': cell,
             'covers': [],
             'needs_finetune': needs_finetune,
+            'needs_pretrain': spec.get('PRETRAINS', True),
             'is_extra': False,
             'select_on': grid[hp_names[0]]['select_on'],
             'description': '',
@@ -414,6 +425,7 @@ def expand_trials(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
                 SELECTION_CRITERIA[grid[name]['select_on']]['needs_finetune']
                 for name in hp_names
             ),
+            'needs_pretrain': spec.get('PRETRAINS', True),
         })
 
         for hp_name in hp_names:
@@ -432,6 +444,7 @@ def expand_trials(spec: Dict[str, Any]) -> List[Dict[str, Any]]:
                     'cell': None,
                     'covers': [{'hyperparameter': hp_name, 'value': value}],
             'is_extra': False,
+                    'needs_pretrain': spec.get('PRETRAINS', True),
                     'needs_finetune': criterion['needs_finetune'],
                 })
 
@@ -627,7 +640,15 @@ def load_manifest(manifest_path: str) -> Dict[str, Any]:
 
 
 def pretrain_trials(manifest: Dict[str, Any], arm: Optional[str] = None) -> List[Dict[str, Any]]:
-    """The trials that need a pretraining job: all of them, optionally filtered by arm.
+    """The trials that need a pretraining job, optionally filtered by arm.
+
+    Every trial of a sweep that pretrains, and none of one that does not: a phase tuning the
+    finetuning schedule or the head loads an encoder chosen upstream. An empty stage is a real
+    condition that the submitter already refuses to queue, which is what keeps such a phase
+    from putting jobs on the cluster that would each skip straight to finetuning.
+
+    A manifest written before ``PRETRAINS`` existed has no such key, and every sweep that
+    predates it did pretrain, so absent reads as true.
 
     Args:
         manifest: A loaded manifest.
@@ -636,7 +657,9 @@ def pretrain_trials(manifest: Dict[str, Any], arm: Optional[str] = None) -> List
     Returns:
         The matching trials, in manifest order.
     """
-    return [t for t in manifest['trials'] if arm is None or t['arm'] == arm]
+    return [t for t in manifest['trials']
+            if t.get('needs_pretrain', True)
+            and (arm is None or t['arm'] == arm)]
 
 
 def finetune_trials(manifest: Dict[str, Any], arm: Optional[str] = None) -> List[Dict[str, Any]]:

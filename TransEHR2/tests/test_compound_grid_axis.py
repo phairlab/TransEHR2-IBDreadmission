@@ -116,3 +116,47 @@ def test_a_repeated_key_in_sets_is_refused(tmp_path):
     spec['GRID']['N_ENCODER_BLOCKS']['sets'] = ['A', 'A']
     with pytest.raises(ValueError, match='repeats a key'):
         load_spec(_written(spec, tmp_path))
+
+
+# --- whether a phase pretrains at all ---------------------------------------
+
+def test_a_sweep_pretrains_unless_it_says_otherwise():
+    """Absent reads as true: every sweep written before PRETRAINS existed did pretrain, and
+    their manifests are on disk."""
+    for trial in expand_trials(_spec()):
+        assert trial['needs_pretrain'] is True
+
+
+def test_a_sweep_can_declare_that_it_does_not_pretrain():
+    spec = _spec()
+    spec['PRETRAINS'] = False
+    for trial in expand_trials(spec):
+        assert trial['needs_pretrain'] is False
+
+
+def test_the_pretrain_stage_is_empty_for_such_a_sweep():
+    """Which is what makes submit_tune_array.sh refuse to queue it. The alternative is four
+    jobs that each take a GPU, load a symlinked encoder, and skip to finetuning."""
+    from TransEHR2.hp_tuning.spec import finetune_trials, pretrain_trials
+    spec = _spec()
+    spec['PRETRAINS'] = False
+    manifest = {'trials': expand_trials(spec)}
+
+    assert pretrain_trials(manifest) == []
+    assert len(finetune_trials(manifest)) == 4
+
+
+def test_a_manifest_written_before_the_flag_still_pretrains():
+    """Phase 3's manifest is already on the cluster without the key."""
+    from TransEHR2.hp_tuning.spec import pretrain_trials
+    trials = expand_trials(_spec())
+    for trial in trials:
+        del trial['needs_pretrain']
+    assert len(pretrain_trials({'trials': trials})) == len(trials)
+
+
+def test_a_non_boolean_pretrains_is_refused(tmp_path):
+    spec = _spec()
+    spec['PRETRAINS'] = 'no'
+    with pytest.raises(ValueError, match='expected true or false'):
+        load_spec(_written(spec, tmp_path))

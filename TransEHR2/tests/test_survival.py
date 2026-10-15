@@ -31,6 +31,7 @@ from TransEHR2.survival import (
     event_times_days,
     integrated_brier,
     interpolate_cif,
+    interpolate_tail,
     pmf_from_logits,
     survival_from_pmf,
     survival_metrics,
@@ -166,6 +167,21 @@ def test_cif_and_survival_partition_the_mass():
     # 1 - (F_1 + F_2) at each bin; 0.4 of the mass is never spent.
     assert torch.allclose(survival_from_pmf(pmf, torch.tensor([0.4]))[0],
                           torch.tensor([0.85, 0.55, 0.40]), atol=1e-6)
+
+
+def test_survival_behind_a_saturated_bin_is_not_cancelled_in_float32():
+    """Bin 3 holds nearly everything, bin 7 holds 3e-8: S after bin 3 is 3e-8.
+
+    Taking the inclusive tail and subtracting bin 3 gave 5.96e-8 here --
+    1 + 3e-8 is not a float32 -- and that number goes straight into the
+    censored likelihood.
+    """
+    pmf = torch.zeros(1, 3, 10, dtype=torch.float32)
+    pmf[0, 0, 3] = 1.0 - 3e-8
+    pmf[0, 1, 7] = 3e-8
+    surv = survival_from_pmf(pmf, torch.tensor([1e-20]))
+    assert surv[0, 3].item() == pytest.approx(3e-8, rel=1e-6)
+    assert surv[0, -1].item() == pytest.approx(1e-20)
 
 
 # ----------------------------------------------- the attribution target
@@ -605,6 +621,42 @@ def test_interpolation_survives_a_float32_cumulative_sum():
     cif_k[0, 2] -= 1e-16                      # below the previous value
     curve = interpolate_cif(cif_k, grid, np.array([0.0, 15.0, 365.0]))
     assert np.all(np.diff(curve, axis=1) >= -1e-12)
+
+
+def test_reading_each_row_at_its_own_time_is_the_diagonal():
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    rng = np.random.default_rng(5)
+    cif_k = np.sort(rng.random((40, 3)), axis=1) * 0.9
+    times = rng.uniform(0.0, 365.0, 40)
+    full = interpolate_cif(cif_k, grid, times)
+    assert np.array_equal(interpolate_cif(cif_k, grid, times, per_row=True),
+                          np.diag(full))
+
+
+def test_the_tail_is_the_same_curve_read_from_the_other_end():
+    """Hyman commutes with y -> c - y, so the two splines agree to rounding."""
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    rng = np.random.default_rng(7)
+    pmf_k = rng.dirichlet(np.ones(4) * 0.4, size=200)[:, :3]
+    times = np.linspace(0.0, 365.0, 400)
+    tail = interpolate_tail(pmf_k, grid, times)
+    total = pmf_k.sum(axis=1, keepdims=True)
+    via_cif = total - interpolate_cif(np.cumsum(pmf_k, axis=1), grid, times)
+    assert np.max(np.abs(tail - via_cif)) < 1e-14
+
+
+def test_the_tail_behind_a_saturated_bin_is_exact():
+    """1e-14 left after a bin holding the rest: the tail keeps every digit,
+    where F(tau) - F(t) is the difference of two numbers next to one.
+    """
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    pmf_k = np.array([[1.0 - 2e-14, 0.0, 1e-14]])
+    at_cut = interpolate_tail(pmf_k, grid, np.array([30.0, 90.0]))
+    assert at_cut[0].tolist() == [1e-14, 1e-14]
+    via_cif = (np.cumsum(pmf_k)[-1]
+               - interpolate_cif(np.cumsum(pmf_k, axis=1), grid,
+                                 np.array([30.0]))[0, 0])
+    assert via_cif != 1e-14                   # the route not taken
 
 
 # -------------------------------------------------------------- the reporter

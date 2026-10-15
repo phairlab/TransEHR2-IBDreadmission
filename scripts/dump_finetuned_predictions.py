@@ -14,7 +14,12 @@ Columns, one row per episode:
     time_to_event           minutes from INDEX_TIME, as labelled
     event_type              0 censored, 1 readmission, 2 death, 3 out-migration
     cif_<cause>_<cut>       F_k(t) at each cut, per cause
+    pmf_<cause>_<cut>       the mass in the bin ending at that cut, per cause
     p_survive               probability of reaching the horizon event-free
+
+The pmf is the cif's own increments, written as well because a small
+remainder after a large incidence cannot be recovered by subtracting two
+cif columns: survival after a cut is summed forward from the pmf instead.
 
 One process, one GPU: fold-level parallelism is the caller's, as in
 run_experiment.py.
@@ -111,15 +116,17 @@ def run_inference(
     loader: DataLoader,
     grid: TimeGrid,
     device: torch.device
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+           np.ndarray]:
     """Score one split.
 
     Returns:
-        ``(idx, time_to_event, event_type, cif, p_survive)`` with ``cif``
-        of shape (n, n_causes, n_bins) and the rest one-dimensional.
+        ``(idx, time_to_event, event_type, cif, pmf, p_survive)`` with
+        ``cif`` and ``pmf`` of shape (n, n_causes, n_bins) and the rest
+        one-dimensional.
     """
     model.eval()
-    idx, times, types, cifs, survives = [], [], [], [], []
+    idx, times, types, cifs, pmfs, survives = [], [], [], [], [], []
     nan_batches = 0
 
     with torch.no_grad():
@@ -142,6 +149,7 @@ def run_inference(
             pmf, p_survive = deephit_distribution(
                 logits.double(), grid.n_causes, grid.n_bins)
             cifs.append(cif_from_pmf(pmf).cpu().numpy())
+            pmfs.append(pmf.cpu().numpy())
             survives.append(p_survive.cpu().numpy())
 
             targets = batch['targets']
@@ -156,7 +164,7 @@ def run_inference(
 
     return (np.concatenate(idx), np.concatenate(times),
             np.concatenate(types), np.concatenate(cifs, axis=0),
-            np.concatenate(survives))
+            np.concatenate(pmfs, axis=0), np.concatenate(survives))
 
 
 def save_predictions_csv(
@@ -164,6 +172,7 @@ def save_predictions_csv(
     time_to_event: np.ndarray,
     event_type: np.ndarray,
     cif: np.ndarray,
+    pmf: np.ndarray,
     p_survive: np.ndarray,
     grid: TimeGrid,
     output_path: str
@@ -186,6 +195,10 @@ def save_predictions_csv(
         for b, cut in enumerate(grid.cuts):
             name = f"cif_{cause}_{format_days(float(cut)).replace(' ', '')}"
             columns[name] = cif[order, k, b]
+    for k, cause in enumerate(grid.cause_names):
+        for b, cut in enumerate(grid.cuts):
+            name = f"pmf_{cause}_{format_days(float(cut)).replace(' ', '')}"
+            columns[name] = pmf[order, k, b]
     columns['p_survive'] = p_survive[order]
 
     pd.DataFrame(columns).to_csv(output_path, index=False)
@@ -349,10 +362,10 @@ def main():
 
         for split, loader in zip(names, loaders):
             print(f"  {split}: {len(loader.dataset):,} episodes")
-            idx, times, types, cif, p_survive = run_inference(
+            idx, times, types, cif, pmf, p_survive = run_inference(
                 model, loader, grid, device)
             save_predictions_csv(
-                idx, times, types, cif, p_survive, grid,
+                idx, times, types, cif, pmf, p_survive, grid,
                 f'{args.model_dir}/{args.experiment_name}/{fold_name}/'
                 f'{TASK}/{TASK}_{split}_finetuned_output.csv')
 

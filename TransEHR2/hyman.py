@@ -164,7 +164,7 @@ def _spline_coef_conv(x: np.ndarray, y: np.ndarray,
 
 
 def hyman_spline(x: np.ndarray, y: np.ndarray,
-                 xout: np.ndarray) -> np.ndarray:
+                 xout: np.ndarray, per_row: bool = False) -> np.ndarray:
     """Evaluate ``splinefun(x, y, method = "hyman")`` at ``xout``.
 
     Args:
@@ -173,9 +173,13 @@ def hyman_spline(x: np.ndarray, y: np.ndarray,
             accepted and comes back as a (1, p) row.
         xout: (p,) times to evaluate at. Values outside ``x`` extrapolate
             along the end cubics, as R's does.
+        per_row: read row ``r`` at ``xout[r]`` alone, with ``p == m``,
+            rather than every row at every time -- each patient at their
+            own event time, without the (m, m) matrix whose diagonal that
+            would be.
 
     Returns:
-        (m, p) interpolated values.
+        (m, p) interpolated values, or (m,) with ``per_row``.
 
     Raises:
         ValueError: if a row of ``y`` is not monotone, or ``n < 3``.
@@ -201,4 +205,10 @@ def hyman_spline(x: np.ndarray, y: np.ndarray,
 
     i = np.clip(np.searchsorted(x, xout, side="right") - 1, 0, x.size - 1)
     dx = xout - x[i]
+    if per_row:
+        if xout.shape != (y.shape[0],):
+            raise ValueError(f"per_row needs one time per row: y has "
+                             f"{y.shape[0]} rows, xout shape {xout.shape}")
+        r = np.arange(y.shape[0])
+        return y[r, i] + dx * (b[r, i] + dx * (c[r, i] + dx * d[r, i]))
     return y[:, i] + dx * (b[:, i] + dx * (c[:, i] + dx * d[:, i]))

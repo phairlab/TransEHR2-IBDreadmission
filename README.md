@@ -205,9 +205,37 @@ python scripts/evaluate_finetuned_predictions.py experiment1_baseline \
 ```
 
 The first writes each episode's cumulative incidence at every cut, per
-cause; the second reads those CSVs back and writes one YAML per split with
-the per-fold metrics. Scoring from files rather than from the training loop
-means a change of metric costs a re-read rather than a re-fit.
+cause, with the bin masses it is summed from (`pmf_*`); the second reads
+those CSVs back and writes one YAML per split with the per-fold metrics.
+Scoring from files rather than from the training loop means a change of
+metric costs a re-read rather than a re-fit. CSVs dumped before the `pmf_*`
+columns existed must be re-dumped.
+
+Besides concordance and the Brier score, each split is scored for
+competing-risks D-calibration (Alberge et al., AISTATS 2026):
+`<Cause>_CR_DCal` per cause and `CR_DCal`, their sum, for ranking models,
+and Haider's chi-squared test on the same buckets for judging one
+(`<Cause>_CR_DCal_Chi2`, `<Cause>_CR_DCal_Chi2_P`, and `CR_DCal_Chi2_Pass`
+at a Bonferroni level). The settings are the `CR_DCAL_*` keys of the
+experiment config.
+
+Recalibration is an optional step between the two:
+
+```shell
+python scripts/recalibrate_predictions.py experiment1_baseline \
+    --model_dir ./models \
+    --experiment_config TransEHR2/configs/experiments/experiment1_baseline.yaml
+```
+
+It fits AJ-k recalibration on each fold's validation predictions, applies it
+to that fold's test predictions, and writes them beside the dump as
+`competing_risks_test_recal_aj_finetuned_output.csv`, in the same columns.
+The plain dump is never overwritten. The fitted offsets and the share of
+cells the repair changed go in `test_recal_aj_record.yaml`. Scoring then
+treats `test_recal_aj` as one more split, through the same routines, so
+`test_recal_aj_evaluation.yaml` reads against `test_evaluation.yaml` key for
+key. A recalibrated dump is made from the val and test dumps at the time it
+was written; after a re-dump, run the recalibration again.
 
 ## Tests
 

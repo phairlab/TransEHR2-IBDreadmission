@@ -54,6 +54,7 @@ from __future__ import annotations
 import numpy as np
 import torch
 
+from scipy.stats import chi2
 from torch import Tensor
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -99,6 +100,21 @@ DEFAULT_CUTS_DAYS: Tuple[float, ...] = (30.0, 60.0, 90.0, 365.0, 1095.0,
 # expected to see one at least annually, which makes the year the window
 # any single prediction has to cover. The lower bound is always zero.
 DEFAULT_BRIER_INTEGRATION_DAYS = 365.0
+
+# Competing-risks D-calibration (Alberge et al., AISTATS 2026), unless the
+# experiment config's CR_DCAL_* keys say otherwise. alpha = 2 makes the
+# distance Euclidean. The paper leaves the Riemann step count M unstated;
+# at 1000 the step is finer than any bucket a cohort this size can resolve.
+# Ten bins is Haider et al.'s choice for the chi-squared test.
+DEFAULT_CR_DCAL_ALPHA = 2.0
+DEFAULT_CR_DCAL_N_RHO = 1000
+DEFAULT_CR_DCAL_CHI2_BINS = 10
+DEFAULT_CR_DCAL_TEST_LEVEL = 0.05
+
+# The floor under a recalibrated incidence at the horizon and under the
+# recalibrated probability of surviving it, as censoring_survival floors G:
+# a zero would divide the D-calibration buckets by nothing.
+RECAL_FLOOR = 1e-8
 
 
 class TimeGrid:
@@ -295,9 +311,18 @@ def survival_from_pmf(pmf: Tensor, p_survive: Tensor) -> Tensor:
     the whole answer once the head saturates -- a confident model leaves a
     leftover near 1e-14, which is exactly the number needed and exactly the
     number that vanishes when it is computed as one minus its complement.
+
+    The mass after each bin is the inclusive tail of the *next* bin, not the
+    inclusive tail of this one minus this bin: that subtraction cancels the
+    same way whenever one bin holds nearly all of a patient's mass. In
+    float32, the precision the loss is trained in, a true survival of 3e-8
+    behind a saturated bin came out as 6e-8, and 1e-10 as nothing at all.
     """
     total = pmf.sum(dim=1)                                  # (batch, n_bins)
-    tail_exclusive = total.flip(-1).cumsum(-1).flip(-1) - total
+    tail_inclusive = total.flip(-1).cumsum(-1).flip(-1)
+    tail_exclusive = torch.cat(
+        [tail_inclusive[:, 1:], torch.zeros_like(tail_inclusive[:, :1])],
+        dim=-1)
     return tail_exclusive + p_survive.unsqueeze(-1)
 
 
@@ -453,7 +478,8 @@ def brier_times(grid: TimeGrid) -> np.ndarray:
 
 
 def interpolate_cif(
-    cif_k: np.ndarray, grid: TimeGrid, times: np.ndarray
+    cif_k: np.ndarray, grid: TimeGrid, times: np.ndarray,
+    per_row: bool = False
 ) -> np.ndarray:
     """One cause's cumulative incidence, read at arbitrary times.
 
@@ -476,9 +502,10 @@ def interpolate_cif(
         grid: the grid those cuts come from.
         times: (p,) days at which to read the curve, within ``[0,
             horizon]``.
+        per_row: read row ``i`` at ``times[i]`` alone, with ``p == n``.
 
     Returns:
-        (n, p) cumulative incidence.
+        (n, p) cumulative incidence, or (n,) with ``per_row``.
     """
     anchored = np.concatenate(
         [np.zeros((cif_k.shape[0], 1), dtype=np.float64),
@@ -488,9 +515,49 @@ def interpolate_cif(
     # refuses input that steps backwards by even one ulp.
     np.maximum.accumulate(anchored, axis=1, out=anchored)
 
-    curve = hyman_spline(grid.edges_days, anchored, times)
+    curve = hyman_spline(grid.edges_days, anchored, times, per_row=per_row)
     # Monotone interpolation between knots inside [0, 1] cannot leave it;
     # the clip is against rounding at the ends, not against the spline.
+    return np.clip(curve, 0.0, 1.0)
+
+
+def interpolate_tail(
+    pmf_k: np.ndarray, grid: TimeGrid, times: np.ndarray,
+    per_row: bool = False
+) -> np.ndarray:
+    """One cause's mass still to come, ``F_k(tau) - F_k(t)``, at arbitrary times.
+
+    The same curve :func:`interpolate_cif` draws, read from the other end.
+    The Hyman spline commutes with ``y -> c - y`` -- the FMM slopes are
+    linear in the knots and the filter is symmetric in sign -- so splining
+    the tail gives ``F_k(tau)`` minus the CIF's spline, to rounding (8e-16
+    on random curves). Splining the tail directly, with its knots summed
+    forward from the pmf as in :func:`survival_from_pmf`, is what keeps a
+    small remainder behind a large incidence from being computed as the
+    difference of two numbers near one.
+
+    Args:
+        pmf_k: (n, n_bins) one cause's mass in each bin.
+        grid: the grid those bins come from.
+        times: (p,) days, within ``[0, horizon]``.
+        per_row: read row ``i`` at ``times[i]`` alone, with ``p == n``.
+
+    Returns:
+        (n, p) mass of cause ``k`` after each time, or (n,) with
+        ``per_row``.
+    """
+    pmf_k = np.asarray(pmf_k, dtype=np.float64)
+    # The inclusive tail of bin j is the mass after edge j: the whole of
+    # F_k(tau) at t = 0, and nothing after the last cut.
+    inclusive = np.flip(np.cumsum(np.flip(pmf_k, axis=1), axis=1), axis=1)
+    anchored = np.concatenate(
+        [inclusive, np.zeros((pmf_k.shape[0], 1), dtype=np.float64)], axis=1)
+    # Non-increasing by construction; the running minimum is the mirror of
+    # interpolate_cif's running maximum, against input that steps the wrong
+    # way by an ulp.
+    np.minimum.accumulate(anchored, axis=1, out=anchored)
+
+    curve = hyman_spline(grid.edges_days, anchored, times, per_row=per_row)
     return np.clip(curve, 0.0, 1.0)
 
 
@@ -689,6 +756,272 @@ def aalen_johansen(
     index = np.searchsorted(event_times, np.asarray(taus, dtype=np.float64),
                             side='right') - 1
     return np.where(index >= 0, curve[np.clip(index, 0, None)], 0.0)
+
+
+# ------------------------------------------ competing-risks D-calibration
+
+def cr_dcal_numerator(
+    cif: np.ndarray,
+    pmf: np.ndarray,
+    p_survive: np.ndarray,
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    grid: TimeGrid,
+    rhos: np.ndarray,
+) -> Tuple[np.ndarray, float]:
+    r"""The bucket counts of CR D-calibration for cause ``k``, at each ``rho``.
+
+    Alberge et al. (AISTATS 2026, definition 10 and algorithm 1). Under a
+    calibrated model, the normalized incidence at the observed time,
+    ``u = F_k(t|x) / F_k(\infty|x)``, is uniform among the patients who
+    fail of cause ``k``. The bucket ``[0, rho]`` counts those patients
+    whose ``u`` lands in it, and a censored patient, whose cause is
+    unknown, contributes what the model expects of them given that they
+    were event-free at ``C``:
+
+    .. math::
+        N_k(\rho) = \#\{\delta_i = k, u_i \le \rho\}
+            + \sum_{\delta_i = 0,\, u_i \le \rho}
+              \frac{F_k(\infty|x_i)\rho - F_k(C_i|x_i)}{S(C_i|x_i)}
+
+    A patient who failed of another cause contributes nothing.
+
+    ``F_k(\infty)`` is read as ``F_k(\tau)``, the incidence at the horizon:
+    the head's leftover mass, ``p_survive``, belongs to no cause, so the
+    incidence past the grid is not identified. An event past the horizon
+    is already censored at it, so this is D-calibration of the
+    distribution given an event by ``tau`` -- and a patient censored there
+    has ``u = 1`` and a numerator of exactly zero.
+
+    ``S(C)`` is ``p_survive`` plus every cause's mass after ``C``, read
+    through :func:`interpolate_tail`, never ``1 - sum_k F_k(C)``: it is a
+    denominator, and a patient the head is sure will fail early would
+    otherwise divide by rounding error.
+
+    Args:
+        cif: (n, n_causes, n_bins) cumulative incidence at the cuts.
+        pmf: (n, n_causes, n_bins) the mass in each bin, the same
+            prediction.
+        p_survive: (n,) probability of reaching the horizon event-free.
+        times_days: (n,) days to the outcome, truncated at the horizon.
+        cause_index: (n,) position in the grid's causes, -1 if censored.
+        is_event: (n,) whether an outcome was observed inside the grid.
+        k: which cause.
+        grid: the grid the prediction was made on.
+        rhos: (p,) bucket upper bounds in ``[0, 1]``.
+
+    Returns:
+        ``(N_k(rhos), sum_i F_k(tau|x_i))``: the numerators, and the
+        denominator that turns them into ``b_k(rho)``.
+    """
+    days = np.asarray(times_days, dtype=np.float64)
+    ev = np.asarray(is_event, dtype=bool)
+    total = np.asarray(cif, dtype=np.float64)[:, k, -1]
+    f_at_t = interpolate_cif(cif[:, k, :], grid, days, per_row=True)
+    # The spline returns F_k(tau) at the horizon to rounding; a u of
+    # 1 + 1e-16 would fall outside the last bucket it belongs in.
+    u = np.minimum(f_at_t / total, 1.0)
+
+    failed_k = ev & (np.asarray(cause_index) == k)
+    censored = ~ev
+    surv_at_t = np.asarray(p_survive, dtype=np.float64) + sum(
+        interpolate_tail(pmf[:, j, :], grid, days, per_row=True)
+        for j in range(pmf.shape[1]))
+
+    # Sorted by u, every bucket is a prefix: counts and the censored terms'
+    # two parts, rho * F(tau)/S and F(C)/S, are prefix sums read off at
+    # each rho.
+    order = np.argsort(u, kind='stable')
+    u_sorted = u[order]
+    weight_rho = np.where(censored, total / surv_at_t, 0.0)[order]
+    weight_const = np.where(censored, f_at_t / surv_at_t, 0.0)[order]
+
+    def prefix(x):
+        return np.concatenate([[0.0], np.cumsum(x)])
+
+    upto = np.searchsorted(u_sorted, np.asarray(rhos, dtype=np.float64),
+                           side='right')
+    rhos = np.asarray(rhos, dtype=np.float64)
+    numerator = (prefix(failed_k[order].astype(np.float64))[upto]
+                 + rhos * prefix(weight_rho)[upto]
+                 - prefix(weight_const)[upto])
+    return numerator, float(total.sum())
+
+
+def cr_d_calibration(
+    cif: np.ndarray,
+    pmf: np.ndarray,
+    p_survive: np.ndarray,
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    grid: TimeGrid,
+    alpha: float = DEFAULT_CR_DCAL_ALPHA,
+    n_rho: int = DEFAULT_CR_DCAL_N_RHO,
+) -> float:
+    r"""Cause ``k``'s term of CR D-calibration: zero for a calibrated model.
+
+    .. math::
+        D_k = \Big(\frac{1}{M} \sum_{m=1}^{M}
+              |b_k(m/M) - m/M|^\alpha\Big)^{1/\alpha},
+        \quad b_k(\rho) = N_k(\rho) / \textstyle\sum_i F_k(\tau|x_i)
+
+    Algorithm 1's right-endpoint Riemann sum, term for term; the metric
+    the paper reports is the sum of ``D_k`` over causes. It has no scale
+    of its own -- there is no threshold below which a model is calibrated
+    -- so it ranks models; :func:`cr_dcal_chi2` is the test of one.
+    See :func:`cr_dcal_numerator` for the buckets.
+    """
+    rhos = np.arange(1, n_rho + 1, dtype=np.float64) / n_rho
+    numerator, denominator = cr_dcal_numerator(
+        cif, pmf, p_survive, times_days, cause_index, is_event, k, grid, rhos)
+    gap = np.abs(numerator / denominator - rhos) ** alpha
+    return float(np.mean(gap) ** (1.0 / alpha))
+
+
+def cr_dcal_chi2(
+    cif: np.ndarray,
+    pmf: np.ndarray,
+    p_survive: np.ndarray,
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    grid: TimeGrid,
+    n_bins: int = DEFAULT_CR_DCAL_CHI2_BINS,
+) -> Tuple[float, float]:
+    r"""Haider et al.'s chi-squared D-calibration test, on the CR buckets.
+
+    The paper proposes a Kolmogorov-Smirnov test (appendix E.2) without
+    saying how the censored patients' fractional weights enter it; this is
+    Haider's Pearson test instead, which has more power. The ``[0, 1]``
+    axis is cut into ``B`` equal bins, and bin ``j`` holds
+    ``N_k(j/B) - N_k((j-1)/B)`` -- which is appendix D.2's per-bin weight,
+    including the full-width share a censored patient spreads into every
+    bin above its own.
+
+    The expected count is the paper's null, ``E[B_{[a,b]}] = (b - a)
+    F_k(\infty|x)``, summed: ``sum_i F_k(tau|x_i) / B`` in every bin. That
+    tests the total mass as well as its shape, as the metric does, and
+    nothing is estimated from the counts, so ``df = B``. Haider rescales to
+    the observed total and takes ``df = B - 1``; here the observed total is
+    itself part of what is being tested.
+
+    Returns:
+        ``(X^2, p)``. Decide on a family of causes with a Bonferroni level,
+        as the paper does.
+    """
+    edges = np.arange(1, n_bins + 1, dtype=np.float64) / n_bins
+    numerator, denominator = cr_dcal_numerator(
+        cif, pmf, p_survive, times_days, cause_index, is_event, k, grid, edges)
+    observed = np.diff(numerator, prepend=0.0)
+    expected = denominator / n_bins
+    statistic = float(np.sum((observed - expected) ** 2) / expected)
+    return statistic, float(chi2.sf(statistic, df=n_bins))
+
+
+def aj_recalibration_offsets(
+    cif: np.ndarray,
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    grid: TimeGrid,
+) -> np.ndarray:
+    r"""AJ-k recalibration (Alberge et al., appendix F.1), fitted on one set.
+
+    .. math::
+        d_{k,j} = \frac{1}{n} \sum_i \hat F_k(c_j|x_i) - \hat F^{AJ}_k(c_j)
+
+    Per cause and cut, how far the model's average incidence sits above
+    the marginal Aalen-Johansen curve of the same patients. Subtracting it
+    from another set's predictions makes their average what this set's
+    outcomes say it should be, and leaves the ordering of patients at each
+    cut untouched. The survival offset is implied: the AJ incidences and
+    the KM survival sum to one, as the predictions do.
+
+    The sign is the model's excess, so that subtracting it lands the mean
+    on AJ. The paper's appendix F.1, as read here, writes the difference
+    the other way round and still subtracts it, which would move the mean
+    to ``2 mean - AJ``; the recalibration test pins the direction.
+
+    The AJ curve is read just before each cut, because the bins are
+    left-closed: an event at exactly a cut is in the bin the cut opens,
+    and so not in the model's ``F_k`` at that cut either.
+
+    Args:
+        cif: (n, n_causes, n_bins) the calibration set's predictions.
+        times_days, cause_index, is_event: its outcomes, as
+            :func:`cause_specific_brier` takes them.
+        grid: the grid of the predictions.
+
+    Returns:
+        (n_causes, n_bins) offsets.
+    """
+    just_before = np.nextafter(grid.cuts, -np.inf)
+    mean_cif = np.asarray(cif, dtype=np.float64).mean(axis=0)
+    return np.stack([
+        mean_cif[k]
+        - aalen_johansen(times_days, cause_index, is_event, k, just_before)
+        for k in range(grid.n_causes)])
+
+
+def apply_aj_recalibration(
+    cif: np.ndarray,
+    pmf: np.ndarray,
+    p_survive: np.ndarray,
+    offsets: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Shift a set's predictions by :func:`aj_recalibration_offsets`, and repair them.
+
+    The shift is one constant per (cause, cut) for every patient, so it can
+    leave the space of distributions: a low-risk patient goes negative
+    where the model over-predicts on average, a curve whose own rise
+    between two cuts is smaller than the offset's turns back on itself,
+    and where the model under-predicts the causes can sum past one. The
+    paper says nothing of this. The repair is:
+
+    * clip to ``[0, 1]`` and take the running maximum across cuts --
+      ``make_mono_quantiles(method="ceil")`` in shi-ang/
+      MakeSurvivalCalibratedAgain, per cause. :func:`interpolate_cif`
+      would impose the maximum on its knots anyway; it is done here so the
+      repaired arrays are valid without the spline;
+    * where a patient's causes sum past one at the horizon, divide all of
+      that patient's incidences by the sum, which keeps every curve
+      monotone because the sum is largest at the horizon;
+    * floor each ``F_k(tau)`` and the survival at :data:`RECAL_FLOOR`.
+
+    The pmf and the survival are built on the originals, ``pmf + diff(F~ -
+    F)`` and ``p_survive - sum_k (F~_k(tau) - F_k(tau))``, rather than as
+    differences of the new incidences, so the head's own small numbers
+    survive; the corrections are offset-sized, and their rounding sits far
+    below the offsets' own estimation error.
+
+    Returns:
+        ``(cif, pmf, p_survive, repaired_fraction)``: the recalibrated
+        prediction, and the fraction of (patient, cause, cut) cells the
+        repair changed after the shift.
+    """
+    cif = np.asarray(cif, dtype=np.float64)
+    shifted = cif - offsets[None, :, :]
+
+    repaired = np.clip(shifted, 0.0, 1.0)
+    np.maximum.accumulate(repaired, axis=2, out=repaired)
+    total = repaired[:, :, -1].sum(axis=1)
+    over = total > 1.0
+    repaired[over] /= total[over, None, None]
+    repaired[:, :, -1] = np.maximum(repaired[:, :, -1], RECAL_FLOOR)
+    repaired_fraction = float(np.mean(repaired != shifted))
+
+    delta = repaired - cif
+    new_pmf = np.asarray(pmf, dtype=np.float64) + np.diff(
+        delta, axis=2, prepend=0.0)
+    new_survive = np.maximum(
+        np.asarray(p_survive, dtype=np.float64) - delta[:, :, -1].sum(axis=1),
+        RECAL_FLOOR)
+    return repaired, new_pmf, new_survive, repaired_fraction
 
 
 def marginal_reference_metrics(

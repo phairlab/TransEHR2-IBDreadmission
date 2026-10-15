@@ -187,3 +187,15 @@ FINETUNE_SELECTION_METRIC: "brier"
 # there. The spline is part of the predictor, not of the scoring -- the
 # reported curves are read off it too.
 BRIER_INTEGRATION_DAYS: 365
+
+# Competing-risks D-calibration (Alberge et al., AISTATS 2026), scored by
+# evaluate_finetuned_predictions.py. CR_DCAL_ALPHA is the norm of the
+# distance between the bucket curve and the diagonal: 2 is Euclidean.
+# CR_DCAL_N_RHO is the Riemann step count of Algorithm 1, which the paper
+# leaves unstated. CR_DCAL_CHI2_BINS is B in Haider's chi-squared test, run
+# per cause with df = B; a model passes when every cause clears
+# CR_DCAL_TEST_LEVEL / (number of causes).
+CR_DCAL_ALPHA: 2
+CR_DCAL_N_RHO: 1000
+CR_DCAL_CHI2_BINS: 10
+CR_DCAL_TEST_LEVEL: 0.05

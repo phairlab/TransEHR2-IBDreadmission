@@ -4,23 +4,6 @@ Reads ``extracted/{val,event}_{times,masks}.npy`` and prints the frequency
 ladder's bounds for each stream, in days. The numbers go into an experiment
 config by hand; nothing here writes one.
 
-Why the bounds cannot be copied from the MIMIC fork
----------------------------------------------------
-
-Two reasons, and either on its own would be enough.
-
-* **The units differ.** MIMIC's timestamps reach the model in hours; these
-  reach it in days -- ``extract_data.py`` writes ``int32`` minutes and
-  ``datasets.MixedDataset._days`` divides by 1440. Carrying MIMIC's
-  ``8.05e+6`` and ``6048.0`` across would mis-scale every band by 24.
-* **The windows differ.** MIMIC measured its value ladder but took its
-  event ladder from the peri-stay window by *definition*, because
-  ``collate_tensorized`` sliced the history region away before the Hawkes
-  process saw it. There is no such split here: one window --
-  ``MAX_EPISODE_LEN_STEPS`` records at or before ``INDEX_TIME`` -- serves
-  both streams. So both bounds are measured, and they may legitimately
-  come out equal.
-
 What sets each bound
 --------------------
 

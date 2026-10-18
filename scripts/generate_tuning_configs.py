@@ -4,7 +4,7 @@
 The sweep is additive: a shared all-defaults centre per encoding arm, plus one trial for each
 non-default value of each hyperparameter. Five hyperparameters at three values each is eleven
 configurations per arm, and each becomes a standalone config that a single-GPU
-``run_experiment.py`` job runs on its own.
+``fit_transehr2_deephit.py`` job runs on its own.
 
 Usage:
     python scripts/generate_tuning_configs.py TransEHR2/configs/experiments/tuning/phase2_spec.yaml

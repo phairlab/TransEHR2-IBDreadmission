@@ -111,7 +111,7 @@ def read_result(manifest: Dict[str, Any], trial: Dict[str, Any], criterion: str)
     block = data.get(spec['block'])
     if block is None:
         # Reachable when a finetune was skipped because a finetuned model already existed:
-        # run_experiment.py has no validation scores to record in that case.
+        # fit_transehr2_deephit.py has no validation scores to record in that case.
         return TrialResult(
             trial, criterion, status='unreadable', scores={},
             detail=(f"{path} has no {spec['block']!r} block. If the finetune was skipped "

@@ -124,7 +124,7 @@ longer matches, so rebuild it after any re-extraction.
 ## Running an experiment
 
 ```shell
-python scripts/run_experiment.py \
+python scripts/fit_transehr2_deephit.py \
     TransEHR2/configs/datasets/RMT23345.yaml \
     TransEHR2/configs/experiments/experiment1_baseline.yaml
 ```
@@ -146,7 +146,7 @@ memory-mapped arrays.
 
 ```shell
 for f in 0 1 2 3 4; do
-    CUDA_VISIBLE_DEVICES=$f python scripts/run_experiment.py \
+    CUDA_VISIBLE_DEVICES=$f python scripts/fit_transehr2_deephit.py \
         TransEHR2/configs/datasets/RMT23345.yaml \
         TransEHR2/configs/experiments/experiment1_baseline.yaml \
         --folds fold$f &

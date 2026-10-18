@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Rebuild a sweep's ``evaluation_pretrained.yaml`` files from its TensorBoard logs.
 
-``run_experiment.py`` writes each epoch's losses twice: to
+``fit_transehr2_deephit.py`` writes each epoch's losses twice: to
 ``{MODEL_DIR}/{EXPERIMENT_NAME}/{fold}/pretrained/evaluation/`` once at the end,
 and to ``./log/{EXPERIMENT_NAME}/{fold}/pretrained/`` every epoch as TensorBoard
 scalars. The second copy is complete and lives in a different tree, so a sweep
@@ -111,9 +111,9 @@ def best_epoch_losses(scalars):
 def settings_from_config(config_path: str):
     """The settings block `write_pretraining_evaluation` records, from the config.
 
-    Keys and spelling follow its call site in ``run_experiment.py``: the file is
-    read by eye as often as by machine, and two spellings of the same run would
-    be worse than none.
+    Keys and spelling follow its call site in ``fit_transehr2_deephit.py``:
+    the file is read by eye as often as by machine, and two spellings of the
+    same run would be worse than none.
     """
     with open(config_path) as f_in:
         config = yaml.safe_load(f_in)
@@ -140,7 +140,7 @@ def main(argv=None) -> int:
     )
     parser.add_argument('manifest', help="The sweep's manifest.")
     parser.add_argument('--log_root', default='./log',
-                        help="Where run_experiment.py wrote its TensorBoard "
+                        help="Where fit_transehr2_deephit.py wrote its TensorBoard "
                              "logs. Relative to the repository root, which is "
                              "the directory the job ran from.")
     parser.add_argument('--overwrite', action='store_true',
@@ -182,7 +182,7 @@ def main(argv=None) -> int:
                 'settings': settings_from_config(trial['config']),
                 'train_losses': train_losses,
                 'val_losses': val_losses,
-                # Not written by run_experiment.py. A reader comparing these
+                # Not written by fit_transehr2_deephit.py. A reader comparing these
                 # against a later run's needs to know these were recovered
                 # from the logs rather than written by the run itself.
                 'rebuilt_from_tensorboard': {

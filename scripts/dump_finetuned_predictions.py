@@ -22,7 +22,7 @@ remainder after a large incidence cannot be recovered by subtracting two
 cif columns: survival after a cut is summed forward from the pmf instead.
 
 One process, one GPU: fold-level parallelism is the caller's, as in
-run_experiment.py.
+fit_transehr2_deephit.py.
 
 Usage:
     python scripts/dump_finetuned_predictions.py <dataset_config> <experiment_config> \\
@@ -280,14 +280,14 @@ def main():
     static_dim = sum(
         compute_static_feat_dims(variable_properties, STATIC_FEATS))
 
-    # Excluded for the same reason run_experiment.py excludes it: these
+    # Excluded for the same reason fit_transehr2_deephit.py excludes it: these
     # predictions are what the reported metrics are computed from, and the
     # tuning fold has no place in them. --folds reaches it when wanted.
     fold_name_list = args.folds or get_fold_names(DATA_DIR,
                                                   exclude=[TUNING_FOLD])
 
     # The whole lookup family, whenever the extraction carries it: see
-    # run_experiment.py. The weights being loaded here were built from
+    # fit_transehr2_deephit.py. The weights being loaded here were built from
     # the same two numbers, so a short encoder fails the load rather
     # than predicting wrongly -- but it fails on every fold, which is
     # not a useful way to find out.

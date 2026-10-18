@@ -284,7 +284,7 @@ def test_every_config_declares_an_arm_and_four_float_bounds(name):
     assert config['EVENT_LADDER_P_MAX'] > config['EVENT_LADDER_P_MIN']
 
 
-@pytest.mark.parametrize('script', ['run_experiment.py',
+@pytest.mark.parametrize('script', ['fit_transehr2_deephit.py',
                                     'dump_finetuned_predictions.py',
                                     'render_token_attributions.py'])
 def test_each_construction_site_takes_its_own_streams_ladder(script):

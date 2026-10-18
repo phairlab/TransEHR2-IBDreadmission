@@ -9,9 +9,9 @@ Two stages, with command-line entry points under ``scripts/``:
     report_tuning_results.py     manifest -> progress and the ranking
     select_tuned_cell.py         manifest -> the winning cell, as a record
 
-The trials themselves are ordinary single-GPU ``run_experiment.py`` jobs.
-Nothing here trains anything; it decides what to run and reads back what
-ran.
+The trials themselves are ordinary single-GPU ``fit_transehr2_deephit.py``
+jobs. Nothing here trains anything; it decides what to run and reads back
+what ran.
 
 Ported from the MIMIC-IV fork, less its ``reporting`` module, which
 rendered manuscript tables through a JMIR formatting package this repo

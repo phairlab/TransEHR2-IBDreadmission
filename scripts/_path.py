@@ -1,10 +1,10 @@
 """Put the repository root on ``sys.path``.
 
-``python scripts/run_experiment.py`` makes ``scripts/`` the first entry on
-``sys.path``, not the repository root, so ``import TransEHR2`` fails. The
-package is not installed -- there is no ``pyproject.toml`` and the cluster
-runs it straight from a checkout -- so something has to add the root, and
-doing it here keeps it to one line per script instead of three.
+``python scripts/fit_transehr2_deephit.py`` makes ``scripts/`` the first
+entry on ``sys.path``, not the repository root, so ``import TransEHR2``
+fails. The package is not installed -- there is no ``pyproject.toml`` and
+the cluster runs it straight from a checkout -- so something has to add the
+root, and doing it here keeps it to one line per script instead of three.
 
 Import it before any ``TransEHR2`` import, and leave it first:
 

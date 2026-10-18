@@ -1,8 +1,9 @@
 """Recovering a sweep's ranking from its TensorBoard logs.
 
-``run_experiment.py`` writes each epoch's losses to two trees: the evaluation
-YAML beside the weights, and TensorBoard scalars under ``./log``. The second is
-complete, so losing the first costs the encoders but not the ranking.
+``fit_transehr2_deephit.py`` writes each epoch's losses to two trees: the
+evaluation YAML beside the weights, and TensorBoard scalars under ``./log``.
+The second is complete, so losing the first costs the encoders but not the
+ranking.
 
 What these pin is that the recovery rebuilds *the artifact the ranking machinery
 already reads*, with the epoch the training loop would have selected -- which is
@@ -41,7 +42,7 @@ def _config(path: Path, lr=0.002, half_life=480):
 
 
 def _write_logs(log_root: Path, name: str, fold: str, val_curve):
-    """One trial's TensorBoard run, as run_experiment.py lays it out."""
+    """One trial's TensorBoard run, as fit_transehr2_deephit.py lays it out."""
     log_dir = log_root / name / fold / 'pretrained'
     log_dir.mkdir(parents=True)
     writer = SummaryWriter(str(log_dir))

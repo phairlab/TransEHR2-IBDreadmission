@@ -1,11 +1,11 @@
 """Pretraining has to leave behind something a sweep can rank.
 
-``pretrain_model`` returns the best epoch's losses and ``run_experiment``
-used to throw them away: they reached the console and TensorBoard, and the
-weights reached disk, but no file carried the number a learning-rate sweep
-is decided on. These probes pin the file's path and the one key the
-ranking reads, because both are a contract with ``hp_tuning`` rather than
-an internal detail.
+``pretrain_model`` returns the best epoch's losses and
+``fit_transehr2_deephit`` used to throw them away: they reached the console
+and TensorBoard, and the weights reached disk, but no file carried the
+number a learning-rate sweep is decided on. These probes pin the file's
+path and the one key the ranking reads, because both are a contract with
+``hp_tuning`` rather than an internal detail.
 """
 
 import numpy as np
@@ -13,7 +13,7 @@ import pytest
 import torch
 import yaml
 
-from run_experiment import write_pretraining_evaluation
+from fit_transehr2_deephit import write_pretraining_evaluation
 
 
 LOSSES = {'Optimization_Loss': 4.79, 'Generator_Loss': 3.1,
@@ -109,13 +109,13 @@ def test_pretrain_only_is_an_option_on_the_entry_point(capsys):
     """
     import sys
 
-    import run_experiment
+    import fit_transehr2_deephit
 
     argv = sys.argv
-    sys.argv = ['run_experiment.py', '--help']
+    sys.argv = ['fit_transehr2_deephit.py', '--help']
     try:
         with pytest.raises(SystemExit):
-            run_experiment.main()
+            fit_transehr2_deephit.main()
     finally:
         sys.argv = argv
 

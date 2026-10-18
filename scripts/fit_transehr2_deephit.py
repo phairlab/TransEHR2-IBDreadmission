@@ -6,12 +6,12 @@ memory-mapped read-only, so five shells or one SLURM array does the job
 that FSDP used to:
 
     for f in 0 1 2 3 4; do
-        CUDA_VISIBLE_DEVICES=$f python scripts/run_experiment.py \\
+        CUDA_VISIBLE_DEVICES=$f python scripts/fit_transehr2_deephit.py \\
             dataset.yaml experiment.yaml --folds fold$f &
     done; wait
 
 Usage:
-    python scripts/run_experiment.py <dataset_config> <experiment_config> \\
+    python scripts/fit_transehr2_deephit.py <dataset_config> <experiment_config> \\
         [--folds fold0 fold1] [--device cuda:0] [--force_pretrain] \\
         [--num_workers 0] [--mem_test_mode]
 """

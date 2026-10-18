@@ -1,7 +1,7 @@
 """The few things every entry point in ``scripts/`` needs.
 
-These lived in ``run_experiment.py`` and the other scripts imported them from
-it, which made one CLI a library for the others: importing
+These lived in ``fit_transehr2_deephit.py`` and the other scripts imported
+them from it, which made one CLI a library for the others: importing
 ``dump_finetuned_predictions`` pulled in the whole experiment driver, and the
 import only resolved because both files sat in the same directory. They are
 package code, so they live in the package.

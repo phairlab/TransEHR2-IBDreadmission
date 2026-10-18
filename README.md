@@ -195,7 +195,7 @@ finetuning rather than being handed pretrained weights.
 ## Scoring a trained model
 
 ```shell
-python scripts/dump_finetuned_predictions.py \
+python scripts/dump_transehr2_deephit_predictions.py \
     TransEHR2/configs/datasets/RMT23345.yaml \
     TransEHR2/configs/experiments/experiment1_baseline.yaml \
     experiment1_baseline --model_dir ./models

@@ -17,7 +17,7 @@ TWO_CAUSES = ["readmission", "death"]
 
 
 def write_split(path, data, grid):
-    from dump_finetuned_predictions import save_predictions_csv
+    from dump_transehr2_deephit_predictions import save_predictions_csv
 
     n = data['cif'].shape[0]
     save_predictions_csv(np.arange(n), data['time_to_event'],

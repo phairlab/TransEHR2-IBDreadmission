@@ -285,7 +285,7 @@ def test_every_config_declares_an_arm_and_four_float_bounds(name):
 
 
 @pytest.mark.parametrize('script', ['fit_transehr2_deephit.py',
-                                    'dump_finetuned_predictions.py',
+                                    'dump_transehr2_deephit_predictions.py',
                                     'render_token_attributions.py'])
 def test_each_construction_site_takes_its_own_streams_ladder(script):
     """A value encoder on the event ladder would be wrong by three orders

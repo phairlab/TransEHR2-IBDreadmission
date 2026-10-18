@@ -25,7 +25,7 @@ One process, one GPU: fold-level parallelism is the caller's, as in
 fit_transehr2_deephit.py.
 
 Usage:
-    python scripts/dump_finetuned_predictions.py <dataset_config> <experiment_config> \\
+    python scripts/dump_transehr2_deephit_predictions.py <dataset_config> <experiment_config> \\
         <experiment_name> [--model_dir ./models] [--folds fold0] \\
         [--device cuda:0] [--num_workers 0] [--batch_size 750]
 """

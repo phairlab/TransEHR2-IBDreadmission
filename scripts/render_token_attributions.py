@@ -270,9 +270,9 @@ def build_classifier(dataset_config, experiment_config, grid, data_dir) -> Mixed
     """The finetuned classifier's architecture, rebuilt to load weights into.
 
     NOTE: this is the third copy of this construction -- ``fit_transehr2_deephit.py`` and
-    ``dump_finetuned_predictions.py`` each carry one, both as closures inside ``main``. They
-    should be one shared builder. Unifying them touches the script that runs the training, so
-    it is deliberately not done here; it is a tidy-up of its own.
+    ``dump_transehr2_deephit_predictions.py`` each carry one, both as closures inside
+    ``main``. They should be one shared builder. Unifying them touches the script that runs
+    the training, so it is deliberately not done here; it is a tidy-up of its own.
     """
     variable_properties = load_config(dataset_config['VARIABLE_PROPERTIES_PATH'])
     lookup_dims = lookup_feat_widths(os.path.join(data_dir, 'extracted'))

@@ -154,7 +154,7 @@ def test_fused_attention_gives_fully_masked_rows_the_zero_vector():
     The explicit path fills those scores with -1e9, so the softmax is uniform and the row returns
     the mean of v. Handed the same mask, ``scaled_dot_product_attention`` returns NaN -- and NaN
     survives the padding multiply that follows, which is the whole reason ``install_nan_hooks``
-    exists in dump_finetuned_predictions.py. The fused path returns zero instead.
+    exists in dump_transehr2_deephit_predictions.py. The fused path returns zero instead.
     """
     attention = ScaledDotProductAttention(temperature=8 ** 0.5, attn_dropout=0.0)
     attention.eval()
@@ -373,8 +373,8 @@ def test_the_delegated_stack_still_needs_the_nan_guard_and_the_migrated_one_does
 
     ``torch.nn.MultiheadAttention`` softmaxes over an all-masked row and returns NaN, which then
     survives the ``val_enc * mask`` in the readout because NaN * 0 = NaN. That is what
-    ``install_nan_hooks`` in dump_finetuned_predictions.py patches over at inference time. The
-    migrated stack handles the row where it arises, so nothing needs patching.
+    ``install_nan_hooks`` in dump_transehr2_deephit_predictions.py patches over at inference
+    time. The migrated stack handles the row where it arises, so nothing needs patching.
     """
     indicators, values, timestamps, masks = _value_batch()
     with torch.no_grad():
@@ -383,7 +383,7 @@ def test_the_delegated_stack_still_needs_the_nan_guard_and_the_migrated_one_does
 
     assert torch.isnan(delegated[3]).any(), (
         'the BatchNorm stack no longer NaNs on an all-padding episode -- if that is deliberate, '
-        'the nan hooks in dump_finetuned_predictions.py can go too'
+        'the nan hooks in dump_transehr2_deephit_predictions.py can go too'
     )
     assert torch.isfinite(migrated).all()
 

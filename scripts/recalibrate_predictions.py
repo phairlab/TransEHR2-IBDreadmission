@@ -37,7 +37,7 @@ from TransEHR2.survival import (
     TimeGrid, aj_recalibration_offsets, apply_aj_recalibration
 )
 
-from dump_finetuned_predictions import save_predictions_csv
+from dump_transehr2_deephit_predictions import save_predictions_csv
 from evaluate_finetuned_predictions import (
     TASK, get_fold_names, load_config, outcomes, read_predictions
 )

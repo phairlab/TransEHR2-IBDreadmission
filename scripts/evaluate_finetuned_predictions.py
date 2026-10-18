@@ -1,4 +1,4 @@
-"""Score the CSVs ``dump_finetuned_predictions.py`` writes, fold by fold.
+"""Score the CSVs ``dump_transehr2_deephit_predictions.py`` writes, fold by fold.
 
 Separate from the training run on purpose: scoring a saved prediction is
 cheap, repeatable and needs no GPU, so a change of metric or of horizon
@@ -101,7 +101,7 @@ def read_predictions(path: str, grid: TimeGrid) -> Optional[Dict]:
     if missing:
         raise ValueError(
             f"{path} has no pmf columns ({missing[0]}, ...). It predates "
-            f"their addition to dump_finetuned_predictions.py, which the "
+            f"their addition to dump_transehr2_deephit_predictions.py, which the "
             f"survival in the D-calibration weights is summed from; "
             f"re-dump it."
         )

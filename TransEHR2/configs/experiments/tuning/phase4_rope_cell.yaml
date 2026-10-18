@@ -1,0 +1,30 @@
+spec_name: phase4
+manifest: /projects/p60290_2/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase4_manifest.yaml
+fold: fold0
+arm: rope
+design: factorial
+criterion: readmission
+metric: Readmission_Integrated_Brier
+direction: min
+selected:
+  cell:
+    DEEPHIT_HEAD_D_SHARED:
+    - 256
+    - 128
+    DEEPHIT_HEAD_D_CAUSE:
+    - 64
+  trial: phase4_rope_shared_256x128_cause_64
+  metric_value: 0.06069702346083179
+  complete: true
+measured:
+  DEEPHIT_HEAD_D_SHARED=[256, 128]  DEEPHIT_HEAD_D_CAUSE=[128, 64]: 0.06083604739420072
+  DEEPHIT_HEAD_D_SHARED=[256, 128]  DEEPHIT_HEAD_D_CAUSE=[64]: 0.06069702346083179
+  DEEPHIT_HEAD_D_SHARED=[128]  DEEPHIT_HEAD_D_CAUSE=[128, 64]: 0.06098950787601618
+  DEEPHIT_HEAD_D_SHARED=[128]  DEEPHIT_HEAD_D_CAUSE=[64]: 0.06094239002091218
+caveats:
+- 'Factorial sweep: the selected cell was run as a configuration, so no combination
+  of separately chosen winners is being assumed.'
+- Selected under the tuning epoch budget and applied to longer final runs. The learning
+  rate half-life is the setting most sensitive to that difference.
+- Selected on fold0 alone, which is the fold held out of the manuscript results for
+  exactly this purpose.

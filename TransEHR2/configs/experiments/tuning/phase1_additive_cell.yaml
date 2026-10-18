@@ -1,0 +1,35 @@
+spec_name: phase1
+manifest: /uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase1_manifest.yaml
+fold: fold0
+arm: additive
+design: factorial
+criterion: pretrain
+metric: Optimization_Loss
+direction: min
+selected:
+  cell:
+    PRETRAIN_LEARNING_RATE: 0.0002
+    PRETRAIN_LR_HALF_LIFE: null
+  trial: phase1_additive_lr_0p0002_hl_none
+  metric_value: 0.37805935740470886
+  complete: true
+measured:
+  PRETRAIN_LEARNING_RATE=0.002  PRETRAIN_LR_HALF_LIFE=480: 0.4158734977245331
+  PRETRAIN_LEARNING_RATE=0.002  PRETRAIN_LR_HALF_LIFE=160: 0.40579017996788025
+  PRETRAIN_LEARNING_RATE=0.002  PRETRAIN_LR_HALF_LIFE=60: 0.389744371175766
+  PRETRAIN_LEARNING_RATE=0.002  PRETRAIN_LR_HALF_LIFE=null: 0.43138086795806885
+  PRETRAIN_LEARNING_RATE=0.0006  PRETRAIN_LR_HALF_LIFE=480: 0.38713881373405457
+  PRETRAIN_LEARNING_RATE=0.0006  PRETRAIN_LR_HALF_LIFE=160: 0.38875970244407654
+  PRETRAIN_LEARNING_RATE=0.0006  PRETRAIN_LR_HALF_LIFE=60: 0.37837696075439453
+  PRETRAIN_LEARNING_RATE=0.0006  PRETRAIN_LR_HALF_LIFE=null: 0.3899584412574768
+  PRETRAIN_LEARNING_RATE=0.0002  PRETRAIN_LR_HALF_LIFE=480: 0.38362905383110046
+  PRETRAIN_LEARNING_RATE=0.0002  PRETRAIN_LR_HALF_LIFE=160: 0.38446274399757385
+  PRETRAIN_LEARNING_RATE=0.0002  PRETRAIN_LR_HALF_LIFE=60: 0.3867286443710327
+  PRETRAIN_LEARNING_RATE=0.0002  PRETRAIN_LR_HALF_LIFE=null: 0.37805935740470886
+caveats:
+- 'Factorial sweep: the selected cell was run as a configuration, so no combination
+  of separately chosen winners is being assumed.'
+- Selected under the tuning epoch budget and applied to longer final runs. The learning
+  rate half-life is the setting most sensitive to that difference.
+- Selected on fold0 alone, which is the fold held out of the manuscript results for
+  exactly this purpose.

@@ -1,0 +1,35 @@
+spec_name: phase2
+manifest: /uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/TransEHR2/TransEHR2/configs/experiments/tuning/phase2_rope_manifest.yaml
+fold: fold0
+arm: rope
+design: factorial
+criterion: readmission
+metric: Readmission_Integrated_Brier
+direction: min
+selected:
+  cell:
+    FINETUNE_LEARNING_RATE: 5.0e-05
+    FINETUNE_LR_HALF_LIFE: null
+  trial: phase2_rope_lr_5em05_hl_none
+  metric_value: 0.06108225890747868
+  complete: true
+measured:
+  FINETUNE_LEARNING_RATE=5e-05  FINETUNE_LR_HALF_LIFE=480: 0.06143174073712157
+  FINETUNE_LEARNING_RATE=5e-05  FINETUNE_LR_HALF_LIFE=160: 0.061233037157180814
+  FINETUNE_LEARNING_RATE=5e-05  FINETUNE_LR_HALF_LIFE=60: 0.061450024547823015
+  FINETUNE_LEARNING_RATE=5e-05  FINETUNE_LR_HALF_LIFE=null: 0.06108225890747868
+  FINETUNE_LEARNING_RATE=2.2e-05  FINETUNE_LR_HALF_LIFE=480: 0.061449641805497286
+  FINETUNE_LEARNING_RATE=2.2e-05  FINETUNE_LR_HALF_LIFE=160: 0.06127988343934012
+  FINETUNE_LEARNING_RATE=2.2e-05  FINETUNE_LR_HALF_LIFE=60: 0.06142985194368966
+  FINETUNE_LEARNING_RATE=2.2e-05  FINETUNE_LR_HALF_LIFE=null: 0.06116930447706055
+  FINETUNE_LEARNING_RATE=1e-05  FINETUNE_LR_HALF_LIFE=480: 0.061398834397439185
+  FINETUNE_LEARNING_RATE=1e-05  FINETUNE_LR_HALF_LIFE=160: 0.06151568415182462
+  FINETUNE_LEARNING_RATE=1e-05  FINETUNE_LR_HALF_LIFE=60: 0.061852223402098346
+  FINETUNE_LEARNING_RATE=1e-05  FINETUNE_LR_HALF_LIFE=null: 0.06163606773689472
+caveats:
+- 'Factorial sweep: the selected cell was run as a configuration, so no combination
+  of separately chosen winners is being assumed.'
+- Selected under the tuning epoch budget and applied to longer final runs. The learning
+  rate half-life is the setting most sensitive to that difference.
+- Selected on fold0 alone, which is the fold held out of the manuscript results for
+  exactly this purpose.

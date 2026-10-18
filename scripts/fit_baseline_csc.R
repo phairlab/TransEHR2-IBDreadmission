@@ -138,6 +138,45 @@ fit_encoding <- function(train) {
     }))
 }
 
+# Train design columns that are a linear combination of the others, or of a
+# constant, which the Cox baseline hazard absorbs (user, 2026-10-18). The
+# REG-derived features all go missing for an episode with no registry row
+# before its index, so their missing indicators and levels coincide, and a Cox
+# model cannot estimate them separately. Dropping the redundant ones changes no
+# prediction: what they carried, the kept columns carry. Pivoted QR keeps the
+# earliest independent columns, and the constant goes first so that it is
+# kept.
+aliased_columns <- function(design) {
+  x <- cbind(`(constant)` = 1, as.matrix(design))
+  decomposition <- qr(x, tol = 1e-7, LAPACK = FALSE)
+  dependent <- decomposition$pivot[-seq_len(decomposition$rank)]
+  colnames(x)[dependent]
+}
+
+# The design columns that coxph warned may have infinite coefficients, named,
+# with their estimates by cause. For a 0/1 column, also how many train
+# episodes have it set and their events by cause. Aggregates only.
+report_nonconverged <- function(columns, models, train) {
+  if (length(columns) == 0) return(invisible(NULL))
+  cat("coxph did not converge for:", toString(columns), "\n")
+  for (column in columns) {
+    estimates <- sapply(models, function(m) {
+      c(coef = unname(coef(m)[column]),
+        se = unname(sqrt(diag(m$var))[match(column, names(coef(m)))]))
+    })
+    colnames(estimates) <- causes
+    cat(sprintf("  %s, by cause:\n", column))
+    print(signif(estimates, 4))
+    value <- train[[column]]
+    if (all(value %in% c(0, 1))) {
+      set <- value == 1
+      cat(sprintf("  %s = 1 in %d train episode(s); events: %s\n", column,
+                  sum(set), paste(causes, sapply(codes, function(k)
+                    sum(train$event[set] == k)), sep = " ", collapse = ", ")))
+    }
+  }
+}
+
 # The design matrix of one partition, as a data.table of numeric columns.
 encode <- function(rows, encoding, split) {
   absent <- sapply(unfilled, function(f) sum(is.na(rows[[f]])))
@@ -195,6 +234,14 @@ fit_fold <- function(fold) {
     encode(partitions[[s]], encoding, s))
   names(designs) <- SPLITS
 
+  dropped <- aliased_columns(designs$train)
+  if (length(dropped) > 0) {
+    cat("dropped as linear combinations of the other columns:",
+        toString(dropped), "\n")
+    designs <- lapply(designs, function(d)
+      d[, setdiff(names(d), dropped), with = FALSE])
+  }
+
   train <- cbind(outcome(partitions$train), designs$train)
   absent <- causes[!codes %in% train$event]
   if (length(absent) > 0) {
@@ -202,7 +249,19 @@ fit_fold <- function(fold) {
   }
   formula <- reformulate(names(designs$train),
                          response = "Hist(time, event)")
-  fit <- CSC(formula, data = train, ties = cfg$CSC_TIES)
+  # coxph names the columns of a non-convergence warning by position in the
+  # design, which is this formula's term order.
+  nonconverged <- character(0)
+  fit <- withCallingHandlers(
+    CSC(formula, data = train, ties = cfg$CSC_TIES),
+    warning = function(w) {
+      found <- regmatches(conditionMessage(w),
+                          regexpr("variable +[0-9, ]+", conditionMessage(w)))
+      if (length(found) == 1) {
+        position <- as.integer(strsplit(gsub("[^0-9,]", "", found), ",")[[1]])
+        nonconverged <<- union(nonconverged, names(designs$train)[position])
+      }
+    })
   models <- lapply(codes, function(k)
     fit$models[[match(as.character(k), fit$causes)]])
   coefs <- sapply(models, coef)
@@ -210,6 +269,7 @@ fit_fold <- function(fold) {
     stop("fold", fold, ": coefficient(s) not estimable: ",
          toString(rownames(coefs)[apply(is.na(coefs), 1, any)]))
   }
+  report_nonconverged(nonconverged, models, train)
 
   out_dir <- file.path(cfg$MODEL_DIR, cfg$EXPERIMENT_NAME,
                        sprintf("fold%d", fold), TASK)

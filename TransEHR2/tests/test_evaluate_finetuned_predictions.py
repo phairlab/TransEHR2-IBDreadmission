@@ -62,7 +62,8 @@ def test_recalibration_dumps_beside_and_scoring_reads_it_as_a_split(
     config = tmp_path / 'experiment.yaml'
     config.write_text(yaml.dump({
         'TIME_GRID_CUTS_DAYS': CUTS, 'MODELLED_CAUSES': TWO_CAUSES,
-        'BRIER_INTEGRATION_DAYS': 365, 'CR_DCAL_CHI2_BINS': 5}))
+        'BRIER_INTEGRATION_DAYS': 365, 'CR_DCAL_CHI2_BINS': 5,
+        'EVAL_HORIZONS_DAYS': [30, 365]}))
 
     seed = 10
     for fold in ('fold1', 'fold2'):
@@ -122,7 +123,8 @@ def test_recalibration_dumps_beside_and_scoring_reads_it_as_a_split(
         assert results[name]['folds'] == ['fold1', 'fold2']
         assert results[name]['cr_dcal']['chi2_bins'] == 5
         for key in ('Readmission_CR_DCal', 'Death_CR_DCal_Chi2_P', 'CR_DCal',
-                    'CR_DCal_Chi2_Pass', 'Readmission_Integrated_Brier'):
+                    'CR_DCal_Chi2_Pass', 'Readmission_Integrated_Brier',
+                    'Readmission_Cindex_Lee_at_30d', 'Death_IPA_to_1y'):
             assert len(results[name][key]) == 2
             assert all(np.isfinite(results[name][key]))
     # The same routines, so the same keys: the two files compare key for key.

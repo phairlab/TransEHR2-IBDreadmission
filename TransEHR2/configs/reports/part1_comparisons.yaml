@@ -1,0 +1,58 @@
+# Part 1 model comparisons, read by scripts/compare_models.py.
+#
+# Every setting that changes a reported P value is here: which evaluations
+# are compared, on which metrics, over which BH family, and the ratio the
+# Nadeau-Bengio correction uses. The causes and horizons are not repeated:
+# they are read from the evaluation headers, which must agree.
+
+# n_test / n_train of one fold. split.py makes 6 folds with fold0 reserved
+# for tuning, and holds 0.2 of each fold's training patients out for val:
+# test 1/6, train 0.8 * 5/6 = 4/6. Val is not counted as training data.
+N_TRAIN_TEST_RATIO: 0.25
+
+# Evaluation YAML under {model_dir}/{experiment}/, per variant.
+EVALUATION_FILE: "{split}_evaluation.yaml"
+
+# The dump split each variant is scored from.
+VARIANTS:
+  raw: test
+  recal: test_recal_aj
+
+# Every model is fit on, and scored on, all drawn episodes.
+MODELS:
+  TransEHR2: part1_transehr2
+  CSC: part1_csc
+  TabDeepHit: part1_tabdh
+
+# Paired, two-sided. The difference is the first minus the second.
+COMPARISONS:
+  - [TransEHR2 raw, CSC raw]
+  - [TransEHR2 raw, TabDeepHit raw]
+  - [TabDeepHit raw, CSC raw]
+  - [TransEHR2 recal, CSC recal]
+  - [TransEHR2 recal, TabDeepHit recal]
+  - [TabDeepHit recal, CSC recal]
+  - [TransEHR2 recal, TransEHR2 raw]
+  - [CSC recal, CSC raw]
+  - [TabDeepHit recal, TabDeepHit raw]
+
+# Metric keys in the evaluation YAMLs. {cause} is the metric label of each
+# modelled cause, {tau} each horizon as the evaluation spells it.
+TESTED_METRICS:
+  - "{cause}_Cindex_Lee_at_{tau}"
+  - "{cause}_IBS_to_{tau}"
+  - "{cause}_CR_DCal"
+
+# Reported with means and differences but not tested: IPA is IBS over a null
+# every model shares on the test partition, so it carries the IBS comparison.
+REPORTED_METRICS:
+  - "{cause}_IPA_to_{tau}"
+
+# One BH family per cause table, covering every tested metric and comparison
+# in it. The only scope implemented.
+BH_FAMILY: cause
+
+# CR D-calibration chi-squared, a per-model goodness-of-fit test kept out of
+# the BH family. A cause passes a fold when p > LEVEL * K, K the number of
+# modelled causes (Alberge et al. 2026, appendix E).
+DCAL_CHI2_LEVEL: 0.05

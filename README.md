@@ -215,9 +215,23 @@ Besides concordance and the Brier score, each split is scored for
 competing-risks D-calibration (Alberge et al., AISTATS 2026):
 `<Cause>_CR_DCal` per cause and `CR_DCal`, their sum, for ranking models,
 and Haider's chi-squared test on the same buckets for judging one
-(`<Cause>_CR_DCal_Chi2`, `<Cause>_CR_DCal_Chi2_P`, and `CR_DCal_Chi2_Pass`
-at a Bonferroni level). The settings are the `CR_DCAL_*` keys of the
-experiment config.
+(`<Cause>_CR_DCal_Chi2`, `<Cause>_CR_DCal_Chi2_P`, and `CR_DCal_Chi2_Pass`,
+which needs every cause's p above `CR_DCAL_TEST_LEVEL` times the number of
+causes). The settings are the `CR_DCAL_*` keys of the experiment config.
+
+At each of `EVAL_HORIZONS_DAYS` it also reports Lee et al.'s weighted
+concordance of `F_k(tau)` (`<Cause>_Cindex_Lee_at_<tau>`, with censoring
+weights fitted on the fold's train dump), and the Brier score integrated to
+`tau` with its Aalen-Johansen reference and IPA (`<Cause>_IBS_to_<tau>`,
+`<Cause>_IBS_Null_to_<tau>`, `<Cause>_IPA_to_<tau>`).
+
+The cause-specific Cox baseline leaves its parameters rather than its
+curves: per fold, `competing_risks_{split}_csc_lp.csv` and
+`competing_risks_csc_baseline_hazard.csv` (formats in `TransEHR2/csc.py`).
+`scripts/dump_baseline_csc_predictions.py` writes its grid dumps from them, and the
+scoring script rebuilds its exact curve, as `riskRegression` predicts it,
+for the fixed-horizon metrics, the integrated Brier score and CR
+D-calibration.
 
 Recalibration is an optional step between the two:
 
@@ -230,6 +244,11 @@ python scripts/recalibrate_predictions.py experiment1_baseline \
 It fits AJ-k recalibration on each fold's validation predictions, applies it
 to that fold's test predictions, and writes them beside the dump as
 `competing_risks_test_recal_aj_finetuned_output.csv`, in the same columns.
+The CSC is recalibrated on its exact curve: its offsets are taken on val at
+every time that curve or the val AJ estimate can change, and written as
+`competing_risks_csc_recal_offsets.csv`; scoring shifts each test curve by
+them and repairs it once, and the recalibrated dump is that curve at the
+cuts.
 The plain dump is never overwritten. The fitted offsets and the share of
 cells the repair changed go in `test_recal_aj_record.yaml`. Scoring then
 treats `test_recal_aj` as one more split, through the same routines, so
@@ -246,3 +265,13 @@ python -m pytest TransEHR2/tests
 The suite needs no patient data. Most of it runs against a small cohort the
 tests write themselves; the end-to-end tests run against IBDdataprep's
 synthetic fixture and skip if it has not been generated.
+
+The R code here runs under this repository's renv (`renv.lock`;
+`renv::restore()` from the repository root). The CSC reconstruction is
+checked against reference predictions from `riskRegression`, kept in
+`TransEHR2/tests/fixtures/csc_reference/`; after a riskRegression upgrade,
+remake them with
+
+```shell
+Rscript TransEHR2/tests/fixtures/make_csc_reference.R
+```

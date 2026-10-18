@@ -18,6 +18,15 @@ split with the same routines as every other. What the corrected dump cannot
 say about itself -- the fitted offsets, and how much of the shifted surface
 had to be repaired -- goes in ``{model_dir}/{experiment}/test_recal_aj_record.yaml``.
 
+The cause-specific Cox baseline is recalibrated on its exact curve instead
+(``recalibrate_csc``), wherever its parameters sit beside the dumps
+(``TransEHR2.csc``). The offsets are taken on val at every time that curve
+or the val AJ estimate can change, and are written per fold as
+``competing_risks_csc_recal_offsets.csv``; the scoring script applies them
+and repairs each test patient's curve once along that axis, so that every
+time it reads the recalibrated CSC it reads one curve. The recalibrated
+dump is that curve at the cuts.
+
 A fold without both a validation and a test dump is skipped.
 
 Usage:
@@ -26,15 +35,20 @@ Usage:
 """
 
 import argparse
+import numpy as np
 import os
 import yaml
 
-from typing import Dict
+from typing import Dict, Tuple
 
 import _path  # noqa: F401  (repository root on sys.path)
 
+from TransEHR2.csc import (
+    BASELINE_FILE, LP_FILE, OFFSETS_FILE, CSCCurve, csc_dense_offsets,
+    read_csc_baseline, read_csc_lp, save_csc_offsets
+)
 from TransEHR2.survival import (
-    TimeGrid, aj_recalibration_offsets, apply_aj_recalibration
+    RECAL_FLOOR, TimeGrid, aj_recalibration_offsets, apply_aj_recalibration
 )
 
 from dump_transehr2_deephit_predictions import save_predictions_csv
@@ -61,6 +75,31 @@ def recalibrate(val: Dict, test: Dict, grid: TimeGrid) -> Dict:
             'offsets': offsets, 'repaired_fraction': repaired}
 
 
+def recalibrate_csc(val: Dict, test: Dict,
+                    baseline: Tuple[np.ndarray, np.ndarray],
+                    grid: TimeGrid) -> Dict:
+    """The CSC's test curve after dense AJ-k recalibration fitted on ``val``.
+
+    ``val`` and ``test`` are :func:`~TransEHR2.csc.read_csc_lp` dicts.
+    Returns the test dict with the recalibrated ``cif``, ``pmf`` and
+    ``p_survive`` at the cuts, the dense offsets as ``axis`` and ``dense``,
+    their values at the cuts as ``offsets``, and the ``repaired_fraction``
+    of (patient, cause, axis point) cells.
+    """
+    _, ci, ev, days = outcomes(val, grid)
+    axis, dense = csc_dense_offsets(CSCCurve(val['lp'], baseline),
+                                    baseline[0], days, ci, ev, grid)
+    curve = CSCCurve(test['lp'], baseline, offsets=(axis, dense))
+    cif, _ = curve.read(grid.cuts)
+    return {**test, 'cif': cif,
+            'pmf': np.diff(cif, axis=2, prepend=0.0),
+            'p_survive': np.maximum(1.0 - cif[:, :, -1].sum(axis=1),
+                                    RECAL_FLOOR),
+            'axis': axis, 'dense': dense,
+            'offsets': dense[:, np.searchsorted(axis, grid.cuts)],
+            'repaired_fraction': curve.repaired_fraction}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='AJ-k recalibrate finetuned test predictions, fitted on '
@@ -85,6 +124,10 @@ def main():
         return os.path.join(experiment_dir, fold_name, TASK,
                             f'{TASK}_{split}_finetuned_output.csv')
 
+    def csc_path(fold_name, template, split=None):
+        return os.path.join(experiment_dir, fold_name, TASK,
+                            template.format(task=TASK, split=split))
+
     folds = {}
     for fold_name in get_fold_names(experiment_dir):
         val = read_predictions(path(fold_name, 'val'), grid)
@@ -92,7 +135,23 @@ def main():
         if val is None or test is None:
             print(f"{fold_name}: needs both val and test dumps, skipping")
             continue
-        recalibrated = recalibrate(val, test, grid)
+        baseline = read_csc_baseline(csc_path(fold_name, BASELINE_FILE),
+                                     grid)
+        if baseline is None:
+            recalibrated = recalibrate(val, test, grid)
+        else:
+            lp = {split: read_csc_lp(csc_path(fold_name, LP_FILE, split),
+                                     grid) for split in ('val', 'test')}
+            missing = [s for s, v in lp.items() if v is None]
+            if missing:
+                raise FileNotFoundError(
+                    f'{fold_name} has a CSC baseline hazard but no linear '
+                    f'predictors for {missing}')
+            recalibrated = recalibrate_csc(lp['val'], lp['test'], baseline,
+                                           grid)
+            save_csc_offsets(csc_path(fold_name, OFFSETS_FILE),
+                             recalibrated['axis'], recalibrated['dense'],
+                             grid)
         # Beside the dump it was made from, never over it: the plain
         # predictions stay what the model said.
         save_predictions_csv(
@@ -101,6 +160,9 @@ def main():
             recalibrated['pmf'], recalibrated['p_survive'], grid,
             path(fold_name, SPLIT))
         folds[fold_name] = {
+            # Of (patient, cause, cut) cells; for the CSC, of (patient,
+            # cause, point) cells of its dense offsets' axis.
+            'csc_curve': baseline is not None,
             'repaired_fraction': float(recalibrated['repaired_fraction']),
             'offsets': {
                 cause: [float(v) for v in recalibrated['offsets'][k]]
@@ -122,7 +184,9 @@ def main():
             'time_grid_cuts_days': list(map(float, grid.cuts)),
             'causes': list(grid.cause_names),
             # Offsets are the model's mean excess over Aalen-Johansen at
-            # each cut, subtracted from every test prediction.
+            # each cut, subtracted from every test prediction. The CSC's
+            # are taken at every point of its axis, in its offsets file;
+            # these are their values at the cuts.
             'folds': folds,
         }, f_out, default_flow_style=False, indent=2, sort_keys=False)
     print(f"Recalibrated {len(folds)} folds -> {out_path}")

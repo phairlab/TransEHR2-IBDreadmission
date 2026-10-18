@@ -35,7 +35,8 @@ Readings this module commits to
   as a step function would hand three quarters of a one-year integral to
   whatever the model said at exactly 365 days. The gaps are filled by
   ``splinefun(method = "hyman")`` -- the smoothing MTLR draws its survival
-  curves with, ported in :mod:`TransEHR2.hyman` -- anchored at
+  curves with, ported in :mod:`TransEHR2.hyman` and read through its torch
+  twin :mod:`TransEHR2.hyman_torch` -- anchored at
   ``F_k(0) = 0``. This adds no information: the head still emits six
   numbers per cause, and the curve between them is an assumption about
   smoothness. It does make the assumption part of the predictor, so
@@ -58,7 +59,7 @@ from scipy.stats import chi2
 from torch import Tensor
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from TransEHR2.hyman import hyman_spline
+from TransEHR2.hyman_torch import hyman_spline
 
 
 MINUTES_PER_DAY = 1440.0
@@ -100,6 +101,12 @@ DEFAULT_CUTS_DAYS: Tuple[float, ...] = (30.0, 60.0, 90.0, 365.0, 1095.0,
 # expected to see one at least annually, which makes the year the window
 # any single prediction has to cover. The lower bound is always zero.
 DEFAULT_BRIER_INTEGRATION_DAYS = 365.0
+
+# The fixed horizons Lee's concordance and the integrated Brier score are
+# reported at, in days, unless EVAL_HORIZONS_DAYS says otherwise: 30 and 90
+# days, then 1, 3 and 5 years.
+DEFAULT_EVAL_HORIZONS_DAYS: Tuple[float, ...] = (30.0, 90.0, 365.0, 1095.0,
+                                                 1825.0)
 
 # Competing-risks D-calibration (Alberge et al., AISTATS 2026), unless the
 # experiment config's CR_DCAL_* keys say otherwise. alpha = 2 makes the
@@ -463,7 +470,7 @@ def event_times_days(time_to_event: np.ndarray,
     return np.minimum(days, grid.horizon_days)
 
 
-def brier_times(grid: TimeGrid) -> np.ndarray:
+def brier_times(grid: TimeGrid, upper: Optional[float] = None) -> np.ndarray:
     """The axis the Brier score is integrated over: 0 to the bound, daily.
 
     One point per day. The outcome times are recorded to the minute but
@@ -472,15 +479,19 @@ def brier_times(grid: TimeGrid) -> np.ndarray:
     integral. Zero is on the axis because ``F_k(0) = 0`` for every patient
     and nobody has failed yet, so the score there is exactly zero -- a
     real point of the curve rather than an extrapolation.
+
+    The bound is ``grid.brier_integration_days`` unless ``upper`` is given,
+    as :func:`integrated_brier_to` gives it for a fixed horizon.
     """
-    n_steps = max(int(round(grid.brier_integration_days)), 1)
-    return np.linspace(0.0, grid.brier_integration_days, n_steps + 1)
+    upper = grid.brier_integration_days if upper is None else float(upper)
+    n_steps = max(int(round(upper)), 1)
+    return np.linspace(0.0, upper, n_steps + 1)
 
 
 def interpolate_cif(
-    cif_k: np.ndarray, grid: TimeGrid, times: np.ndarray,
+    cif_k: np.ndarray | Tensor, grid: TimeGrid, times: np.ndarray,
     per_row: bool = False
-) -> np.ndarray:
+) -> np.ndarray | Tensor:
     """One cause's cumulative incidence, read at arbitrary times.
 
     The head predicts ``F_k`` at the cuts and nowhere else. Between them
@@ -497,6 +508,10 @@ def interpolate_cif(
     curve, which is why the reporting script reads it through the same
     function rather than keeping the step function for itself.
 
+    The spline runs in torch so that a gradient can be traced through it:
+    given a tensor, this returns a float64 tensor on its graph; given an
+    array, an array, identical to what the NumPy port would give.
+
     Args:
         cif_k: (n, n_bins) cumulative incidence of one cause at the cuts.
         grid: the grid those cuts come from.
@@ -507,24 +522,26 @@ def interpolate_cif(
     Returns:
         (n, p) cumulative incidence, or (n,) with ``per_row``.
     """
-    anchored = np.concatenate(
-        [np.zeros((cif_k.shape[0], 1), dtype=np.float64),
-         np.asarray(cif_k, dtype=np.float64)], axis=1)
+    is_tensor = torch.is_tensor(cif_k)
+    cif_k = torch.as_tensor(cif_k, dtype=torch.float64)
+    anchored = torch.cat([cif_k.new_zeros((cif_k.shape[0], 1)), cif_k],
+                         dim=1)
     # A cumulative sum of non-negative mass is monotone by construction,
     # but it reaches here through a float32 softmax, and the filter
     # refuses input that steps backwards by even one ulp.
-    np.maximum.accumulate(anchored, axis=1, out=anchored)
+    anchored = torch.cummax(anchored, dim=1).values
 
     curve = hyman_spline(grid.edges_days, anchored, times, per_row=per_row)
     # Monotone interpolation between knots inside [0, 1] cannot leave it;
     # the clip is against rounding at the ends, not against the spline.
-    return np.clip(curve, 0.0, 1.0)
+    curve = curve.clamp(0.0, 1.0)
+    return curve if is_tensor else curve.numpy()
 
 
 def interpolate_tail(
-    pmf_k: np.ndarray, grid: TimeGrid, times: np.ndarray,
+    pmf_k: np.ndarray | Tensor, grid: TimeGrid, times: np.ndarray,
     per_row: bool = False
-) -> np.ndarray:
+) -> np.ndarray | Tensor:
     """One cause's mass still to come, ``F_k(tau) - F_k(t)``, at arbitrary times.
 
     The same curve :func:`interpolate_cif` draws, read from the other end.
@@ -536,6 +553,9 @@ def interpolate_tail(
     small remainder behind a large incidence from being computed as the
     difference of two numbers near one.
 
+    A tensor in gives a float64 tensor out, an array an array, as in
+    :func:`interpolate_cif`.
+
     Args:
         pmf_k: (n, n_bins) one cause's mass in each bin.
         grid: the grid those bins come from.
@@ -546,19 +566,21 @@ def interpolate_tail(
         (n, p) mass of cause ``k`` after each time, or (n,) with
         ``per_row``.
     """
-    pmf_k = np.asarray(pmf_k, dtype=np.float64)
+    is_tensor = torch.is_tensor(pmf_k)
+    pmf_k = torch.as_tensor(pmf_k, dtype=torch.float64)
     # The inclusive tail of bin j is the mass after edge j: the whole of
     # F_k(tau) at t = 0, and nothing after the last cut.
-    inclusive = np.flip(np.cumsum(np.flip(pmf_k, axis=1), axis=1), axis=1)
-    anchored = np.concatenate(
-        [inclusive, np.zeros((pmf_k.shape[0], 1), dtype=np.float64)], axis=1)
+    inclusive = torch.flip(torch.cumsum(torch.flip(pmf_k, [1]), dim=1), [1])
+    anchored = torch.cat([inclusive, pmf_k.new_zeros((pmf_k.shape[0], 1))],
+                         dim=1)
     # Non-increasing by construction; the running minimum is the mirror of
     # interpolate_cif's running maximum, against input that steps the wrong
     # way by an ulp.
-    np.minimum.accumulate(anchored, axis=1, out=anchored)
+    anchored = torch.cummin(anchored, dim=1).values
 
     curve = hyman_spline(grid.edges_days, anchored, times, per_row=per_row)
-    return np.clip(curve, 0.0, 1.0)
+    curve = curve.clamp(0.0, 1.0)
+    return curve if is_tensor else curve.numpy()
 
 
 def censoring_survival(
@@ -692,6 +714,137 @@ def integrated_brier(brier: np.ndarray, times: np.ndarray) -> float:
     return float(np.sum(0.5 * (y[:-1] + y[1:]) * np.diff(x)) / span)
 
 
+def integrated_brier_to(
+    cif_k: np.ndarray,
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    grid: TimeGrid,
+    tau: float,
+    daily: bool = False,
+) -> float:
+    """The integrated Brier score of ``F_k`` from discharge to ``tau``.
+
+    :func:`cause_specific_brier` read on ``brier_times(grid, tau)`` and
+    averaged by :func:`integrated_brier`, which is the ``Integrated_Brier``
+    the scoring script reports with the bound moved from
+    ``grid.brier_integration_days`` to ``tau``. ``G`` is fitted on the
+    episodes being scored, as there.
+
+    The axis is taken in slices, because each point is scored on its own
+    and a five-year axis over a training split would otherwise hold several
+    ``(n, 1826)`` arrays at once.
+
+    Args:
+        cif_k: (n, n_bins) cumulative incidence of cause ``k`` at the cuts,
+            read through :func:`interpolate_cif`; or, with ``daily``, the
+            curve already read on ``brier_times(grid, tau)``, (n, p) or
+            (1, p) for a curve every episode shares.
+        times_days, cause_index, is_event, k: as
+            :func:`cause_specific_brier` takes them.
+        grid: the grid of the prediction.
+        tau: the upper bound, in days, within the grid.
+        daily: whether ``cif_k`` is already on the axis.
+    """
+    if not 0 < tau <= grid.horizon_days:
+        raise ValueError(f"tau is {tau} but the grid ends at "
+                         f"{grid.horizon_days}")
+    taus = brier_times(grid, tau)
+    if daily and np.shape(cif_k)[1] != taus.size:
+        raise ValueError(f"a daily curve to {tau} has {taus.size} points, "
+                         f"got {np.shape(cif_k)[1]}")
+    brier = np.empty(taus.size, dtype=np.float64)
+    step = 128
+    for lo in range(0, taus.size, step):
+        part = slice(lo, lo + step)
+        curve = (np.asarray(cif_k)[:, part] if daily
+                 else interpolate_cif(cif_k, grid, taus[part]))
+        brier[part] = cause_specific_brier(curve, times_days, cause_index,
+                                           is_event, k, taus[part])
+    return integrated_brier(brier, taus)
+
+
+def lee_weighted_concordance(
+    risk: np.ndarray,
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    tau: float,
+    train_times_days: np.ndarray,
+    train_is_event: np.ndarray,
+) -> float:
+    r"""Lee et al.'s weighted concordance of cause ``k`` at horizon ``tau``.
+
+    ``weighted_c_index`` in chl8856/DeepHit's ``utils_eval.py``, term for
+    term, but for where ``G`` comes from:
+
+    .. math::
+        C_k(\tau) = \frac{\sum_{i,j} A_{ij} N_i Q_{ij}}{\sum_{i,j} A_{ij} N_i},
+        \quad A_{ij} = \frac{1[T_i < T_j]}{G(T_i)^2},
+        \quad N_i = 1[\delta_i = k, T_i \le \tau],
+        \quad Q_{ij} = 1[s_i > s_j]
+
+    A case failed of cause ``k`` by ``tau``; its controls are every episode
+    whose recorded time is strictly later, whatever happened to it then. A
+    tie in the score counts nothing, as the strict comparison has it.
+
+    ``G`` is the Kaplan-Meier of true censoring on the training partition,
+    where Lee's code fits it with every outcome but cause ``k`` as the
+    censoring event, so that a competing event would be weighted as if the
+    episode had left observation. It is read as Lee's code reads its
+    lifelines curve: at the first training time at or after ``T_i``, or at
+    the last one past them all. That is ``G(T_i)`` up to the gap between
+    ``T_i`` and the next training time. Where ``G`` reaches zero -- at the
+    grid's horizon, where every training episode still at risk is censored
+    -- the last nonzero value is carried forward, as Lee's code does, rather
+    than floored as :func:`censoring_survival` floors it.
+
+    Args:
+        risk: (n,) the score, ``F_k(tau)``.
+        times_days, cause_index, is_event, k: the scored episodes, as
+            :func:`cause_specific_brier` takes them.
+        tau: the horizon, in days.
+        train_times_days, train_is_event: the training partition's
+            outcomes, for ``G``.
+
+    Returns:
+        The concordance, or NaN when no case has a control.
+    """
+    t = np.asarray(times_days, dtype=np.float64)
+    s = np.asarray(risk, dtype=np.float64)
+    cases = np.flatnonzero(np.asarray(is_event, dtype=bool)
+                           & (np.asarray(cause_index) == k) & (t <= tau))
+    if cases.size == 0:
+        return float('nan')
+
+    train_t = np.asarray(train_times_days, dtype=np.float64)
+    jump_times, surv = censoring_survival(train_t, train_is_event)
+    # The floor stands for a zero, and the zeros are a suffix.
+    positive = surv > 1e-8
+    if positive.any():
+        surv = np.where(positive, surv, surv[positive][-1])
+    # lifelines' timeline: every training time, and zero.
+    timeline = np.unique(np.concatenate([[0.0], train_t]))
+    at = timeline[np.minimum(np.searchsorted(timeline, t[cases], side='left'),
+                             timeline.size - 1)]
+    weight = 1.0 / _censoring_at(jump_times, surv, at, left_limit=False) ** 2
+
+    later = t.size - np.searchsorted(np.sort(t), t[cases], side='right')
+    concordant = np.empty(cases.size, dtype=np.float64)
+    step = 256
+    for lo in range(0, cases.size, step):
+        c = cases[lo:lo + step]
+        concordant[lo:lo + step] = np.sum(
+            (t[None, :] > t[c, None]) & (s[None, :] < s[c, None]), axis=1)
+
+    denominator = float(np.sum(weight * later))
+    if denominator == 0:
+        return float('nan')
+    return float(np.sum(weight * concordant)) / denominator
+
+
 def aalen_johansen(
     times_days: np.ndarray,
     cause_index: np.ndarray,
@@ -816,19 +969,62 @@ def cr_dcal_numerator(
         ``(N_k(rhos), sum_i F_k(tau|x_i))``: the numerators, and the
         denominator that turns them into ``b_k(rho)``.
     """
+    return cr_dcal_numerator_from_values(
+        *_cr_dcal_values(cif, pmf, p_survive, times_days, k, grid),
+        cause_index, is_event, k, rhos)
+
+
+def _cr_dcal_values(
+    cif: np.ndarray,
+    pmf: np.ndarray,
+    p_survive: np.ndarray,
+    times_days: np.ndarray,
+    k: int,
+    grid: TimeGrid,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(F_k(t_i), F_k(tau), S(t_i))`` of a grid prediction, through Hyman."""
     days = np.asarray(times_days, dtype=np.float64)
-    ev = np.asarray(is_event, dtype=bool)
     total = np.asarray(cif, dtype=np.float64)[:, k, -1]
     f_at_t = interpolate_cif(cif[:, k, :], grid, days, per_row=True)
+    surv_at_t = np.asarray(p_survive, dtype=np.float64) + sum(
+        interpolate_tail(pmf[:, j, :], grid, days, per_row=True)
+        for j in range(pmf.shape[1]))
+    return f_at_t, total, surv_at_t
+
+
+def cr_dcal_numerator_from_values(
+    f_at_t: np.ndarray,
+    total: np.ndarray,
+    surv_at_t: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    rhos: np.ndarray,
+) -> Tuple[np.ndarray, float]:
+    """:func:`cr_dcal_numerator` from each patient's own three values.
+
+    For a model whose curve is read exactly rather than through Hyman --
+    the cause-specific Cox baseline -- the caller reads them itself:
+
+    Args:
+        f_at_t: (n,) ``F_k(t_i|x_i)`` at each patient's own time.
+        total: (n,) ``F_k(tau|x_i)``, at the last cut.
+        surv_at_t: (n,) ``S(t_i|x_i)``, the probability of being event-free
+            of every cause at ``t_i``. Only the censored patients' is read,
+            as a denominator, so it must be positive for them.
+        cause_index, is_event, k, rhos: as :func:`cr_dcal_numerator` takes
+            them.
+    """
+    f_at_t = np.asarray(f_at_t, dtype=np.float64)
+    total = np.asarray(total, dtype=np.float64)
+    surv_at_t = np.asarray(surv_at_t, dtype=np.float64)
+    ev = np.asarray(is_event, dtype=bool)
     # The spline returns F_k(tau) at the horizon to rounding; a u of
     # 1 + 1e-16 would fall outside the last bucket it belongs in.
     u = np.minimum(f_at_t / total, 1.0)
 
     failed_k = ev & (np.asarray(cause_index) == k)
     censored = ~ev
-    surv_at_t = np.asarray(p_survive, dtype=np.float64) + sum(
-        interpolate_tail(pmf[:, j, :], grid, days, per_row=True)
-        for j in range(pmf.shape[1]))
 
     # Sorted by u, every bucket is a prefix: counts and the censored terms'
     # two parts, rho * F(tau)/S and F(C)/S, are prefix sums read off at
@@ -875,9 +1071,26 @@ def cr_d_calibration(
     -- so it ranks models; :func:`cr_dcal_chi2` is the test of one.
     See :func:`cr_dcal_numerator` for the buckets.
     """
+    return cr_d_calibration_from_values(
+        *_cr_dcal_values(cif, pmf, p_survive, times_days, k, grid),
+        cause_index, is_event, k, alpha=alpha, n_rho=n_rho)
+
+
+def cr_d_calibration_from_values(
+    f_at_t: np.ndarray,
+    total: np.ndarray,
+    surv_at_t: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    alpha: float = DEFAULT_CR_DCAL_ALPHA,
+    n_rho: int = DEFAULT_CR_DCAL_N_RHO,
+) -> float:
+    """:func:`cr_d_calibration` from the values of
+    :func:`cr_dcal_numerator_from_values`."""
     rhos = np.arange(1, n_rho + 1, dtype=np.float64) / n_rho
-    numerator, denominator = cr_dcal_numerator(
-        cif, pmf, p_survive, times_days, cause_index, is_event, k, grid, rhos)
+    numerator, denominator = cr_dcal_numerator_from_values(
+        f_at_t, total, surv_at_t, cause_index, is_event, k, rhos)
     gap = np.abs(numerator / denominator - rhos) ** alpha
     return float(np.mean(gap) ** (1.0 / alpha))
 
@@ -911,12 +1124,30 @@ def cr_dcal_chi2(
     itself part of what is being tested.
 
     Returns:
-        ``(X^2, p)``. Decide on a family of causes with a Bonferroni level,
-        as the paper does.
+        ``(X^2, p)``. H0 is calibration, so a cause passes when it is not
+        rejected; the scoring script's rule for a family of ``K`` causes is
+        ``p > level * K``, the paper's decision rule for its per-cause test
+        (appendix E).
     """
+    return cr_dcal_chi2_from_values(
+        *_cr_dcal_values(cif, pmf, p_survive, times_days, k, grid),
+        cause_index, is_event, k, n_bins=n_bins)
+
+
+def cr_dcal_chi2_from_values(
+    f_at_t: np.ndarray,
+    total: np.ndarray,
+    surv_at_t: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    n_bins: int = DEFAULT_CR_DCAL_CHI2_BINS,
+) -> Tuple[float, float]:
+    """:func:`cr_dcal_chi2` from the values of
+    :func:`cr_dcal_numerator_from_values`."""
     edges = np.arange(1, n_bins + 1, dtype=np.float64) / n_bins
-    numerator, denominator = cr_dcal_numerator(
-        cif, pmf, p_survive, times_days, cause_index, is_event, k, grid, edges)
+    numerator, denominator = cr_dcal_numerator_from_values(
+        f_at_t, total, surv_at_t, cause_index, is_event, k, edges)
     observed = np.diff(numerator, prepend=0.0)
     expected = denominator / n_bins
     statistic = float(np.sum((observed - expected) ** 2) / expected)
@@ -960,12 +1191,39 @@ def aj_recalibration_offsets(
     Returns:
         (n_causes, n_bins) offsets.
     """
-    just_before = np.nextafter(grid.cuts, -np.inf)
-    mean_cif = np.asarray(cif, dtype=np.float64).mean(axis=0)
+    return dense_aj_offsets(np.asarray(cif, dtype=np.float64).mean(axis=0),
+                            grid.cuts, times_days, cause_index, is_event)
+
+
+def dense_aj_offsets(
+    mean_cif: np.ndarray,
+    times: np.ndarray,
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+) -> np.ndarray:
+    """:func:`aj_recalibration_offsets` at any times, not only at the cuts.
+
+    For a model whose incidence is known at every time it is read -- the
+    cause-specific Cox baseline -- the offset is taken wherever the curve
+    is: ``d_k(t) = mean_i F_k(t|x_i) - F^AJ_k(t-)``, AJ read just before
+    ``t`` as at the cuts. At the cuts it is the grid offset itself.
+
+    Args:
+        mean_cif: (n_causes, p) the calibration set's mean incidence at
+            ``times``.
+        times: (p,) days, ascending.
+        times_days, cause_index, is_event: its outcomes.
+
+    Returns:
+        (n_causes, p) offsets.
+    """
+    just_before = np.nextafter(np.asarray(times, dtype=np.float64), -np.inf)
+    mean_cif = np.asarray(mean_cif, dtype=np.float64)
     return np.stack([
         mean_cif[k]
         - aalen_johansen(times_days, cause_index, is_event, k, just_before)
-        for k in range(grid.n_causes)])
+        for k in range(mean_cif.shape[0])])
 
 
 def apply_aj_recalibration(
@@ -1006,13 +1264,7 @@ def apply_aj_recalibration(
     """
     cif = np.asarray(cif, dtype=np.float64)
     shifted = cif - offsets[None, :, :]
-
-    repaired = np.clip(shifted, 0.0, 1.0)
-    np.maximum.accumulate(repaired, axis=2, out=repaired)
-    total = repaired[:, :, -1].sum(axis=1)
-    over = total > 1.0
-    repaired[over] /= total[over, None, None]
-    repaired[:, :, -1] = np.maximum(repaired[:, :, -1], RECAL_FLOOR)
+    repaired = _repair_shifted_cif(shifted)
     repaired_fraction = float(np.mean(repaired != shifted))
 
     delta = repaired - cif
@@ -1022,6 +1274,46 @@ def apply_aj_recalibration(
         np.asarray(p_survive, dtype=np.float64) - delta[:, :, -1].sum(axis=1),
         RECAL_FLOOR)
     return repaired, new_pmf, new_survive, repaired_fraction
+
+
+def _repair_shifted_cif(shifted: np.ndarray) -> np.ndarray:
+    """The repairs :func:`apply_aj_recalibration` lists, on any time axis.
+
+    ``shifted`` is (n, n_causes, n_times), its last time the one the
+    causes' sum and the floor are taken at.
+    """
+    repaired = np.clip(shifted, 0.0, 1.0)
+    np.maximum.accumulate(repaired, axis=2, out=repaired)
+    total = repaired[:, :, -1].sum(axis=1)
+    over = total > 1.0
+    repaired[over] /= total[over, None, None]
+    repaired[:, :, -1] = np.maximum(repaired[:, :, -1], RECAL_FLOOR)
+    return repaired
+
+
+def apply_dense_aj_recalibration(
+    cif: np.ndarray, offsets: np.ndarray
+) -> Tuple[np.ndarray, float]:
+    """Shift an incidence by :func:`dense_aj_offsets`, and repair it once.
+
+    The repair is :func:`apply_aj_recalibration`'s, along the whole axis:
+    clip and running maximum, rescale a patient whose causes sum past one
+    at the last time, floor the incidence there. For the cause-specific
+    Cox baseline the axis is every time its step curve or its offsets can
+    change, the last cut last (:mod:`TransEHR2.csc`), so every read of the
+    recalibrated curve comes out of one repair.
+
+    Args:
+        cif: (n, n_causes, p) the incidence at the offsets' times.
+        offsets: (n_causes, p).
+
+    Returns:
+        ``(cif, repaired_fraction)``: the recalibrated incidence, and the
+        fraction of (patient, cause, time) cells the repair changed.
+    """
+    shifted = np.asarray(cif, dtype=np.float64) - offsets[None, :, :]
+    repaired = _repair_shifted_cif(shifted)
+    return repaired, float(np.mean(repaired != shifted))
 
 
 def marginal_reference_metrics(

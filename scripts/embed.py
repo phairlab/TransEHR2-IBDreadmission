@@ -5,7 +5,7 @@ Three tables, built **once for the study** rather than once per fold or
 once per episode:
 
     {DATA_DIR}/lookup_tables/text_embeddings.npy   (U, D)     float32
-    {DATA_DIR}/lookup_tables/text_tokens.npy       (U, 1024)  int32
+    {DATA_DIR}/lookup_tables/text_tokens.npy       (U, 2048)  int32
     {DATA_DIR}/lookup_tables/drug_embeddings.npy   (V+1, 128) float32
 
 ``U`` is the number of unique text strings the cohort contains, and the
@@ -178,7 +178,7 @@ def build_text_tables(
             float32. Injected so the pass can be tested without the LLM.
         out_dir: ``{DATA_DIR}/lookup_tables``.
         embed_dim: ``D``, the LLM's hidden size.
-        max_length: Token sequence length; 1024 for this study.
+        max_length: Token sequence length; 2048 for this study.
         batch_size: Strings per tokenizer and LLM call.
 
     Returns:

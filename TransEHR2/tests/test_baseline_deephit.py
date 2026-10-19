@@ -31,7 +31,7 @@ SPLITS = ('train', 'val', 'test')
 N_LABELS, N_DRAWN = 900, 600
 LINEAR = ['AGE', 'L', 'A', 'E', 'CCI', 'QUINTMAT', 'QUINTSOC']
 FILLED = ['AGE', 'QUINTMAT', 'QUINTSOC']
-CATEGORICAL = ['SEX', 'Rural', 'ZONE_NAME', 'INDEX_TYPE']
+CATEGORICAL = ['SEX', 'Rural', 'INDEX_TYPE']   # ZONE_NAME is in the file, unused
 
 
 def blank(rng, values, fraction):

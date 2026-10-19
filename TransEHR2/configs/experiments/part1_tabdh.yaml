@@ -33,7 +33,10 @@ LINEAR_FEATURES: ["AGE", "L", "A", "E", "CCI", "QUINTMAT", "QUINTSOC"]
 MEDIAN_FILL_FEATURES: ["AGE", "QUINTMAT", "QUINTSOC"]
 
 # One-hot over the levels seen on the train partition, none dropped.
-CATEGORICAL_FEATURES: ["SEX", "Rural", "ZONE_NAME", "INDEX_TYPE"]
+# ZONE_NAME is left out (user, 2026-10-19): its missing level all but
+# duplicated Rural's, so the CSC could not separate the two and did not
+# converge.
+CATEGORICAL_FEATURES: ["SEX", "Rural", "INDEX_TYPE"]
 
 # As in fit_baseline_csc.R, an indicator or a missing level exists only if
 # train has a missing value; val or test needing one that train lacks stops

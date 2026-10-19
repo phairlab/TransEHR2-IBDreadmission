@@ -59,7 +59,10 @@ MEDIAN_FILL_FEATURES: ["AGE", "QUINTMAT", "QUINTSOC"]
 
 # Treatment dummies against the first level: the observed train levels,
 # sorted, then a "missing" level.
-CATEGORICAL_FEATURES: ["SEX", "Rural", "ZONE_NAME", "INDEX_TYPE"]
+# ZONE_NAME is left out (user, 2026-10-19): its missing level all but
+# duplicated Rural's, so the CSC could not separate the two and did not
+# converge.
+CATEGORICAL_FEATURES: ["SEX", "Rural", "INDEX_TYPE"]
 
 # ---- CSC --------------------------------------------------------------------
 

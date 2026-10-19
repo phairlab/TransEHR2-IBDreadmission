@@ -265,11 +265,27 @@ fit_fold <- function(fold) {
   models <- lapply(codes, function(k)
     fit$models[[match(as.character(k), fit$causes)]])
   coefs <- sapply(models, coef)
-  if (anyNA(coefs)) {
-    stop("fold", fold, ": coefficient(s) not estimable: ",
-         toString(rownames(coefs)[apply(is.na(coefs), 1, any)]))
-  }
+  colnames(coefs) <- causes
+  # Reported before the check below, which stops: the names are what decides
+  # how to handle either problem.
   report_nonconverged(nonconverged, models, train)
+  if (anyNA(coefs)) {
+    unestimable <- rownames(coefs)[apply(is.na(coefs), 1, any)]
+    cat("not estimable, by cause (NA):\n")
+    print(is.na(coefs[unestimable, , drop = FALSE]))
+    for (column in unestimable) {
+      value <- train[[column]]
+      if (all(value %in% c(0, 1))) {
+        set <- value == 1
+        cat(sprintf("  %s = 1 in %d train episode(s); events: %s\n",
+                    column, sum(set), paste(causes, sapply(codes, function(k)
+                      sum(train$event[set] == k)), sep = " ",
+                      collapse = ", ")))
+      }
+    }
+    stop("fold", fold, ": coefficient(s) not estimable: ",
+         toString(unestimable))
+  }
 
   out_dir <- file.path(cfg$MODEL_DIR, cfg$EXPERIMENT_NAME,
                        sprintf("fold%d", fold), TASK)
@@ -311,7 +327,6 @@ fit_fold <- function(fold) {
   print(sapply(SPLITS, function(s) sapply(c(filled, categorical),
     function(f) sum(is.na(partitions[[s]][[f]])))))
   cat("hazard ratios, exp(beta), by cause:\n")
-  colnames(coefs) <- causes
   print(round(exp(coefs), 3))
   cat(sprintf("%d training event times; wrote %s\n", length(jump), out_dir))
 }

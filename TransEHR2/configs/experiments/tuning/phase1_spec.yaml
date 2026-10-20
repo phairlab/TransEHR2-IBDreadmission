@@ -18,14 +18,12 @@ DATASET_CONFIG: ../../datasets/RMT23345.yaml
 OUTPUT_DIR: phase1
 MANIFEST: phase1_manifest.yaml
 
-# The encoding arms. An arm's overrides are merged into every trial, so the
-# whole grid runs once per encoding from one shared centre. Both are carried
-# forward: each one's winning cell becomes the encoder its own finetuning
-# grid is measured on, so neither encoding is judged under settings tuned
-# for the other.
+# One arm. The first campaign ran both encodings through phases 1 and 2 and
+# the choice was made at each arm's own tuned optimum; rope is what it
+# settled on, and this rerun carries that forward rather than re-deciding it.
+# Halving the grid is also what lets phases 1 and 2 sit inside one throttle
+# of twelve cells.
 ARMS:
-  additive:
-    POSITION_ENCODING: 'additive'
   rope:
     POSITION_ENCODING: 'rope'
 

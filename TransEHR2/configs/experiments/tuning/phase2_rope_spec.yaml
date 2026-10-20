@@ -13,7 +13,7 @@
 #
 # RoPE, the rotary temporal encoding.
 #
-# No trial here pretrains. SLURM/run_phase2.sh symlinks the arm's winning
+# No trial here pretrains. SLURM/run_phase.sh symlinks the arm's winning
 # encoder into every cell's model directory first, so pretraining_is_done
 # short-circuits and each cell fits a head on bit-identical weights.
 

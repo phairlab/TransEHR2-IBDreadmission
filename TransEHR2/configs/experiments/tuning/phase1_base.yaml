@@ -39,6 +39,7 @@ EVENT_LADDER_P_MIN: 0.0680556
 EXPERIMENT_NAME: phase1_centre
 FINETUNE_LEARNING_RATE: 0.0002
 FINETUNE_LR_HALF_LIFE: 132
+FINETUNE_SEED: 0
 FINETUNE_SELECTION_METRIC: brier
 FINETUNE_TOTAL_EPOCH: 500
 GENERATOR_DIM_FEEDFORWARD: 256
@@ -59,9 +60,10 @@ MODEL_DIR: /uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/models
 OBS_UNOBS_SAMPLE_RATIO: 10.0
 POSITION_ENCODING: additive
 PREDICTOR_AGGREGATION_METHOD: mean
-PREDICT_INDICATORS: false
+PREDICT_INDICATORS: true
 PRETRAIN_LEARNING_RATE: 0.002
 PRETRAIN_LR_HALF_LIFE: 329
+PRETRAIN_SEED: 0
 PRETRAIN_TOTAL_EPOCH: 200
 RECORD_MASK_RATIO: 0.15
 THP_ENCODER_DROPOUT: 0.1
@@ -86,6 +88,10 @@ TIME_GRID_CUTS_DAYS:
 # USE_HISTORICAL_RECORDS is deliberately absent: no Python reads it, and
 # the IBD timeseries has no history region for it to describe. It
 # survives in the three shipped experiment configs as a MIMIC-ism.
+# Off for IBD: ADMIT_DAD is the only event type, so every event token is
+# identical and under rope the encoder returns one fixed vector. The THP_*
+# and EVENT_LADDER_* keys below are moot while this is false.
+USE_EVENT_ENCODER: false
 USE_THP: false
 USE_THP_PRED_LOSS: true
 VALUE_LADDER_P_MAX: 412357.0

@@ -1,5 +1,6 @@
 import numpy as np
 import os
+import random
 import time
 import torch
 import yaml
@@ -525,11 +526,26 @@ def combine_value_and_lookup_data(
         return indicators, values
 
 
+
+def seed_everything(seed: int) -> None:
+    """Seed Python's, NumPy's and torch's generators (CPU and every CUDA device) from one integer.
+
+    Seeded, not deterministic: torch.use_deterministic_algorithms is left off, so some CUDA
+    kernels (index and scatter adds, parts of attention's backward) still differ run to run on
+    a GPU. Everything drawn from a generator -- initialization, record masks, sampled
+    replacements, dropout, the shuffle -- repeats. A run resumed from a mid-stage checkpoint
+    continues on a different stream than an uninterrupted one would have.
+    """
+    random.seed(seed)
+    np.random.seed(seed % 2**32)
+    torch.manual_seed(seed)
+
 def generate_record_masks(
     data: MixedTensorDataset,
     feature_sample_rate: float = 0.15,
     obs_unobs_ratio: float = 4.0,
-    subsample_rate: float = 0.5
+    subsample_rate: float = 0.5,
+    predict_indicators: bool = False
 ) -> Tuple[Dict[str, Dict[str, Union[Tensor, List[Tensor]]]], Tensor]:
     """Generate masks for observed and unobserved records in the dataset.
 
@@ -541,6 +557,11 @@ def generate_record_masks(
         obs_unobs_ratio (float): The ratio of observed to unobserved records that sampling will try to achieve. If
             None, only observed records will be masked. This does not apply to lookup features, which only mask observed records because embeddings of unobserved text or drugs are zero vectors and the cosine similarity loss is not defined when one of the target or prediction vectors is zero.
         subsample_rate (float): The rate at which components of vector-valued features are subsampled for masking.
+        predict_indicators (bool): Whether the generator predicts indicators. When it does, masked unobserved
+            cells exist to train that prediction, so (a) they get an indicator mask but no value mask -- their
+            value is the missing state, which the generator's value loss then never scores -- and (b) the lookup
+            family samples unobserved cells too, at the same ratio, for the indicator loss alone (its cosine
+            value loss still sees observed cells only). When it does not, the masks are as they always were.
 
     Returns:
         Tuple[Dict[str, Dict[str, Union[Tensor, List[Tensor]]]], Tensor]: A tuple of masks for value-associated and event-associated data, respectively.
@@ -636,7 +657,8 @@ def generate_record_masks(
     for feature_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'lookup']:
         if feature_type in val_masks:
             _gen_val_assoc_feat_mask(
-                data, feature_type, val_masks, feature_sample_rate, obs_unobs_ratio, subsample_rate
+                data, feature_type, val_masks, feature_sample_rate, obs_unobs_ratio, subsample_rate,
+                predict_indicators
             )
     
     # Generate the event-associated data masks
@@ -650,7 +672,8 @@ def generate_record_masks(
 
 def _gen_val_assoc_feat_mask(
     data: Dict, feature_type: str, val_masks: Dict, 
-    feature_sample_rate: float, obs_unobs_ratio: float, subsample_rate: float
+    feature_sample_rate: float, obs_unobs_ratio: float, subsample_rate: float,
+    predict_indicators: bool = False
 ):
     """Generate value-associated feature masks using vectorized operations.
     
@@ -683,7 +706,7 @@ def _gen_val_assoc_feat_mask(
     unobs_count = unobs_positions.size(0)
 
     n_obs_masked = int(feature_sample_rate * obs_count)
-    if obs_unobs_ratio is None or feature_type == 'lookup':
+    if obs_unobs_ratio is None or (feature_type == 'lookup' and not predict_indicators):
         n_unobs_masked = 0
     else:
         # Attempt to maintain the specified observed-to-unobserved ratio. If there are not enough unobserved positions to satisfy the ratio, mask all the unobserved positions. If the number of unobserved positions to sample is calculated to be less than 1, mask one unobserved position (if any exist).
@@ -705,6 +728,10 @@ def _gen_val_assoc_feat_mask(
         # Set indicator masks for unobserved positions
         val_masks[feature_type]['indicators'][selected_unobs[:, 0], selected_unobs[:, 1], selected_unobs[:, 2]] = 1.0
 
+    # With indicators predicted, a masked unobserved cell is there for its indicator alone: its value
+    # is the missing state, so it gets no value mask and the value losses never score it.
+    if predict_indicators:
+        selected_unobs = None
     # Combine all selected positions
     if selected_obs is not None and selected_unobs is not None:
         all_selected = torch.cat([selected_obs, selected_unobs], dim=0)

@@ -250,8 +250,8 @@ def test_time_to_event_stays_in_minutes(dataset):
 
 def test_fold_statistics_are_applied_from_the_npz(one_patient):
     """Standardization happens here rather than in extraction, in
-    __getitem__, reading ``summary_statistics_fold{i}.npz``: subtract the mean,
-    divide by ``scale``, over the whole row.
+    __getitem__, reading ``summary_statistics_fold{i}.npz``: subtract the mean
+    and divide by ``scale`` where the feature was observed.
 
     ``scale`` rather than the p95-p5 range it replaced. The two agree wherever
     that range is non-degenerate, as it is here, but the divisor the loader
@@ -264,21 +264,26 @@ def test_fold_statistics_are_applied_from_the_npz(one_patient):
     assert span == pytest.approx(stats['p95'][0] - stats['p5'][0])
 
     raw = np.asarray(dataset.val_numeric_values[0][0], dtype=np.float32)
-    expected = (raw - stats['means'][0]) / span
+    observed = dataset[0]['val_numeric_indicators'][:, 0].numpy() == 1.0
+    expected = np.where(observed[:, None],
+                        (raw - stats['means'][0]) / span, np.float32(0.0))
     np.testing.assert_array_equal(
         dataset[0]['val_numeric_values'][0].numpy(), expected
     )
 
 
-def test_scaling_reaches_unobserved_timesteps(one_patient):
-    """The same rule's second surprising half, preserved deliberately:
-    the earlier code scaled the array in place, so an unobserved or padded
-    position became ``-mean / span`` rather than staying at zero."""
+def test_unobserved_timesteps_stay_zero(one_patient):
+    """Scaling applies to observed positions only, so an unobserved or padded
+    numeric stays at 0 -- the same missing state every other family has.
+    Scaling the whole row used to make it ``-mean / span``, a nonzero input
+    at every empty cell."""
     dataset = extracted(one_patient)
     item = dataset[0]
     # one_patient's first timestep has no NUM value.
     assert item['val_numeric_indicators'][0, 0] == 0.0
-    assert item['val_numeric_values'][0][0].item() != 0.0
+    assert item['val_numeric_values'][0][0].item() == 0.0
+    unobserved = item['val_numeric_indicators'][:, 0] == 0.0
+    assert not item['val_numeric_values'][0][unobserved].any()
 
 
 def test_a_degenerate_span_zeroes_the_feature(mini):

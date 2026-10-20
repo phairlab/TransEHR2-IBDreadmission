@@ -34,15 +34,13 @@ Readings this module commits to
   all-zero distribution, so cross-entropy has no defined target there.
   The row is a *representation*, not a discard: the timestep still carries
   its indicator bit, so the indicator loss still trains on it.
-* **Standardization reproduces the earlier in-place rule exactly**,
-  including its two surprising parts: a feature whose p5 equals its p95
-  is zeroed outright, and the scaling is applied to the whole row
-  rather than to the observed timesteps alone, so an unobserved or
-  padded position becomes ``-mean / (p95 - p5)`` rather than staying at
-  zero. Both are what
-  ``standardize_feats`` did in place at extraction time before the move
-  here, and the subtract-then-divide order is preserved so the result is
-  bitwise what it was.
+* **Standardization is applied to observed positions only** (changed
+  2026-10-19). An unobserved or padded position stays at zero, the
+  missing state every other family uses; it used to become
+  ``-mean / scale``, inherited from the in-place ``standardize_feats``
+  rule, which made empty numeric cells carry a nonzero input. A feature
+  whose scale is zero is still zeroed outright, and the
+  subtract-then-divide order is kept for the observed values.
 * **Nothing is pooled here**. A drug timestep leaves
   as ``(T, 30, D)`` beside its doses and masks; the encoder input is where
   the dose-weighted mean happens, which is what leaves a gradient on an
@@ -332,10 +330,18 @@ class MixedDataset(Dataset):
         """One numeric feature's row, clipped to its cuts and scaled.
 
         Clip first, then subtract the mean and divide by the scale, in that
-        order and over the whole row. A zero scale means the feature is
-        constant wherever it is observed, so it carries nothing beyond its
-        own occurrence and the indicator already says that; the row is
-        zeroed there.
+        order. A zero scale means the feature is constant wherever it is
+        observed, so it carries nothing beyond its own occurrence and the
+        indicator already says that; the row is zeroed there.
+
+        **The scaling applies only where the feature was observed**, as the
+        clip does. An unobserved or padded position stays exactly 0, so
+        "absent" is the same all-zero state in every family -- the state
+        `tsr` deletes to and the generator's mask writes. Scaling the whole
+        row used to turn it into ``-mean / scale``, which gave every empty
+        numeric cell a nonzero input, and therefore a nonzero gradient x
+        input attribution, and let a masked cell (zeroed) be told apart from
+        an unmasked empty one.
 
         **The clip applies only where the feature was observed.** An
         unobserved position is stored as 0, which for a test whose low cut
@@ -367,8 +373,11 @@ class MixedDataset(Dataset):
         if self._degenerate[f]:
             values[:] = 0.0
         else:
-            values -= self._means[f]
-            values /= self._span[f]
+            values = np.where(
+                observed[:, None] == 1.0,
+                (values - self._means[f]) / self._span[f],
+                np.float32(0.0)
+            ).astype(np.float32, copy=False)
         return torch.from_numpy(values)
 
     def _gather_lookup(self, f: int, idx: int):

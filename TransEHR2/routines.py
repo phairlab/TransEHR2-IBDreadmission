@@ -374,6 +374,8 @@ def _run_pretrain_batches(
     """
     training = optimizer is not None
     model.train() if training else model.eval()
+    # The masks depend on it: masked unobserved cells are indicator-only when it is on.
+    predict_indicators = getattr(model, 'module', model).generator.predict_indicators
 
     records: Dict[str, List[float]] = {k: [] for k in _EMPTY_PRETRAIN_LOSSES}
     spikes_reported = 0
@@ -385,7 +387,8 @@ def _run_pretrain_batches(
                 batch,
                 feature_sample_rate=record_mask_ratio,
                 obs_unobs_ratio=obs_unobs_sample_ratio,
-                subsample_rate=cmpnt_mask_ratio
+                subsample_rate=cmpnt_mask_ratio,
+                predict_indicators=predict_indicators
             )
 
             output = model(
@@ -402,7 +405,8 @@ def _run_pretrain_batches(
 
             gen_loss = gen_loss_fn(output['generator'],
                                    output['masked_targets'], value_masks)
-            disc_loss = disc_loss_fn(output['discriminator'], value_masks,
+            disc_loss = disc_loss_fn(output['discriminator'],
+                                     output['discriminator_labels'],
                                      batch['val_data']['masks'])
             loss = gen_loss + disc_loss
 

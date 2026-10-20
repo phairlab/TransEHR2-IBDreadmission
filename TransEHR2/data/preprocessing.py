@@ -106,6 +106,7 @@ import numpy as np
 import os
 import pandas as pd
 import pickle
+import random
 import sys
 import torch
 import yaml
@@ -2639,6 +2640,17 @@ def _report_extraction(
           "it is a bug.")
 
 
+
+def _seed_worker(worker_id: int) -> None:
+    """Seed a loader worker's NumPy and Python generators from the seed torch gave it.
+
+    torch seeds each worker's own generator from the loader's; NumPy and ``random`` it leaves
+    alone, so without this every worker would share whatever state it was spawned with.
+    """
+    seed = torch.initial_seed() % 2**32
+    np.random.seed(seed)
+    random.seed(seed)
+
 def prepare_dataloaders(
     data_dir: str,
     fold_name: str,
@@ -2728,6 +2740,10 @@ def prepare_dataloaders(
             subset,
             batch_size=batch_size,
             shuffle=shuffle,
+            # The train loader's own generator, so a training stage can reseed its shuffle
+            # (``loader.generator.manual_seed``) without touching the global stream.
+            generator=torch.Generator() if shuffle else None,
+            worker_init_fn=_seed_worker,
             collate_fn=collate_tensorized,
             num_workers=num_workers,
             pin_memory=pin_memory if num_workers > 0 else False,

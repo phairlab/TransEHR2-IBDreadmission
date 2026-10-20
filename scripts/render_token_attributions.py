@@ -283,11 +283,12 @@ def build_classifier(dataset_config, experiment_config, grid, data_dir) -> Mixed
         return experiment_config.get(key, default)
 
     d_disc = setting('DISCRIMINATOR_ENCODER_D_MODEL', 256)
-    d_thp = setting('THP_ENCODER_D_MODEL', 256)
+    use_event_encoder = setting('USE_EVENT_ENCODER', True)
+    d_thp = setting('THP_ENCODER_D_MODEL', 256) if use_event_encoder else 0
     static_dim = 0
 
     return MixedClassifier(
-        event_encoder=EventDataEncoder(
+        event_encoder=None if not use_event_encoder else EventDataEncoder(
             num_types=len(dataset_config['EVENT_FEATS']), d_model=d_thp,
             d_inner=setting('THP_ENCODER_D_INNER', 256),
             n_layers=setting('THP_ENCODER_N_LAYERS', 1),

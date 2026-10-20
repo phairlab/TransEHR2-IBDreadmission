@@ -1,4 +1,8 @@
-"""`aggr='max'` must not let zeroed padding win a channel.
+"""`aggr='max'` must not let zeroed padding win a channel, and `aggr='none'` must read the most
+recent record.
+
+The `none` tests are at the end: series are right-aligned, so the most recent record is the
+rightmost column the mask keeps, which the old ``n_obs - 1`` index read from the wrong end.
 
 Padding embeddings are zeroed before aggregation, so a plain `torch.max` over
 the time axis returns 0 for any channel whose observed values are all negative
@@ -117,3 +121,28 @@ def test_all_padding_row_is_sent_to_zero():
     assert torch.allclose(got[0], _raw([0.0]), atol=1e-6), (
         f'an all-padding row should read zero, got {got[0].item()}'
     )
+
+
+def test_none_reads_the_most_recent_record_under_left_padding():
+    """Rows observed at t=2..4 and t=1..4 both end at t=4, value -5. The old index read t=2 and
+    t=3 (-3 and -4)."""
+    masks = torch.zeros(2, T)
+    masks[0, 2:] = 1.0
+    masks[1, 1:] = 1.0
+    got = _aggregated(_build_model(aggr='none'), masks)
+    assert torch.allclose(got, _raw([-5.0, -5.0]), atol=1e-6), got.tolist()
+
+
+def test_none_reads_zero_for_an_all_padding_row():
+    masks = torch.zeros(2, T)
+    masks[1, 3:] = 1.0
+    got = _aggregated(_build_model(aggr='none'), masks)
+    assert torch.allclose(got[0], _raw([0.0]), atol=1e-6), got.tolist()
+
+
+def test_none_hands_a_masked_final_timestep_to_the_record_before_it():
+    """TSR deletes a timestep by masking it; the readout is then the latest remaining record."""
+    masks = torch.zeros(1, T)
+    masks[0, 1:T - 1] = 1.0  # t=1..3 kept, the final column masked
+    got = _aggregated(_build_model(aggr='none'), masks)
+    assert torch.allclose(got, _raw([-4.0]), atol=1e-6), got.tolist()

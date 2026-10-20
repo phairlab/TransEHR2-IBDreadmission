@@ -49,7 +49,7 @@ from TransEHR2.survival import (
 )
 from TransEHR2.utils import (
     convert_to_python_types, create_timer,
-    format_finetuning_performance_table
+    format_finetuning_performance_table, seed_everything
 )
 
 
@@ -221,6 +221,20 @@ def main():
     PRETRAIN_TOTAL_EPOCH = experiment_config.get('PRETRAIN_TOTAL_EPOCH', 1000)
     DISC_LOSS_WEIGHT = experiment_config.get('DISC_LOSS_WEIGHT', 1.0)
     USE_THP = experiment_config.get('USE_THP', True)
+    # Whether the classifier encodes the event stream at all. Off for IBD: with one event type
+    # every token is identical, and under rope the encoder then returns one fixed vector.
+    USE_EVENT_ENCODER = experiment_config.get('USE_EVENT_ENCODER', True)
+    # Required, not defaulted: an unseeded run is exactly what these keys exist to rule out.
+    # Each stage seeds with its key plus the fold's index, so folds are not copies of one another.
+    for seed_key in ('PRETRAIN_SEED', 'FINETUNE_SEED'):
+        if seed_key not in experiment_config:
+            raise KeyError(f'{seed_key} is missing from {args.experiment_config}; '
+                           f'every TransEHR2 run is seeded')
+    PRETRAIN_SEED = int(experiment_config['PRETRAIN_SEED'])
+    FINETUNE_SEED = int(experiment_config['FINETUNE_SEED'])
+    if USE_THP and not USE_EVENT_ENCODER:
+        raise ValueError('USE_THP pretrains the event encoder, which USE_EVENT_ENCODER: False '
+                         'leaves out of the classifier')
     THP_LOSS_NLL_WEIGHT = experiment_config.get('THP_LOSS_NLL_WEIGHT', 1e-2)
     THP_LOSS_MC_SAMPLES = experiment_config.get('THP_LOSS_MC_SAMPLES', 100)
     USE_THP_PRED_LOSS = experiment_config.get('USE_THP_PRED_LOSS', True)
@@ -353,15 +367,16 @@ def main():
 
     def build_predictor():
         """A fresh competing-risks model with untrained encoders."""
+        d_event_enc = THP_ENCODER_D_MODEL if USE_EVENT_ENCODER else 0
         return MixedClassifier(
-            event_encoder=build_event_encoder(),
+            event_encoder=build_event_encoder() if USE_EVENT_ENCODER else None,
             val_encoder=build_value_encoder(
                 DISCRIMINATOR_ENCODER_D_MODEL, DISCRIMINATOR_ENCODER_N_HEADS,
                 DISCRIMINATOR_ENCODER_N_ENCODER_BLOCKS,
                 DISCRIMINATOR_ENCODER_DIM_FEEDFORWARD,
                 DISCRIMINATOR_ENCODER_DROPOUT, DISCRIMINATOR_ENCODER_ACTIVATION,
                 DISCRIMINATOR_ENCODER_NORM, DISCRIMINATOR_ENCODER_NORM_FIRST),
-            d_event_enc=THP_ENCODER_D_MODEL,
+            d_event_enc=d_event_enc,
             d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
             d_statics=static_dim,
             num_classes=grid.n_causes * grid.n_bins,
@@ -369,7 +384,7 @@ def main():
             use_lookup=use_lookup,
             head=DeepHitHead(
                 d_in=MixedClassifier.encoding_width(
-                    THP_ENCODER_D_MODEL, DISCRIMINATOR_ENCODER_D_MODEL,
+                    d_event_enc, DISCRIMINATOR_ENCODER_D_MODEL,
                     static_dim),
                 n_causes=grid.n_causes, n_bins=grid.n_bins,
                 d_shared=DEEPHIT_HEAD_D_SHARED, d_cause=DEEPHIT_HEAD_D_CAUSE,
@@ -378,6 +393,7 @@ def main():
 
     for fold_name in fold_name_list:
         timer.start_fold(fold_name)
+        fold_index = int(''.join(ch for ch in fold_name if ch.isdigit()))
 
         dataloader_list = prepare_dataloaders(
             DATA_DIR,
@@ -405,6 +421,9 @@ def main():
                   f"skipping pretraining.\n")
         else:
             print("\nStarting pretraining from scratch.\n")
+            # Before anything is built, so initialization is covered too.
+            seed_everything(PRETRAIN_SEED + fold_index)
+            train_loader.generator.manual_seed(PRETRAIN_SEED + fold_index)
 
             generator = MaskedTokenGenerator(
                 encoder=build_value_encoder(
@@ -541,6 +560,8 @@ def main():
         if os.path.exists(finetuned_model_path):
             print("\nFinetuned model found, skipping finetuning.\n")
         else:
+            seed_everything(FINETUNE_SEED + fold_index)
+            train_loader.generator.manual_seed(FINETUNE_SEED + fold_index)
             predictor = load_pretrained_encoders(
                 build_predictor(), model_save_dir, expect_event_encoder=USE_THP)
 
@@ -611,6 +632,9 @@ def main():
             'modelled_causes': list(grid.cause_names),
             'brier_integration_days': grid.brier_integration_days,
             'use_thp': USE_THP,
+            'use_event_encoder': USE_EVENT_ENCODER,
+            'pretrain_seed': PRETRAIN_SEED + fold_index,
+            'finetune_seed': FINETUNE_SEED + fold_index,
             'selection_metric': FINETUNE_SELECTION_METRIC,
             'train_scores': convert_to_python_types(best_train_scores or {}),
             'validation_scores': convert_to_python_types(best_val_scores or {}),
@@ -661,7 +685,9 @@ def load_pretrained_encoders(
         torch.load(value_path, map_location='cpu', weights_only=False))
     print(f"\nLoaded value encoder weights from {pretrained_dir}")
 
-    if os.path.exists(event_path):
+    if predictor.event_encoder is None:
+        print("The classifier has no event encoder (USE_EVENT_ENCODER is off).\n")
+    elif os.path.exists(event_path):
         predictor.event_encoder.load_state_dict(
             torch.load(event_path, map_location='cpu', weights_only=False))
         print(f"Loaded event encoder weights from {pretrained_dir}\n")

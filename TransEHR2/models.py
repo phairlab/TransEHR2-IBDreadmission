@@ -155,108 +155,99 @@ class ELECTRA(torch.nn.Module):
         return masked_targets
 
     def _prepare_discriminator_input_inplace(
-        self, 
-        value_data: ValueAssociatedTensorData, 
+        self,
+        value_data: ValueAssociatedTensorData,
         gen_output: ValueAssociatedTensorData,
         record_masks: Dict[str, Dict[str, Tensor]]
-    ) -> None:
-        """
-        Modify value_data in-place to prepare input for the discriminator.
-        
-        This replaces masked values with generator predictions directly in the batch tensors,
-        avoiding the memory overhead of deep-copying the entire batch. The original masked
-        values should be extracted using _extract_masked_targets() BEFORE calling this method.
-        
-        IMPORTANT: This method mutates value_data. After calling this method, the batch will
-        contain generated values at masked positions and should not be used for generator
-        loss computation.
-        
-        Args:
-            value_data: Value-associated data from the batch. Will be modified in-place.
-            gen_output: Simulated value-associated data output from the MaskedTokenGenerator.
-            record_masks: Masks indicating which records and feature values were hidden from
-                the generator. A value of 1 indicates masked, 0 indicates not masked.
-                
+    ) -> Dict[str, Dict[str, Tensor]]:
+        """Write the generator's guesses into the masked cells, in place, and label each cell.
+
+        The batch becomes the discriminator's input, so call `_extract_masked_targets` first: after
+        this the original values at masked cells are gone. Only masked cells are touched, and only
+        by indexed writes, so nothing batch-sized is materialized.
+
+        What is written at a masked cell:
+
+        * **Sampled, not argmax.** A categorical or ordinal value is drawn from the generator's class
+          distribution, a multilabel bit and an indicator from Bernoulli(sigmoid) -- ELECTRA samples
+          its replacements. The most likely class every time would leave the discriminator only the
+          generator's systematic misses to find, and would never write a rare class, so a rare class
+          would read as "real" by construction. Numerics and lookup embeddings are point estimates.
+        * **Detached.** ELECTRA trains the two networks on separate objectives; gradients from the
+          discriminator do not reach the generator through its replacements. Undetached, the joint
+          minimisation rewards the generator for writing replacements that are *easy* to spot.
+          (The sampled writes carry no gradient anyway.)
+        * **Consistent with its indicator.** The indicator written is the sampled one when the
+          generator predicts indicators, and the original otherwise. Wherever it is 0 the cell gets
+          the missing state -- the all-zero row every family uses for absence -- since "absent, with
+          a value" is a combination no real record has and would give the cell away. Wherever it
+          is 1 at a cell that was really absent, the whole predicted row is written, not the
+          subsampled components, which would leave a partial vector no record has either.
+
         Returns:
-            None. The value_data dictionary is modified in-place.
+            ``{family: {'indicators': (batch, max_ts_len, n_features)}}``, 1 where the cell the
+            discriminator sees differs from the original and 0 elsewhere -- the discriminator's
+            targets. A masked cell the generator reproduced exactly is real, as in ELECTRA; labelling
+            it generated would ask the discriminator to tell apart two identical inputs.
         """
+        labels = {}
         for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'lookup']:
-            # The generator output only has keys for feature types that were used for prediction.
-            # If the input batch's feature list for a type was empty, the output will not have
-            # a key for that type. The lookup family is only processed if the
-            # MaskedTokenGenerator was initialized with a non-empty lookup_dims.
+            # The generator output only has keys for feature types it predicts, and only for the
+            # types present in the batch.
             if feat_type not in gen_output or feat_type not in value_data:
                 continue
+            entry = value_data[feat_type]
+            value_key = 'embedded_values' if feat_type == 'lookup' else 'values'
+            cell_mask = record_masks[feat_type]['indicators'].bool()  # (batch, max_ts_len, n_feats)
 
-            if feat_type == 'numeric':
-                # Replace masked numeric values with generator predictions in-place
-                for i, pred_vals in enumerate(gen_output[feat_type]['values']):
-                    # value_mask shape: (batch_size, max_ts_len, feature_dim)
-                    value_mask = record_masks[feat_type]['values'][i].bool()
-                    # Get destination tensor and its dtype for casting
-                    dest_tensor = value_data[feat_type]['values'][i]
-                    # In-place update: cast predictions to destination dtype before assignment
-                    dest_tensor[value_mask] = pred_vals[value_mask].to(dest_tensor.dtype)
+            original_ind = entry['indicators']
+            written_ind = original_ind
+            ind_logits = gen_output[feat_type].get('indicators')
+            if self.generator.predict_indicators and ind_logits is not None:
+                written_ind = original_ind.clone()
+                drawn = torch.bernoulli(torch.sigmoid(ind_logits.detach()[cell_mask]))
+                written_ind[cell_mask] = drawn.to(written_ind.dtype)
+            changed = (written_ind != original_ind) & cell_mask
 
-            elif feat_type == 'categorical':
-                # Convert generator logits to one-hot vectors and replace in-place.
-                # Categorical features are stored as one-hot encodings of shape
-                # (batch_size, max_ts_len, n_classes).
-                for i, pred_logits in enumerate(gen_output[feat_type]['values']):
-                    # value_mask shape: (batch_size, max_ts_len, n_classes); True for every
-                    # component of a masked (batch, timestep) position.
-                    value_mask = record_masks[feat_type]['values'][i].bool()
-                    n_classes = pred_logits.shape[-1]
-                    pred_classes = torch.argmax(pred_logits, dim=-1)
-                    pred_one_hot = torch.nn.functional.one_hot(
-                        pred_classes, num_classes=n_classes
-                    )
-                    dest_tensor = value_data[feat_type]['values'][i]
-                    dest_tensor[value_mask] = pred_one_hot.to(dest_tensor.dtype)[value_mask]
+            for i, dest in enumerate(entry[value_key]):
+                cell = cell_mask[..., i]
+                if not cell.any():
+                    continue
+                rows = cell.nonzero(as_tuple=True)  # (batch indices, timestep indices)
+                old = dest[rows]  # (n_masked, D)
+                guess = self._sample_replacement(
+                    feat_type, gen_output[feat_type][value_key][i].detach()[rows]
+                ).to(dest.dtype)
+                components = record_masks[feat_type][value_key][i].bool()[rows]
+                new = torch.where(components, guess, old)
+                present = written_ind[..., i][rows] != 0
+                was_absent = original_ind[..., i][rows] == 0
+                fake_presence = present & was_absent
+                new[fake_presence] = guess[fake_presence]
+                new[~present] = 0
+                changed[rows + (i,)] |= (new != old).any(dim=-1)
+                dest[rows] = new
 
-            elif feat_type == 'ordinal':
-                # Convert generator CLM probabilities to one-hot vectors and replace in-place.
-                # Ordinal features are stored as one-hot encodings of shape
-                # (batch_size, max_ts_len, n_levels); argmax of the CLM PMF picks the class.
-                for i, pred_probs in enumerate(gen_output[feat_type]['values']):
-                    value_mask = record_masks[feat_type]['values'][i].bool()
-                    n_levels = pred_probs.shape[-1]
-                    pred_classes = torch.argmax(pred_probs, dim=-1)
-                    pred_one_hot = torch.nn.functional.one_hot(
-                        pred_classes, num_classes=n_levels
-                    )
-                    dest_tensor = value_data[feat_type]['values'][i]
-                    dest_tensor[value_mask] = pred_one_hot.to(dest_tensor.dtype)[value_mask]
+            if written_ind is not original_ind:
+                original_ind.copy_(written_ind)
+            labels[feat_type] = {'indicators': changed.to(original_ind.dtype)}
+        return labels
 
-            elif feat_type == 'multilabel':
-                # Binarize generator logits via sigmoid > 0.5 threshold and replace in-place.
-                for i, pred_logits in enumerate(gen_output[feat_type]['values']):
-                    value_mask = record_masks[feat_type]['values'][i].bool()
-                    pred_binary = (torch.sigmoid(pred_logits) > 0.5).float()
-                    dest_tensor = value_data[feat_type]['values'][i]
-                    dest_tensor[value_mask] = pred_binary[value_mask].to(dest_tensor.dtype)
+    @staticmethod
+    def _sample_replacement(feat_type: str, prediction: Tensor) -> Tensor:
+        """One replacement row per masked cell from the generator's ``(n_masked, D)`` output."""
+        if feat_type == 'categorical':
+            drawn = torch.distributions.Categorical(logits=prediction).sample()
+            return torch.nn.functional.one_hot(drawn, num_classes=prediction.shape[-1])
+        if feat_type == 'ordinal':
+            # The ordinal head is a cumulative link model and already emits class probabilities.
+            # Rounding can leave a hair below zero; Categorical renormalises the rest.
+            drawn = torch.distributions.Categorical(probs=prediction.clamp_min(0)).sample()
+            return torch.nn.functional.one_hot(drawn, num_classes=prediction.shape[-1])
+        if feat_type == 'multilabel':
+            return torch.bernoulli(torch.sigmoid(prediction))
+        return prediction
 
-            elif feat_type == 'lookup':
-                # Replace masked lookup embeddings with generator predictions in-place.
-                # Per feature, since the widths are ragged.
-                for i, pred_embeddings in enumerate(gen_output[feat_type]['embedded_values']):
-                    # value_mask shape: (batch_size, max_ts_len, D_f)
-                    value_mask = record_masks[feat_type]['embedded_values'][i].bool()
-                    # Get destination tensor and its dtype for casting
-                    dest_tensor = value_data[feat_type]['embedded_values'][i]
-                    # In-place update at masked positions, casting to destination dtype
-                    dest_tensor[value_mask] = pred_embeddings[value_mask].to(dest_tensor.dtype)
-
-            # Replace masked indicators with predicted ones if available
-            if self.generator.predict_indicators:
-                # Binarize generator's indicator predictions: 0 if value <= 0.5, else 1
-                pred_indicators = (gen_output[feat_type]['indicators'] > 0.5).float()
-                indicator_mask = record_masks[feat_type]['indicators'].bool()
-                # Get destination tensor and its dtype for casting
-                dest_tensor = value_data[feat_type]['indicators']
-                # In-place update at masked positions, casting to destination dtype
-                dest_tensor[indicator_mask] = pred_indicators[indicator_mask].to(dest_tensor.dtype)
-    
     def compute_conditional_intensity(self, encodings, prev_event_times, time_diff):
         """Wrapper to access hawkes submodule's method from parent model.
         
@@ -299,6 +290,8 @@ class ELECTRA(torch.nn.Module):
                 - 'generator': Generator output predictions
                 - 'discriminator': Discriminator output predictions
                 - 'masked_targets': Extracted original values at masked positions for generator loss
+                - 'discriminator_labels': ``{family: {'indicators': labels}}``, 1 where the
+                  discriminator's input differs from the original; MaskedDiscriminatorLoss's targets
         """
         outputs = {}
         
@@ -363,8 +356,10 @@ class ELECTRA(torch.nn.Module):
         outputs['generator'] = gen_output
         
         # Prepare input for discriminator by replacing masked values with generated ones IN-PLACE.
-        # After this call, value_data contains generated values at masked positions.
-        self._prepare_discriminator_input_inplace(value_data, gen_output, record_masks)
+        # After this call, value_data contains generated values at masked positions, and the
+        # labels say which cells now differ from the original -- the discriminator's targets.
+        outputs['discriminator_labels'] = self._prepare_discriminator_input_inplace(
+            value_data, gen_output, record_masks)
         
         # Get discriminator predictions using the modified batch
         disc_output = self.discriminator(value_data, batch.get('static_data', None))
@@ -395,13 +390,17 @@ class MixedClassifier(torch.nn.Module):
         """Initialize MixedClassifier.
 
         Args:
-            event_encoder: Encoder for event-associated data
+            event_encoder: Encoder for event-associated data, or None to leave the event stream out
+                of the head's input altogether (``USE_EVENT_ENCODER: False``). The branch is then
+                skipped even though collation still delivers ``event_data``, and ``d_event_enc``
+                must be 0.
             val_encoder: Encoder for value-associated time series data
             d_event_enc: Dimensionality of event encoder output
             d_val_enc: Dimensionality of time series encoder output
             d_statics: Dimensionality of static data (0 if no static data)
             num_classes: Number of output classes
-            aggr: Aggregation method ('max' or 'mean') for sequence-level encoding
+            aggr: Aggregation method ('max', 'mean' or 'none') for sequence-level encoding. 'none'
+                reads the most recent record: the last timestep the mask keeps.
             use_lookup: If True, the model will expect pre-computed lookup embeddings in the input batch.
             head: Module mapping the pooled encoding to logits. Defaults to the
                 two-layer stack this class has always used, which returns
@@ -411,6 +410,8 @@ class MixedClassifier(torch.nn.Module):
         """
 
         super().__init__()
+        if event_encoder is None and d_event_enc:
+            raise ValueError(f'd_event_enc is {d_event_enc} but there is no event encoder')
         self.event_encoder = event_encoder
         self.val_encoder = val_encoder
         d_enc = self.encoding_width(d_event_enc, d_val_enc, d_statics)
@@ -436,6 +437,21 @@ class MixedClassifier(torch.nn.Module):
         """
         return d_event_enc + d_val_enc + d_statics
 
+    @staticmethod
+    def _most_recent(encodings: Tensor, masks: Tensor) -> Tensor:
+        """Each row's encoding at the last timestep its mask keeps, or zeros if it keeps none.
+
+        Series are right-aligned with padding on the left, so the most recent record is the
+        rightmost kept column -- not column ``n_kept - 1``, which counts from the wrong end. Read
+        off the mask rather than assumed to be the final column, so a timestep masked out after
+        collation (TSR's deletion) hands the readout to the record before it.
+        """
+        n_steps = masks.shape[1]
+        positions = torch.arange(n_steps, device=masks.device).expand_as(masks)
+        last = torch.where(masks.bool(), positions, torch.full_like(positions, -1)).max(dim=1).values
+        picked = encodings[torch.arange(encodings.shape[0], device=encodings.device), last.clamp(min=0)]
+        return torch.where((last >= 0).unsqueeze(-1), picked, torch.zeros_like(picked))
+
     def forward(self, batch: MixedTensorDataset, trace_grads: bool = False) -> Tensor:
         """Forward pass through the mixed classifier.
         
@@ -449,8 +465,8 @@ class MixedClassifier(torch.nn.Module):
 
         embeddings = []
         
-        # Process event data if available
-        if 'event_data' in batch:
+        # Process event data if the model encodes it. Collation delivers event_data either way.
+        if self.event_encoder is not None and 'event_data' in batch:
 
             event_data = batch['event_data']
 
@@ -487,11 +503,8 @@ class MixedClassifier(torch.nn.Module):
             elif self.aggr == 'mean':
                 event_enc = torch.sum(event_enc, dim=1) / n_obs_records
             elif self.aggr == 'none':
-                # Select the final observed record's encoding for each batch item
-                # If a batch item has no observed records, use the zeroed embedding at the first timestep
-                final_record_idx = n_obs_records.squeeze(-1) - 1  # (batch_size, )
-                batch_size = event_enc.size(0)
-                event_enc = event_enc[torch.arange(batch_size), final_record_idx.long()]
+                # The most recent record; zeros if there are none
+                event_enc = self._most_recent(event_enc, event_masks)
             
             embeddings.append(event_enc)
         
@@ -582,11 +595,8 @@ class MixedClassifier(torch.nn.Module):
                     # Exclude padding timesteps from mean calculation
                     val_enc = torch.sum(val_enc, dim=1) / n_obs_records
                 elif self.aggr == 'none':
-                    # Select the final observed record's encoding for each batch item
-                    # If a batch item has no observed records, use the zeroed embedding at the first timestep
-                    final_record_idx = n_obs_records.squeeze(-1) - 1  # (batch_size, )
-                    batch_size = val_enc.size(0)
-                    val_enc = val_enc[torch.arange(batch_size), final_record_idx.long()]
+                    # The most recent record; zeros if there are none
+                    val_enc = self._most_recent(val_enc, val_masks)
 
                 embeddings.append(val_enc)
         

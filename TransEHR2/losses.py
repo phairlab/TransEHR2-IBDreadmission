@@ -591,14 +591,13 @@ class MaskedGeneratorLoss(torch.nn.Module):
 
                 # Process lookup indicators if available
                 if 'indicators' in predictions['lookup'] and predictions['lookup']['indicators'] is not None:
-                    if 'indicators' in targets['lookup']:
-                        indicator_loss, indicator_n_masked = self._calculate_indicator_loss_sparse(
-                            predictions['lookup']['indicators'],
-                            targets['lookup']['indicators'],
-                            feature_masks.bool()
-                        )
-                        total_loss += self.indicator_weight * indicator_loss
-                        n_masked += indicator_n_masked
+                    # As the other families read it here: the full indicator tensor, scored at the
+                    # masked cells. It used to read targets['lookup'], a key a full batch does not have.
+                    pred_indicators = predictions['lookup']['indicators']
+                    target_indicators = targets['val_data']['lookup']['indicators']
+                    indicator_loss = self.bce_loss(pred_indicators, target_indicators.float())
+                    total_loss += self.indicator_weight * (indicator_loss * feature_masks.bool()).sum()
+                    n_masked += feature_masks.bool().sum().item()
         
         # Normalize the total loss by the number of masked values
         if n_masked > 0:
@@ -661,11 +660,16 @@ class MaskedDiscriminatorLoss(torch.nn.Module):
     def forward(
         self,
         predictions: Dict[str, Tensor],
-        record_masks: Dict[str, Dict[str, Union[Tensor, List[Tensor]]]],
+        labels: Dict[str, Dict[str, Union[Tensor, List[Tensor]]]],
         padding_mask: Tensor
     ) -> Tensor:
         """
         Compute discriminator loss for distinguishing real vs generated features.
+
+        **The targets are whether a cell changed, not whether it was masked**: pass
+        ``ELECTRA.forward(...)['discriminator_labels']``. A masked cell the generator reproduced
+        exactly is identical to the original, and ELECTRA labels it real; labelling it generated
+        is irreducible noise, since no discriminator can separate two identical inputs.
 
         Every position of a real timestep is scored, masked or not. That is ELECTRA's
         design and the source of its sample efficiency: the discriminator judges the whole
@@ -693,9 +697,9 @@ class MaskedDiscriminatorLoss(torch.nn.Module):
                     'categorical': Tensor of shape (batch_size, max_ts_len, n_categorical_feats),
                     'lookup': Tensor of shape (batch_size, max_ts_len, n_lookup_feats)
                 }
-            record_masks (Dict): Dictionary of masks indicating which values were masked during generation.
-                A value of 1 indicates a record was masked (and should be predicted as generated),
-                0 indicates it was not masked (and should be predicted as real).
+            labels (Dict): ``{family: {'indicators': (batch_size, max_ts_len, n_features)}}``, 1 where
+                the discriminator's input differs from the original (generated) and 0 where it does
+                not (real), as `ELECTRA._prepare_discriminator_input_inplace` returns them.
             padding_mask (Tensor): ``(batch_size, max_ts_len)``, 1 at a real timestep and 0 at
                 padding -- ``batch['val_data']['masks']``, the same tensor
                 ``generate_record_masks`` samples within. Required rather than optional: a
@@ -713,12 +717,11 @@ class MaskedDiscriminatorLoss(torch.nn.Module):
 
         # Process each feature type
         for feat_type in ['numeric', 'categorical', 'ordinal', 'multilabel', 'lookup']:
-            if feat_type not in predictions or feat_type not in record_masks:
+            if feat_type not in predictions or feat_type not in labels:
                 continue
             pred_logits = predictions[feat_type]  # (batch_size, max_ts_len, n_features)
-            indicator_mask = record_masks[feat_type]['indicators']  # (batch_size, max_ts_len, n_features)
-            # Create target labels: 1 for generated (masked), 0 for real (not masked)
-            targets = indicator_mask.float()
+            # 1 for generated (changed), 0 for real (unchanged)
+            targets = labels[feat_type]['indicators'].float()
             # Calculate BCE loss for all positions
             feature_loss = self.bce_loss(pred_logits, targets)  # (batch_size, max_ts_len, n_features)
             # Zero the padded timesteps rather than index them out: the product keeps the

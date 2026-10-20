@@ -297,9 +297,13 @@ def main():
         variable_properties, VALUED_FEATS, lookup_dims)
     n_event_types = len(EVENT_FEATS)
 
+    # As fit_transehr2_deephit.py reads it, so the architecture matches the saved weights.
+    use_event_encoder = experiment_config.get('USE_EVENT_ENCODER', True)
+    d_event_enc = THP_ENCODER_D_MODEL if use_event_encoder else 0
+
     def build_classifier() -> MixedClassifier:
         return MixedClassifier(
-            event_encoder=EventDataEncoder(
+            event_encoder=None if not use_event_encoder else EventDataEncoder(
                 num_types=n_event_types, d_model=THP_ENCODER_D_MODEL,
                 d_inner=THP_ENCODER_D_INNER, n_layers=THP_ENCODER_N_LAYERS,
                 n_head=THP_ENCODER_N_HEADS, d_k=THP_ENCODER_D_K,
@@ -321,7 +325,7 @@ def main():
                 position_encoding=POSITION_ENCODING,
                 ladder_p_min=VALUE_LADDER_P_MIN,
                 ladder_p_max=VALUE_LADDER_P_MAX),
-            d_event_enc=THP_ENCODER_D_MODEL,
+            d_event_enc=d_event_enc,
             d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
             d_statics=static_dim,
             num_classes=grid.n_causes * grid.n_bins,
@@ -329,7 +333,7 @@ def main():
             use_lookup=use_lookup,
             head=DeepHitHead(
                 d_in=MixedClassifier.encoding_width(
-                    THP_ENCODER_D_MODEL, DISCRIMINATOR_ENCODER_D_MODEL,
+                    d_event_enc, DISCRIMINATOR_ENCODER_D_MODEL,
                     static_dim),
                 n_causes=grid.n_causes, n_bins=grid.n_bins,
                 d_shared=DEEPHIT_HEAD_D_SHARED, d_cause=DEEPHIT_HEAD_D_CAUSE,

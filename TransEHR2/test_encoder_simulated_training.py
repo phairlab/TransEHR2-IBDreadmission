@@ -214,7 +214,7 @@ def _run_pretraining(transform=None, steps=30, seed=0):
         # is attached to the objective -- the event encoder reaches it only through this one.
         loss = (
             generator_loss_fn(outputs['generator'], outputs['masked_targets'], record_masks)
-            + discriminator_loss_fn(outputs['discriminator'], record_masks,
+            + discriminator_loss_fn(outputs['discriminator'], outputs['discriminator_labels'],
                                     step_batch['val_data']['masks'])
             + hawkes_loss
         )

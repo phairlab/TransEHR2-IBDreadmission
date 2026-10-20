@@ -861,11 +861,12 @@ class MaskedTokenGenerator(torch.nn.Module):
                 torch.nn.Linear(d_model, dim_feedforward),
                 torch.nn.GELU()
             )
-            self.numeric_indicator_head = torch.nn.Linear(dim_feedforward, len(numeric_dims))
-            self.categorical_indicator_head = torch.nn.Linear(dim_feedforward, len(categorical_classes))
-            self.ordinal_indicator_head = torch.nn.Linear(dim_feedforward, len(ordinal_features))
-            self.multilabel_indicator_head = torch.nn.Linear(dim_feedforward, len(multilabel_classes))
-            self.lookup_indicator_head = torch.nn.Linear(dim_feedforward, len(lookup_dims))
+            # `or []`: the optional families default to None, which has no len().
+            self.numeric_indicator_head = torch.nn.Linear(dim_feedforward, len(numeric_dims or []))
+            self.categorical_indicator_head = torch.nn.Linear(dim_feedforward, len(categorical_classes or []))
+            self.ordinal_indicator_head = torch.nn.Linear(dim_feedforward, len(ordinal_features or []))
+            self.multilabel_indicator_head = torch.nn.Linear(dim_feedforward, len(multilabel_classes or []))
+            self.lookup_indicator_head = torch.nn.Linear(dim_feedforward, len(lookup_dims or []))
 
     def forward(
         self, 
@@ -983,8 +984,6 @@ class MaskedTokenGenerator(torch.nn.Module):
             )
 
         # Get embeddings for each batch item, timestep from the encoder transformer
-        if self.predict_indicators:
-            indicator_embed = self.indicator_mlp(masked_indicators)  # (batch_size, max_timeseries_length, d_model)
         # val_embed shape: (batch_size, max_timeseries_length, d_model)
         val_embed = self.encoder(
             masked_indicators,  # [batch_size, max_timeseries_length, n_num_feats + n_cat_feats + n_lookup_feats]
@@ -992,6 +991,12 @@ class MaskedTokenGenerator(torch.nn.Module):
             timestamps,  # [batch_size, max_timeseries_length]
             timestep_masks  # [batch_size, max_timeseries_length]
         )
+        if self.predict_indicators:
+            # From the encoder's hidden state, as the value heads read it, so a presence guess can use
+            # the values and the neighbouring timesteps. It used to read the masked indicator vector
+            # itself, which a Linear(d_model, ...) could only accept where d_model happened to equal
+            # the feature count, and which carries no context even then.
+            indicator_embed = self.indicator_mlp(val_embed)  # (batch_size, max_timeseries_length, dim_feedforward)
 
         # Initialize the output structure for each feature type
         output = {}

@@ -167,8 +167,8 @@ def test_an_unobserved_zero_is_not_raised_to_the_low_cut():
         cut_high=np.array([4.0], np.float32)))
     out = dataset._numeric_values(0, 0, indicators[0, :, 0])
 
-    # Unobserved: 0 standardized, i.e. (0 - 1) / 2. Observed: clipped to 4.
-    assert out[0].item() == pytest.approx(-0.5)
+    # Unobserved: left at 0, neither clipped nor scaled. Observed: clipped to 4.
+    assert out[0].item() == 0.0
     assert out[1].item() == pytest.approx(1.5)
 
 

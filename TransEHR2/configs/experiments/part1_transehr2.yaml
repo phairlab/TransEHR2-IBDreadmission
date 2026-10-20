@@ -4,8 +4,9 @@
 # (tuning/phase4/phase4_rope_shared_256x128_cause_64.yaml), as
 # select_tuned_cell.py writes it, with three changes:
 #   - EXPERIMENT_NAME is part1_transehr2;
-#   - FINETUNE_SEED and PRETRAIN_SEED are dropped (nothing reads them; see
-#     ddafbed);
+#   - FINETUNE_SEED and PRETRAIN_SEED were dropped in ddafbed because nothing
+#     read them; they are back (major-fixes, 2026-10-19) and are now required
+#     and read, each stage seeding with its key plus the fold index;
 #   - the evaluation keys at the end are added, equal to part1_csc.yaml's and
 #     part1_tabdh.yaml's, which compare_models.py requires.
 #
@@ -59,6 +60,7 @@ EVENT_LADDER_P_MAX: 379993.0
 EVENT_LADDER_P_MIN: 0.0680556
 FINETUNE_LEARNING_RATE: 5.0e-05
 FINETUNE_LR_HALF_LIFE: null
+FINETUNE_SEED: 0
 FINETUNE_SELECTION_METRIC: brier
 FINETUNE_TOTAL_EPOCH: 500
 GENERATOR_DIM_FEEDFORWARD: 256
@@ -79,9 +81,10 @@ MODEL_DIR: /uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/models
 OBS_UNOBS_SAMPLE_RATIO: 10.0
 POSITION_ENCODING: rope
 PREDICTOR_AGGREGATION_METHOD: mean
-PREDICT_INDICATORS: false
+PREDICT_INDICATORS: true
 PRETRAIN_LEARNING_RATE: 0.0006
 PRETRAIN_LR_HALF_LIFE: 160
+PRETRAIN_SEED: 0
 PRETRAIN_TOTAL_EPOCH: 200
 RECORD_MASK_RATIO: 0.35
 THP_ENCODER_DROPOUT: 0.1
@@ -104,6 +107,9 @@ TIME_GRID_CUTS_DAYS:
 - 1736.54
 - 6454.83
 USE_THP: false
+# One event type (ADMIT_DAD) makes every event token identical, and under rope
+# the event encoder then returns one fixed vector; the head leaves it out.
+USE_EVENT_ENCODER: false
 USE_THP_PRED_LOSS: true
 VALUE_LADDER_P_MAX: 412357.0
 VALUE_LADDER_P_MIN: 0.00138889

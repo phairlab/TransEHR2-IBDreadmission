@@ -612,6 +612,12 @@ def write_manifest(spec: Dict[str, Any], trials: List[Dict[str, Any]]) -> str:
                 'cell': trial.get('cell'),
                 'covers': trial['covers'],
                 'needs_finetune': trial['needs_finetune'],
+                # .get, not a subscript: an extra trial is built without this
+                # key. Dropping the field here is what made PRETRAINS inert --
+                # it was computed onto the trial and then lost on the way to
+                # disk, so every consumer fell back to the True default and
+                # pretrain_trials() returned a phase that does not pretrain.
+                'needs_pretrain': trial.get('needs_pretrain', True),
                 'is_extra': trial.get('is_extra', False),
                 'select_on': trial.get('select_on'),
                 'description': trial.get('description', ''),

@@ -155,6 +155,28 @@ def test_a_manifest_written_before_the_flag_still_pretrains():
     assert len(pretrain_trials({'trials': trials})) == len(trials)
 
 
+def test_the_written_manifest_still_says_it_does_not_pretrain(tmp_path):
+    """The one above checks the trials in memory, which is not where the submitter reads
+    them. write_manifest copies a fixed list of fields, so a field left off that list is
+    computed correctly and then lost: PRETRAINS was inert on disk for exactly that reason,
+    and phase 3 reported a twelve-cell pretrain stage that phase 2 never had."""
+    from TransEHR2.hp_tuning.spec import (load_manifest, pretrain_trials,
+                                          write_manifest)
+    spec = _spec()
+    spec['PRETRAINS'] = False
+    spec['SPEC_PATH'] = str(tmp_path / 'spec.yaml')
+    spec['MODEL_DIR'] = str(tmp_path / 'models')
+    spec['MANIFEST'] = str(tmp_path / 'm.yaml')
+    trials = expand_trials(spec)
+    for trial in trials:
+        trial['config'] = str(tmp_path / f"{trial['name']}.yaml")
+
+    written = load_manifest(write_manifest(spec, trials))
+
+    assert all(t['needs_pretrain'] is False for t in written['trials'])
+    assert pretrain_trials(written) == []
+
+
 def test_a_non_boolean_pretrains_is_refused(tmp_path):
     spec = _spec()
     spec['PRETRAINS'] = 'no'

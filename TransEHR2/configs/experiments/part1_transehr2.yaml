@@ -1,7 +1,7 @@
 # Part 1 TransEHR2: the fold0 tuning winner, run on folds 1-5.
 #
 # The body below is phase 4's winning trial config
-# (tuning/phase4/phase4_rope_shared_256x128_cause_64.yaml), as
+# (tuning/phase4/phase4_rope_shared_256x128_cause_128x64.yaml), as
 # select_tuned_cell.py writes it, with three changes:
 #   - EXPERIMENT_NAME is part1_transehr2;
 #   - FINETUNE_SEED and PRETRAIN_SEED were dropped in ddafbed because nothing
@@ -10,20 +10,16 @@
 #   - the evaluation keys at the end are added, equal to part1_csc.yaml's and
 #     part1_tabdh.yaml's, which compare_models.py requires.
 #
-# Provenance of the tuned values (decision records in tuning/*_cell.yaml):
-#   - phase 1: PRETRAIN_LEARNING_RATE 0.0006, PRETRAIN_LR_HALF_LIFE 160,
-#     loss 0.35728 in the original run. The phase 1 results were lost and
-#     recovered from the TensorBoard logs. The winner's rerun, which
-#     regenerated its encoder for phase 2, overwrote its
-#     evaluation_pretrained.yaml with 0.36834. tables/
-#     phase1_tuning_results.csv was corrected back to the original value
-#     (user, 2026-10-18).
-#   - phase 2 (rope): FINETUNE_LEARNING_RATE 5e-05, FINETUNE_LR_HALF_LIFE
-#     null (flat).
-#   - phase 3: CMPNT_MASK_RATIO 0.25, RECORD_MASK_RATIO 0.35, 2 encoder
+# Provenance of the tuned values: the full rerun after the major-fixes
+# changes (2026-10-23; decision records in tuning/*_cell.yaml), which
+# supersedes the 2026-10-18 campaign:
+#   - phase 1: PRETRAIN_LEARNING_RATE 0.0006, PRETRAIN_LR_HALF_LIFE 60
+#     (loss 0.17326).
+#   - phase 2 (rope): FINETUNE_LEARNING_RATE 5e-05, FINETUNE_LR_HALF_LIFE 480.
+#   - phase 3: CMPNT_MASK_RATIO 0.5, RECORD_MASK_RATIO 0.25, 2 encoder
 #     blocks.
-#   - phase 4: DEEPHIT_HEAD_D_SHARED [256, 128], DEEPHIT_HEAD_D_CAUSE [64].
-#     The four heads differ by less than run-to-run noise.
+#   - phase 4: DEEPHIT_HEAD_D_SHARED [256, 128], DEEPHIT_HEAD_D_CAUSE
+#     [128, 64] (0.068031; the four heads span 0.068031-0.068676).
 #   - POSITION_ENCODING rope is the user's choice (2026-10-18).
 # The epoch budgets stay at the tuning budgets (200 pretraining, 500
 # finetuning; user, 2026-10-18), so the selected schedules apply as tuned.
@@ -36,10 +32,11 @@ EXPERIMENT_NAME: part1_transehr2
 
 BATCH_SIZE: 200
 BRIER_INTEGRATION_DAYS: 365
-CMPNT_MASK_RATIO: 0.25
+CMPNT_MASK_RATIO: 0.5
 DEEPHIT_CAUSE_WEIGHTS: null
 DEEPHIT_HEAD_DROPOUT: 0.1
 DEEPHIT_HEAD_D_CAUSE:
+- 128
 - 64
 DEEPHIT_HEAD_D_SHARED:
 - 256
@@ -59,7 +56,7 @@ DISC_LOSS_WEIGHT: 1.0
 EVENT_LADDER_P_MAX: 379993.0
 EVENT_LADDER_P_MIN: 0.0680556
 FINETUNE_LEARNING_RATE: 5.0e-05
-FINETUNE_LR_HALF_LIFE: null
+FINETUNE_LR_HALF_LIFE: 480
 FINETUNE_SEED: 0
 FINETUNE_SELECTION_METRIC: brier
 FINETUNE_TOTAL_EPOCH: 500
@@ -83,10 +80,10 @@ POSITION_ENCODING: rope
 PREDICTOR_AGGREGATION_METHOD: mean
 PREDICT_INDICATORS: true
 PRETRAIN_LEARNING_RATE: 0.0006
-PRETRAIN_LR_HALF_LIFE: 160
+PRETRAIN_LR_HALF_LIFE: 60
 PRETRAIN_SEED: 0
 PRETRAIN_TOTAL_EPOCH: 200
-RECORD_MASK_RATIO: 0.35
+RECORD_MASK_RATIO: 0.25
 THP_ENCODER_DROPOUT: 0.1
 THP_ENCODER_D_INNER: 256
 THP_ENCODER_D_K: 128

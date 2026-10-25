@@ -101,10 +101,11 @@ def install_nan_hooks(model: MixedClassifier) -> List:
             return output
         return hook
 
-    handles = [
-        model.val_encoder.register_forward_hook(_make_hook('val_encoder')),
-        model.event_encoder.register_forward_hook(_make_hook('event_encoder')),
-    ]
+    handles = [model.val_encoder.register_forward_hook(_make_hook('val_encoder'))]
+    # Absent under USE_EVENT_ENCODER: False, where the classifier has no event branch.
+    if model.event_encoder is not None:
+        handles.append(
+            model.event_encoder.register_forward_hook(_make_hook('event_encoder')))
     # Expose the counter dict so callers can inspect it later.
     for h in handles:
         h.nan_counts = nan_counts  # type: ignore[attr-defined]

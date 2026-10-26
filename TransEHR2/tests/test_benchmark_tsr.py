@@ -12,7 +12,10 @@ makes that drift loud.
 import numpy as np
 import pickle
 import pytest
+import re
 import yaml
+
+from pathlib import Path
 
 from benchmark_tsr import main, split_loader
 
@@ -116,3 +119,48 @@ def test_a_config_without_grid_settings_falls_back_to_the_defaults(cohort, capsy
                  '--split', 'test', '--batch-sizes', '1', '--batches', '1',
                  '--warmup', '0', '--workers', '0', '--chunk', '8']) == 0
     assert 'tsr/ep' in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# Phase 2
+# ---------------------------------------------------------------------------
+
+def _structured_strings(cohort):
+    """Replace the fixture's free-text notes with superfeature strings, row for row."""
+    from IBDdataprep.superfeature import dump_superfeature
+
+    dataset_config, _ = cohort
+    extracted = Path(yaml.safe_load(Path(dataset_config).read_text())['DATA_DIR']) / 'extracted'
+    path = extracted / 'text_strings.pkl'
+    with open(path, 'rb') as handle:
+        n_strings = len(pickle.load(handle))
+    strings = [dump_superfeature({'DIAGNOSES': [{'DX_DESC': f'diagnosis {i}'}],
+                                  'PROCEDURES': [f'procedure {i}']})
+               for i in range(n_strings)]
+    with open(path, 'wb') as handle:
+        pickle.dump(strings, handle)
+
+
+def test_phase2_times_every_cost_and_projects_the_cohort(cohort, capsys, monkeypatch):
+    import torch
+
+    import benchmark_tsr
+
+    _structured_strings(cohort)
+    monkeypatch.setattr(
+        benchmark_tsr, 'build_embedder',
+        lambda device, batch_size: (lambda strings: torch.randn(len(strings),
+                                                                TEXT_EMBED_DIM)))
+    dataset_config, experiment_config = cohort
+    assert main([dataset_config, experiment_config, '--device', 'cpu', '--fold', 'fold0',
+                 '--split', 'test', '--warmup', '0', '--batches', '2', '--workers', '0',
+                 '--chunk', '8', '--phase2', '--horizon-days', '30', '--ig-steps', '2',
+                 '--cohort', '10']) == 0
+    out = capsys.readouterr().out
+    for label in ('horizon 30 d (interpolated)', 'tsr ', 'fields ', 'fwd ', 'curves ',
+                  'cohort '):
+        assert label in out, out
+    assert 'diagnosis' not in out
+    # The text path really ran: the fixture's episodes carry notes, so strings were embedded.
+    embedded = re.search(r'over (\d+) strings', out)
+    assert embedded and int(embedded.group(1)) > 0, out

@@ -516,7 +516,8 @@ def test_shipped_configs_can_select_on_the_metric_they_name(name, config):
 def test_shipped_configs_say_whether_the_hawkes_process_runs(name, config):
     """USE_THP defaults to True in code, so a config that omits it silently
     keeps the module the switch exists to remove."""
-    if name in ('part1_csc.yaml', 'part1_tabdh.yaml'):
+    if name in ('part1_csc.yaml', 'part1_tabdh.yaml',
+                'part1_tabdh_norank.yaml'):
         pytest.skip(f'{name} configures a baseline, which has no encoder')
     assert 'USE_THP' in config, f'{name} does not state USE_THP'
     assert isinstance(config['USE_THP'], bool)

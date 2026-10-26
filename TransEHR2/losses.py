@@ -1067,3 +1067,85 @@ class DeepHitLoss(torch.nn.Module):
         else:
             ranking = self._ranking(cif, bin_index, cause_index, is_event)
         return nll + self.rank_weight * ranking, (nll, ranking)
+
+
+class CoxPartialLikelihoodLoss(torch.nn.Module):
+    """Negative cause-specific Cox partial log-likelihood, for a Cox head.
+
+    Each cause k has its own log relative hazard ``eta[:, k]``, and its own
+    partial likelihood in which the other causes are censorings:
+
+    .. math::
+        \\log L_k = \\sum_{i: \\delta_i = k} \\Big( \\eta_k(x_i)
+            - \\log \\sum_{j \\in R(t_i)} \\exp \\eta_k(x_j) \\Big)
+
+    with ``R(t_i)`` everyone whose time is at least ``t_i``. Ties take
+    Breslow's form, the whole tied set in each risk set; times are recorded
+    to the minute, so ties are rare.
+
+    The loss is ``-sum_k log L_k`` divided by the number of events of every
+    cause: the joint log partial likelihood per event, which is what the
+    cause-specific Cox baseline maximizes (its causes have separate
+    coefficients, so the joint and the per-cause fits coincide) and weights
+    events as DeepHit's likelihood does (user, 2026-10-26). A batch with no
+    event at all contributes zero.
+
+    Over a minibatch the risk sets are the batch's own, an approximation of
+    the full ones that is noisier the rarer the cause.
+    """
+
+    def __init__(self, n_causes: int):
+        """
+        Args:
+            n_causes (int): Number of causes, one log hazard each.
+        """
+        super().__init__()
+        self.n_causes = n_causes
+
+    def forward(
+        self,
+        eta: Tensor,
+        days: Tensor,
+        cause_index: Tensor,
+        is_event: Tensor
+    ) -> Tuple[Tensor, Tensor]:
+        """
+        Args:
+            eta (Tensor): (batch, n_causes) log relative hazards.
+            days (Tensor): (batch,) times, truncated at the horizon as
+                ``survival.event_times_days`` reads them.
+            cause_index (Tensor): (batch,) position in the grid's causes,
+                or -1 for a censored episode (``TimeGrid.discretize``).
+            is_event (Tensor): (batch,) bool, True where an outcome was
+                observed inside the grid.
+
+        Returns:
+            ``(loss, per_cause)``: the loss, and each cause's negative log
+            partial likelihood summed over its events, (n_causes,).
+        """
+        if eta.shape[1] != self.n_causes:
+            raise ValueError(f'eta has {eta.shape[1]} columns, expected '
+                             f'{self.n_causes} causes')
+        days = days.reshape(-1)
+        # Latest first, so each prefix is the set still at risk; a tied
+        # group's risk set then reaches to the group's last member.
+        order = torch.argsort(days, descending=True)
+        days = days[order]
+        eta = eta[order]
+        cause_index = cause_index.reshape(-1)[order]
+        is_event = is_event.reshape(-1)[order]
+
+        _, counts = torch.unique_consecutive(days, return_counts=True)
+        group_end = torch.repeat_interleave(torch.cumsum(counts, 0) - 1,
+                                            counts)
+        log_risk = torch.logcumsumexp(eta, dim=0)[group_end]
+
+        per_cause = torch.stack([
+            -torch.sum(torch.where(is_event & (cause_index == k),
+                                   eta[:, k] - log_risk[:, k],
+                                   eta.new_zeros(())))
+            for k in range(self.n_causes)])
+        n_events = int(is_event.sum())
+        if n_events == 0:
+            return per_cause.sum() * 0.0, per_cause
+        return per_cause.sum() / n_events, per_cause

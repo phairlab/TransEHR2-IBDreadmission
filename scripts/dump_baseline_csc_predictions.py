@@ -51,24 +51,29 @@ def main():
         raise FileNotFoundError(f'{experiment_dir} does not exist')
 
     for fold_name in get_fold_names(experiment_dir):
-        folder = os.path.join(experiment_dir, fold_name, TASK)
-        baseline = read_csc_baseline(
-            os.path.join(folder, BASELINE_FILE.format(task=TASK)), grid)
-        if baseline is None:
-            print(f"{fold_name}: no CSC baseline hazard, skipping")
+        write_fold_dumps(os.path.join(experiment_dir, fold_name, TASK),
+                         fold_name, grid)
+
+
+def write_fold_dumps(folder: str, fold_name: str, grid) -> None:
+    """One fold's grid dumps, from the CSC parameters in ``folder``."""
+    baseline = read_csc_baseline(
+        os.path.join(folder, BASELINE_FILE.format(task=TASK)), grid)
+    if baseline is None:
+        print(f"{fold_name}: no CSC baseline hazard, skipping")
+        return
+    for split in SPLITS:
+        lp = read_csc_lp(os.path.join(
+            folder, LP_FILE.format(task=TASK, split=split)), grid)
+        if lp is None:
+            print(f"{fold_name}: no {split} linear predictors, skipping")
             continue
-        for split in SPLITS:
-            lp = read_csc_lp(os.path.join(
-                folder, LP_FILE.format(task=TASK, split=split)), grid)
-            if lp is None:
-                print(f"{fold_name}: no {split} linear predictors, skipping")
-                continue
-            cif, _ = CSCCurve(lp['lp'], baseline).read(grid.cuts)
-            save_predictions_csv(
-                lp['idx'], lp['time_to_event'], lp['event_type'], cif,
-                np.diff(cif, axis=2, prepend=0.0),
-                1.0 - cif[:, :, -1].sum(axis=1), grid,
-                os.path.join(folder, f'{TASK}_{split}_finetuned_output.csv'))
+        cif, _ = CSCCurve(lp['lp'], baseline).read(grid.cuts)
+        save_predictions_csv(
+            lp['idx'], lp['time_to_event'], lp['event_type'], cif,
+            np.diff(cif, axis=2, prepend=0.0),
+            1.0 - cif[:, :, -1].sum(axis=1), grid,
+            os.path.join(folder, f'{TASK}_{split}_finetuned_output.csv'))
 
 
 if __name__ == '__main__':

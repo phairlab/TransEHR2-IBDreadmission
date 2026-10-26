@@ -14,11 +14,25 @@ Usage:
     python scripts/fit_transehr2_deephit.py <dataset_config> <experiment_config> \\
         [--folds fold0 fold1] [--device cuda:0] [--force_pretrain] \\
         [--num_workers 0] [--mem_test_mode]
+
+Two optional config keys (user, 2026-10-26):
+
+* ``SURVIVAL_HEAD``: ``deephit`` (default) or ``cox``. A Cox head is the
+  DeepHit head's shared and per-cause stacks with one output per cause, a
+  log relative hazard, fitted on the cause-specific Cox partial likelihood
+  and selected with ``FINETUNE_SELECTION_METRIC: partial_likelihood``. Its
+  predictions are dumped by ``dump_transehr2_csc_predictions.py``.
+* ``PRETRAINED_FROM``: another experiment's name. Each fold starts from that
+  experiment's pretrained encoder for the same fold, copied into this one
+  (:func:`adopt_pretrained_encoders`), so the head and its loss are all that
+  differ. The two configs must agree on everything that pretraining reads
+  (:func:`check_pretraining_source`).
 """
 
 import argparse
 import gc
 import os
+import shutil
 import torch
 import yaml
 
@@ -34,7 +48,7 @@ from TransEHR2.data.preprocessing import (
     compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
     value_encoder_dims
 )
-from TransEHR2.losses import DeepHitLoss
+from TransEHR2.losses import CoxPartialLikelihoodLoss, DeepHitLoss
 from TransEHR2.models import ELECTRA, MixedClassifier
 from TransEHR2.modules import (
     DeepHitHead, EventDataEncoder, MaskedTokenDiscriminator,
@@ -110,6 +124,77 @@ def write_pretraining_evaluation(
 
     print(f"Wrote pretraining losses to {path}")
     return path
+
+
+# Keys that only the head, finetuning or evaluation read. Every other key
+# can change the pretrained encoder, so PRETRAINED_FROM requires it to match.
+POST_PRETRAINING_KEYS = frozenset({
+    'EXPERIMENT_NAME', 'MODEL_DIR', 'PRETRAINED_FROM', 'SURVIVAL_HEAD',
+    'FINETUNE_LEARNING_RATE', 'FINETUNE_LR_HALF_LIFE', 'FINETUNE_SEED',
+    'FINETUNE_SELECTION_METRIC', 'FINETUNE_TOTAL_EPOCH',
+    'DEEPHIT_CAUSE_WEIGHTS', 'DEEPHIT_HEAD_DROPOUT', 'DEEPHIT_HEAD_D_CAUSE',
+    'DEEPHIT_HEAD_D_SHARED', 'DEEPHIT_RANK_WEIGHT', 'DEEPHIT_SIGMA',
+    'TIME_GRID_CUTS_DAYS', 'MODELLED_CAUSES', 'BRIER_INTEGRATION_DAYS',
+    'PREDICTOR_AGGREGATION_METHOD', 'EVAL_HORIZONS_DAYS', 'CR_DCAL_ALPHA',
+    'CR_DCAL_N_RHO', 'CR_DCAL_CHI2_BINS', 'CR_DCAL_TEST_LEVEL',
+})
+
+# What a pretrained fold leaves that finetuning or a later reader uses.
+PRETRAINED_FILES = ('value_encoder.pt', 'event_encoder.pt',
+                    os.path.join('evaluation', 'evaluation_pretrained.yaml'))
+
+
+def check_pretraining_source(config_path: str, config: Dict[str, Any],
+                             source: str) -> None:
+    """Refuse ``PRETRAINED_FROM: source`` unless its pretraining matches.
+
+    The source's config is ``<source>.yaml`` beside this one. Every key
+    outside :data:`POST_PRETRAINING_KEYS` must be equal in both, present in
+    both or absent from both: a strict ``load_state_dict`` catches a
+    changed width, but not a changed mask rate or learning rate.
+    """
+    source_path = os.path.join(os.path.dirname(os.path.abspath(config_path)),
+                               f'{source}.yaml')
+    if not os.path.exists(source_path):
+        raise FileNotFoundError(f'PRETRAINED_FROM names {source}, but '
+                                f'{source_path} does not exist')
+    with open(source_path) as f_in:
+        source_config = yaml.safe_load(f_in)
+    keys = (set(config) | set(source_config)) - POST_PRETRAINING_KEYS
+    differ = sorted(k for k in keys if config.get(k) != source_config.get(k))
+    if differ:
+        raise ValueError(
+            f'PRETRAINED_FROM {source}: the two configs disagree on keys '
+            f'pretraining reads, so its encoders are not this experiment\'s: '
+            f'{", ".join(differ)}')
+    if config['MODEL_DIR'] != source_config['MODEL_DIR']:
+        raise ValueError(f'PRETRAINED_FROM {source}: MODEL_DIR differs, '
+                         f'{source_config["MODEL_DIR"]}')
+
+
+def adopt_pretrained_encoders(pretrained_dir: str, source_dir: str) -> None:
+    """Copy a fold's pretrained encoder into ``pretrained_dir``, once.
+
+    Nothing is overwritten: a fold that already holds ``value_encoder.pt``
+    is left as it is, so a rerun resumes rather than recopies. The source
+    is recorded beside the copy in ``pretrained_from.yaml``.
+    """
+    if os.path.exists(os.path.join(pretrained_dir, 'value_encoder.pt')):
+        return
+    if not os.path.exists(os.path.join(source_dir, 'value_encoder.pt')):
+        raise FileNotFoundError(
+            f'No value_encoder.pt in {source_dir} to start from. Pretrain '
+            f'that experiment first.')
+    for name in PRETRAINED_FILES:
+        source = os.path.join(source_dir, name)
+        if os.path.exists(source):
+            target = os.path.join(pretrained_dir, name)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(source, target)
+    with open(os.path.join(pretrained_dir, 'pretrained_from.yaml'),
+              'w') as f_out:
+        yaml.safe_dump({'source_dir': os.path.abspath(source_dir)}, f_out)
+    print(f"\nCopied the pretrained encoder from {source_dir}\n")
 
 
 def main():
@@ -271,6 +356,17 @@ def main():
     DEEPHIT_HEAD_D_SHARED = experiment_config.get('DEEPHIT_HEAD_D_SHARED', [256, 128])
     DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', [128, 64])
     DEEPHIT_HEAD_DROPOUT = experiment_config.get('DEEPHIT_HEAD_DROPOUT', 0.1)
+    SURVIVAL_HEAD = experiment_config.get('SURVIVAL_HEAD', 'deephit')
+    if SURVIVAL_HEAD not in ('deephit', 'cox'):
+        raise ValueError(f"SURVIVAL_HEAD: expected 'deephit' or 'cox', got "
+                         f"{SURVIVAL_HEAD!r}")
+    PRETRAINED_FROM = experiment_config.get('PRETRAINED_FROM')
+    if PRETRAINED_FROM is not None:
+        if args.force_pretrain:
+            raise ValueError('--force_pretrain contradicts PRETRAINED_FROM, '
+                             'which reuses another experiment\'s encoders')
+        check_pretraining_source(args.experiment_config, experiment_config,
+                                 PRETRAINED_FROM)
 
     grid = TimeGrid(TIME_GRID_CUTS_DAYS, MODELLED_CAUSES,
                     BRIER_INTEGRATION_DAYS)
@@ -365,6 +461,10 @@ def main():
             ladder_p_min=EVENT_LADDER_P_MIN,
             ladder_p_max=EVENT_LADDER_P_MAX)
 
+    # A Cox head is the DeepHit head with one output per cause: its log
+    # relative hazard, read with no time grid.
+    head_bins = grid.n_bins if SURVIVAL_HEAD == 'deephit' else 1
+
     def build_predictor():
         """A fresh competing-risks model with untrained encoders."""
         d_event_enc = THP_ENCODER_D_MODEL if USE_EVENT_ENCODER else 0
@@ -379,14 +479,14 @@ def main():
             d_event_enc=d_event_enc,
             d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
             d_statics=static_dim,
-            num_classes=grid.n_causes * grid.n_bins,
+            num_classes=grid.n_causes * head_bins,
             aggr=PREDICTOR_AGGREGATION_METHOD,
             use_lookup=use_lookup,
             head=DeepHitHead(
                 d_in=MixedClassifier.encoding_width(
                     d_event_enc, DISCRIMINATOR_ENCODER_D_MODEL,
                     static_dim),
-                n_causes=grid.n_causes, n_bins=grid.n_bins,
+                n_causes=grid.n_causes, n_bins=head_bins,
                 d_shared=DEEPHIT_HEAD_D_SHARED, d_cause=DEEPHIT_HEAD_D_CAUSE,
                 dropout=DEEPHIT_HEAD_DROPOUT),
         )
@@ -414,6 +514,10 @@ def main():
 
         # ---------------------------------------------------------- pretrain
         model_save_dir = f'{MODEL_DIR}/{EXPERIMENT_NAME}/{fold_name}/pretrained'
+        if PRETRAINED_FROM is not None:
+            adopt_pretrained_encoders(
+                model_save_dir,
+                f'{MODEL_DIR}/{PRETRAINED_FROM}/{fold_name}/pretrained')
 
         if not args.force_pretrain and pretraining_is_done(model_save_dir,
                                                            USE_THP):
@@ -586,7 +690,8 @@ def main():
                 total_epoch=FINETUNE_TOTAL_EPOCH,
                 checkpoint_dir=f'./checkpoints/{EXPERIMENT_NAME}/{fold_name}/finetuned',
                 timer=timer,
-                mem_test_mode=args.mem_test_mode
+                mem_test_mode=args.mem_test_mode,
+                head=SURVIVAL_HEAD
             )
             timer.end_phase('finetune')
 
@@ -610,10 +715,12 @@ def main():
             model=predictor,
             loader=test_loader,
             grid=grid,
-            loss_fn=DeepHitLoss(
-                n_causes=grid.n_causes, n_bins=grid.n_bins,
-                sigma=DEEPHIT_SIGMA, rank_weight=DEEPHIT_RANK_WEIGHT,
-                cause_weights=DEEPHIT_CAUSE_WEIGHTS).to(device),
+            loss_fn=(CoxPartialLikelihoodLoss(grid.n_causes).to(device)
+                     if SURVIVAL_HEAD == 'cox' else
+                     DeepHitLoss(
+                         n_causes=grid.n_causes, n_bins=grid.n_bins,
+                         sigma=DEEPHIT_SIGMA, rank_weight=DEEPHIT_RANK_WEIGHT,
+                         cause_weights=DEEPHIT_CAUSE_WEIGHTS).to(device)),
             device=device,
             prefix='test',
             mem_test_mode=args.mem_test_mode
@@ -636,6 +743,8 @@ def main():
             'pretrain_seed': PRETRAIN_SEED + fold_index,
             'finetune_seed': FINETUNE_SEED + fold_index,
             'selection_metric': FINETUNE_SELECTION_METRIC,
+            'survival_head': SURVIVAL_HEAD,
+            'pretrained_from': PRETRAINED_FROM,
             'train_scores': convert_to_python_types(best_train_scores or {}),
             'validation_scores': convert_to_python_types(best_val_scores or {}),
             'test_scores': convert_to_python_types(best_test_scores),

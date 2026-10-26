@@ -23,6 +23,12 @@ MODELS:
   TransEHR2: part1_transehr2
   CSC: part1_csc
   TabDeepHit: part1_tabdh
+  # The ablations (user, 2026-10-26): each DeepHit without its ranking loss,
+  # and TransEHR2's encoder with a cause-specific Cox head. Every model listed
+  # must have its evaluations before compare_models.py runs.
+  TransEHR2_noRank: part1_transehr2_norank
+  TabDeepHit_noRank: part1_tabdh_norank
+  TransEHR2_CSC: part1_transehr2_csc
 
 # Paired, two-sided. The difference is the first minus the second.
 COMPARISONS:
@@ -35,6 +41,19 @@ COMPARISONS:
   - [TransEHR2 recal, TransEHR2 raw]
   - [CSC recal, CSC raw]
   - [TabDeepHit recal, TabDeepHit raw]
+  # Each ablation against its reference only (user, 2026-10-26): the ranking
+  # loss, and the head.
+  - [TransEHR2_noRank raw, TransEHR2 raw]
+  - [TabDeepHit_noRank raw, TabDeepHit raw]
+  - [TransEHR2_CSC raw, TransEHR2 raw]
+  - [TransEHR2_CSC raw, CSC raw]
+  - [TransEHR2_noRank recal, TransEHR2 recal]
+  - [TabDeepHit_noRank recal, TabDeepHit recal]
+  - [TransEHR2_CSC recal, TransEHR2 recal]
+  - [TransEHR2_CSC recal, CSC recal]
+  - [TransEHR2_noRank recal, TransEHR2_noRank raw]
+  - [TabDeepHit_noRank recal, TabDeepHit_noRank raw]
+  - [TransEHR2_CSC recal, TransEHR2_CSC raw]
 
 # Metric keys in the evaluation YAMLs. {cause} is the metric label of each
 # modelled cause, {tau} each horizon as the evaluation spells it.

@@ -26,7 +26,10 @@ FOLDS = ['fold1', 'fold2', 'fold3', 'fold4', 'fold5']
 CUTS = [46.45, 178.67, 435.09, 898.92, 1736.54, 6454.83]
 SPLITS = {'raw': 'test', 'recal': 'test_recal_aj'}
 EXPERIMENTS = {'TransEHR2': 'part1_transehr2', 'CSC': 'part1_csc',
-               'TabDeepHit': 'part1_tabdh'}
+               'TabDeepHit': 'part1_tabdh',
+               'TransEHR2_noRank': 'part1_transehr2_norank',
+               'TabDeepHit_noRank': 'part1_tabdh_norank',
+               'TransEHR2_CSC': 'part1_transehr2_csc'}
 RATIO = 0.25
 
 
@@ -128,6 +131,15 @@ def test_the_shipped_config_names_the_planned_design(config):
                 for a, b in pairs]
     expected += [[f'{m} recal', f'{m} raw']
                  for m in ('TransEHR2', 'CSC', 'TabDeepHit')]
+    # The ablations against their references (user, 2026-10-26).
+    ablations = [('TransEHR2_noRank', 'TransEHR2'),
+                 ('TabDeepHit_noRank', 'TabDeepHit'),
+                 ('TransEHR2_CSC', 'TransEHR2'), ('TransEHR2_CSC', 'CSC')]
+    expected += [[f'{a} {v}', f'{b} {v}'] for v in ('raw', 'recal')
+                 for a, b in ablations]
+    expected += [[f'{m} recal', f'{m} raw']
+                 for m in ('TransEHR2_noRank', 'TabDeepHit_noRank',
+                           'TransEHR2_CSC')]
     assert config['COMPARISONS'] == expected
 
 
@@ -147,15 +159,15 @@ def test_p_values_and_bh_match_the_definitions(tmp_path, monkeypatch,
                 b = read_evaluation(model_dir, *arm_b.split(' '))[metric]
                 expected.append(expected_p(a, b))
         rows = table[table['metric'].isin(tested)]
-        # 11 tested metrics x 9 comparisons in one family.
-        assert len(rows) == len(expected) == 99
+        # 11 tested metrics x 20 comparisons in one family.
+        assert len(rows) == len(expected) == 220
         assert rows['p'].to_numpy() == pytest.approx(expected, rel=1e-9)
         assert rows['p_bh'].to_numpy() == pytest.approx(
             step_up(expected), rel=1e-9)
         assert (rows['df'] == 4).all()
 
         untested = table[table['metric'].isin(reported)]
-        assert len(untested) == 5 * 9
+        assert len(untested) == 5 * 20
         assert untested[['t', 'p', 'p_bh']].isna().all().all()
 
 

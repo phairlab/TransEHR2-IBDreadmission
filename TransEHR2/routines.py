@@ -45,11 +45,13 @@ from tqdm import tqdm
 from typing import Any, Dict, List, Optional, Tuple, TypeAlias
 
 from TransEHR2.losses import (
-    DeepHitLoss, MaskedDiscriminatorLoss, MaskedGeneratorLoss,
-    TransformerHawkesLoss
+    CoxPartialLikelihoodLoss, DeepHitLoss, MaskedDiscriminatorLoss,
+    MaskedGeneratorLoss, TransformerHawkesLoss
 )
 from TransEHR2.models import MixedClassifier
-from TransEHR2.survival import TimeGrid, survival_metrics
+from TransEHR2.survival import (
+    MINUTES_PER_DAY, TimeGrid, metric_label, survival_metrics
+)
 from TransEHR2.utils import Timer
 from TransEHR2.utils import describe_loss_spike
 from TransEHR2.utils import format_pretraining_performance_table
@@ -89,10 +91,24 @@ SPIKE_REPORT_LIMIT = 3
 # about a horizon. The integrated Brier score is readmission's alone, and
 # it is integrated from discharge out to TimeGrid.brier_integration_days,
 # one year by default. Lower is better.
+#
+# 'partial_likelihood' is the Cox head's (user, 2026-10-26): the val split's
+# negative cause-specific Cox partial log-likelihood per event, with the
+# split's full risk sets. It needs no baseline hazard during training, which
+# every one of the three above would.
 SELECTION_METRICS = {
     'brier': ('Readmission_Integrated_Brier', False),
     'cindex': ('Mean_Cindex', True),
     'loss': ('Loss_DeepHit', False),
+    'partial_likelihood': ('Loss_CoxPL', False),
+}
+
+# The heads finetune_model fits, and the selection metrics each can be
+# scored on: the grid metrics read a DeepHit pmf, and the partial likelihood
+# reads log hazards.
+HEAD_SELECTION_METRICS = {
+    'deephit': ('brier', 'cindex', 'loss'),
+    'cox': ('partial_likelihood',),
 }
 
 # The cause 'brier' scores. A run that does not model it has no such
@@ -743,9 +759,13 @@ def _forward_survival(
     model: MixedClassifier,
     batch: Dict[str, Any],
     grid: TimeGrid,
-    loss_fn: DeepHitLoss
+    loss_fn: torch.nn.Module
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
     """One forward pass: ``(loss, logits, time_to_event, event_type, nll)``.
+
+    ``loss_fn`` is a ``DeepHitLoss``, or a ``CoxPartialLikelihoodLoss``
+    for a Cox head, whose "logits" are then its (batch, n_causes) log
+    hazards and whose ``nll`` is the loss itself.
 
     The raw labels come back alongside the discretized ones because the
     metrics re-derive the grid themselves -- they are reported at several
@@ -754,8 +774,18 @@ def _forward_survival(
     """
     logits = model(batch)
     bin_index, cause_index, is_event = _survival_targets(batch, grid)
-    loss, (nll, _) = loss_fn(logits, bin_index, cause_index, is_event)
     targets = batch['targets']
+    if isinstance(loss_fn, CoxPartialLikelihoodLoss):
+        # A Cox head's output is one log hazard per cause, read against
+        # continuous times truncated at the horizon, as the evaluation reads
+        # the outcome (survival.event_times_days).
+        days = torch.clamp(
+            targets['time_to_event'].reshape(-1).to(logits.dtype)
+            / MINUTES_PER_DAY, max=grid.horizon_days)
+        loss, _ = loss_fn(logits, days, cause_index, is_event)
+        nll = loss
+    else:
+        loss, (nll, _) = loss_fn(logits, bin_index, cause_index, is_event)
     return (loss, logits.detach(),
             targets['time_to_event'].detach().reshape(-1),
             targets['event_type'].detach().reshape(-1), nll.detach())
@@ -769,24 +799,37 @@ def _score(
     grid: TimeGrid,
     prefix: str,
     global_step: int,
-    writer: Optional[torch.utils.tensorboard.SummaryWriter]
+    writer: Optional[torch.utils.tensorboard.SummaryWriter],
+    cox: bool = False
 ) -> Dict[str, float]:
     """Turn accumulated batch output into the reported scores.
 
     The metrics are computed over the whole split at once rather than
     averaged over batches. Concordance is a property of the pair set, and
     the pairs that cross a batch boundary are most of them.
+
+    With ``cox``, ``logits`` are a Cox head's log hazards, scored by
+    :func:`cox_scores`; the batch-mean loss is reported beside it as
+    ``Loss_CoxPL_Batch``.
     """
     if not logits:
         return {}
 
-    scores = survival_metrics(
-        torch.cat(logits, dim=0).float().cpu().numpy(),
-        torch.cat(times, dim=0).cpu().numpy(),
-        torch.cat(types, dim=0).cpu().numpy(),
-        grid,
-    )
-    scores['Loss_DeepHit'] = float(np.mean(losses)) if losses else float('nan')
+    if cox:
+        scores = cox_scores(torch.cat(logits, dim=0),
+                            torch.cat(times, dim=0), torch.cat(types, dim=0),
+                            grid)
+        scores['Loss_CoxPL_Batch'] = (float(np.mean(losses)) if losses
+                                      else float('nan'))
+    else:
+        scores = survival_metrics(
+            torch.cat(logits, dim=0).float().cpu().numpy(),
+            torch.cat(times, dim=0).cpu().numpy(),
+            torch.cat(types, dim=0).cpu().numpy(),
+            grid,
+        )
+        scores['Loss_DeepHit'] = (float(np.mean(losses)) if losses
+                                  else float('nan'))
 
     if writer is not None:
         for name, value in scores.items():
@@ -796,11 +839,39 @@ def _score(
     return scores
 
 
+def cox_scores(eta: Tensor, time_to_event: Tensor, event_type: Tensor,
+               grid: TimeGrid) -> Dict[str, float]:
+    """A Cox head's scores over a whole split, with full risk sets.
+
+    ``Loss_CoxPL`` is the negative cause-specific partial log-likelihood per
+    event (``CoxPartialLikelihoodLoss`` over the split), and
+    ``<Cause>_Loss_CoxPL`` each cause's part of it per event of that cause,
+    with ``<Cause>_Events`` its event count. Computed in float64 on the CPU:
+    the split's log-sum-exp runs over tens of thousands of terms.
+    """
+    eta = eta.detach().to('cpu', torch.float64)
+    _, cause_index, is_event = grid.discretize(time_to_event.cpu(),
+                                               event_type.cpu())
+    days = torch.clamp(time_to_event.detach().cpu().reshape(-1)
+                       .to(torch.float64) / MINUTES_PER_DAY,
+                       max=grid.horizon_days)
+    loss, per_cause = CoxPartialLikelihoodLoss(grid.n_causes)(
+        eta, days, cause_index, is_event)
+    scores = {'Loss_CoxPL': float(loss)}
+    for k, cause in enumerate(grid.cause_names):
+        key = metric_label(cause)
+        events = int((is_event & (cause_index == k)).sum())
+        scores[f'{key}_Loss_CoxPL'] = (float(per_cause[k]) / events
+                                       if events else float('nan'))
+        scores[f'{key}_Events'] = events
+    return scores
+
+
 def evaluate_finetuned_model(
     model: MixedClassifier,
     loader: torch.utils.data.DataLoader,
     grid: TimeGrid,
-    loss_fn: DeepHitLoss,
+    loss_fn: torch.nn.Module,
     device: torch.device,
     prefix: str = '',
     global_step: int = 0,
@@ -813,7 +884,9 @@ def evaluate_finetuned_model(
         model: The finetuned model.
         loader: DataLoader for the split.
         grid: The discrete time grid the head predicts on.
-        loss_fn: The DeepHit objective, for the reported loss.
+        loss_fn: The DeepHit objective, for the reported loss, or a
+            ``CoxPartialLikelihoodLoss``, which scores the split as a Cox
+            head's (:func:`cox_scores`).
         device: Where the model and batches live.
         prefix: TensorBoard series name, e.g. 'val'.
         global_step: Epoch number, for TensorBoard.
@@ -848,7 +921,8 @@ def evaluate_finetuned_model(
             del batch
 
     scores = _score(logits, times, types, losses, grid, prefix, global_step,
-                    writer)
+                    writer,
+                    cox=isinstance(loss_fn, CoxPartialLikelihoodLoss))
     model.train()
     return scores
 
@@ -870,7 +944,8 @@ def finetune_model(
     checkpoint_dir: Optional[str] = None,
     resume_from_checkpoint: bool = True,
     timer: Optional[Timer] = None,
-    mem_test_mode: bool = False
+    mem_test_mode: bool = False,
+    head: str = 'deephit'
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """Fine-tune the pretrained encoders on the competing-risks outcome.
 
@@ -896,6 +971,10 @@ def finetune_model(
         timer: Timer for tracking training time.
         mem_test_mode: If True, runs two batches per phase and reports peak
             memory.
+        head: 'deephit', or 'cox' for a head that outputs one log hazard per
+            cause, trained on ``CoxPartialLikelihoodLoss``; rank_weight,
+            sigma and cause_weights are then unused, and selection_metric
+            must be 'partial_likelihood' (HEAD_SELECTION_METRICS).
 
     Returns:
         Tuple of (best_train_scores, best_val_scores) dictionaries.
@@ -906,6 +985,13 @@ def finetune_model(
         raise ValueError(f'selection_metric: expected one of '
                          f'{sorted(SELECTION_METRICS)}, got {selection_metric}')
     metric_key, higher_is_better = SELECTION_METRICS[selection_metric]
+    if head not in HEAD_SELECTION_METRICS:
+        raise ValueError(f'head: expected one of '
+                         f'{sorted(HEAD_SELECTION_METRICS)}, got {head}')
+    if selection_metric not in HEAD_SELECTION_METRICS[head]:
+        raise ValueError(
+            f"selection_metric '{selection_metric}' does not apply to a "
+            f"{head} head; use one of {HEAD_SELECTION_METRICS[head]}.")
 
     # Caught here rather than at the first epoch, where a missing key would
     # read as a NaN score, never improve on the incumbent, and save the
@@ -920,9 +1006,12 @@ def finetune_model(
     train_loader, val_loader = loaders[0], loaders[1]
 
     model = model.to(device)
-    loss_fn = DeepHitLoss(
-        n_causes=grid.n_causes, n_bins=grid.n_bins, sigma=sigma,
-        rank_weight=rank_weight, cause_weights=cause_weights).to(device)
+    if head == 'cox':
+        loss_fn = CoxPartialLikelihoodLoss(grid.n_causes).to(device)
+    else:
+        loss_fn = DeepHitLoss(
+            n_causes=grid.n_causes, n_bins=grid.n_bins, sigma=sigma,
+            rank_weight=rank_weight, cause_weights=cause_weights).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(
         optimizer, gamma=resolve_decay_factor(lr_half_life))
@@ -992,7 +1081,7 @@ def finetune_model(
                     break
 
         train_scores = _score(logits, times, types, losses, grid, 'train',
-                              epoch + 1, writer)
+                              epoch + 1, writer, cox=head == 'cox')
         del logits, times, types, losses
 
         val_scores = evaluate_finetuned_model(

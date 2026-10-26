@@ -206,10 +206,9 @@ def save_predictions_csv(
     print(f"    Wrote {output_path} ({len(order):,} rows)")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Extract predictions from finetuned TransEHR2 models'
-    )
+def parse_args(description: str) -> argparse.Namespace:
+    """The command line both TransEHR2 dump scripts take."""
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument('dataset_config', type=str,
                         help='YAML file specifying dataset parameters')
     parser.add_argument('experiment_config', type=str,
@@ -228,10 +227,18 @@ def main():
     parser.add_argument('--batch_size', type=int, default=None,
                         help='Inference batch size. Defaults to the '
                              'experiment config\'s BATCH_SIZE.')
-    args = parser.parse_args()
+    return parser.parse_args()
 
-    device = resolve_device(args.device)
-    print(f"Running inference on {device}")
+
+def setup(args: argparse.Namespace) -> Dict:
+    """What a dump needs from the two configs, built once.
+
+    Returns ``{'data_dir', 'batch_size', 'grid', 'folds', 'head',
+    'build_classifier'}``. ``head`` is the config's SURVIVAL_HEAD;
+    ``build_classifier`` makes the finetuned architecture, whose head has
+    one output per cause under 'cox' and one per (cause, bin) under
+    'deephit', so the strict load of its weights matches.
+    """
 
     with open(args.dataset_config, 'r') as f_in:
         dataset_config = yaml.safe_load(f_in)
@@ -270,6 +277,7 @@ def main():
     DEEPHIT_HEAD_D_SHARED = experiment_config.get('DEEPHIT_HEAD_D_SHARED', [256, 128])
     DEEPHIT_HEAD_D_CAUSE = experiment_config.get('DEEPHIT_HEAD_D_CAUSE', [128, 64])
     DEEPHIT_HEAD_DROPOUT = experiment_config.get('DEEPHIT_HEAD_DROPOUT', 0.1)
+    SURVIVAL_HEAD = experiment_config.get('SURVIVAL_HEAD', 'deephit')
 
     grid = TimeGrid(
         experiment_config.get('TIME_GRID_CUTS_DAYS',
@@ -302,6 +310,10 @@ def main():
     use_event_encoder = experiment_config.get('USE_EVENT_ENCODER', True)
     d_event_enc = THP_ENCODER_D_MODEL if use_event_encoder else 0
 
+    # As fit_transehr2_deephit.py builds it: a Cox head is the DeepHit head
+    # with one output per cause.
+    head_bins = grid.n_bins if SURVIVAL_HEAD == 'deephit' else 1
+
     def build_classifier() -> MixedClassifier:
         return MixedClassifier(
             event_encoder=None if not use_event_encoder else EventDataEncoder(
@@ -329,17 +341,34 @@ def main():
             d_event_enc=d_event_enc,
             d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
             d_statics=static_dim,
-            num_classes=grid.n_causes * grid.n_bins,
+            num_classes=grid.n_causes * head_bins,
             aggr=PREDICTOR_AGGREGATION_METHOD,
             use_lookup=use_lookup,
             head=DeepHitHead(
                 d_in=MixedClassifier.encoding_width(
                     d_event_enc, DISCRIMINATOR_ENCODER_D_MODEL,
                     static_dim),
-                n_causes=grid.n_causes, n_bins=grid.n_bins,
+                n_causes=grid.n_causes, n_bins=head_bins,
                 d_shared=DEEPHIT_HEAD_D_SHARED, d_cause=DEEPHIT_HEAD_D_CAUSE,
                 dropout=DEEPHIT_HEAD_DROPOUT),
         )
+
+    return {'data_dir': DATA_DIR, 'batch_size': BATCH_SIZE, 'grid': grid,
+            'folds': fold_name_list, 'head': SURVIVAL_HEAD,
+            'build_classifier': build_classifier}
+
+
+def main():
+    args = parse_args('Extract predictions from finetuned TransEHR2 models')
+    device = resolve_device(args.device)
+    print(f"Running inference on {device}")
+    s = setup(args)
+    if s['head'] != 'deephit':
+        raise ValueError(f"SURVIVAL_HEAD is {s['head']!r}; a Cox head's "
+                         f"predictions come from "
+                         f"dump_transehr2_csc_predictions.py")
+    DATA_DIR, BATCH_SIZE, grid = s['data_dir'], s['batch_size'], s['grid']
+    fold_name_list, build_classifier = s['folds'], s['build_classifier']
 
     for fold_name in fold_name_list:
         print(f"\n=== {fold_name} ===")

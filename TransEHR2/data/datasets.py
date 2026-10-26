@@ -399,10 +399,15 @@ class MixedDataset(Dataset):
         table's all-zero pad row and are zeroed by the mask regardless.
 
         Returns:
-            ``(timesteps, embeddings, doses, masks)``. ``timesteps`` is
-            ``(n,)`` int64 over the extracted axis; ``embeddings`` is
-            ``(n, D)`` or ``(n, S, D)``; the last two are ``(n, S)``, or
-            None for a single-slot feature.
+            ``(timesteps, embeddings, doses, masks, indices)``.
+            ``timesteps`` is ``(n,)`` int64 over the extracted axis;
+            ``embeddings`` is ``(n, D)`` or ``(n, S, D)``; ``doses`` and
+            ``masks`` are ``(n, S)``, or None for a single-slot feature;
+            ``indices`` is the table row behind each embedding, ``(n,)``
+            or ``(n, S)`` int64. The rows say *which* text or ATC code an
+            entry is, which the gathered vectors only imply: attribution
+            deletes a drug by its ATC code, and re-embeds a text cell from
+            its string, and both need the row.
         """
         csr = self.lookup_csr[f]
         n_slots = self.lookup_slot_dims[f]
@@ -415,6 +420,7 @@ class MixedDataset(Dataset):
         # will not let anything write to. The copy is per-record, which
         # is the point of carrying records rather than the axis.
         timesteps = np.array(csr['timesteps'][start:end], dtype=np.int64)
+        indices = np.array(csr['values'][start:end], dtype=np.int64)
         if end > start:
             # Cast at the gather: whatever the table's
             # dtype, the model's torch.cat sees float32.
@@ -432,12 +438,13 @@ class MixedDataset(Dataset):
             )
 
         if n_slots == 1:
-            return timesteps, embeddings, None, None
+            return timesteps, embeddings, None, None, indices
         return (
             timesteps,
             embeddings,
             np.array(csr['doses'][start:end], dtype=np.float32),
             np.array(csr['masks'][start:end], dtype=np.float32),
+            indices,
         )
 
     def __getitem__(self, idx: int) -> Dict:
@@ -507,7 +514,8 @@ class MixedDataset(Dataset):
         lookup_columns = []
         lookup_sparse = []
         for f, (feat_type, column) in enumerate(self._lookup_columns):
-            timesteps, embeddings, doses, masks = self._gather_lookup(f, idx)
+            timesteps, embeddings, doses, masks, indices = (
+                self._gather_lookup(f, idx))
             lookup_columns.append(
                 np.asarray(self.lookup_indicators[feat_type][idx],
                            dtype=np.float32)[:, column]
@@ -517,6 +525,7 @@ class MixedDataset(Dataset):
                 'values': torch.from_numpy(embeddings),
                 'doses': None if doses is None else torch.from_numpy(doses),
                 'masks': None if masks is None else torch.from_numpy(masks),
+                'indices': torch.from_numpy(indices),
             })
         if lookup_sparse:
             item['val_lookup_indicators'] = torch.from_numpy(

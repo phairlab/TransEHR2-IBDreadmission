@@ -1657,6 +1657,11 @@ def collate_tensorized(batch: MixedDataset) -> MixedTensorDataset:
                 None if blocks[0][key] is None
                 else torch.cat([b[key] for b in blocks])
             )
+        # The table rows behind the values, for attribution. Read with
+        # .get: an item assembled by hand rather than by MixedDataset may
+        # not carry them, and nothing in training needs them.
+        if blocks[0].get('indices') is not None:
+            block['indices'] = torch.cat([b['indices'] for b in blocks])
         return block
 
     # Stack targets

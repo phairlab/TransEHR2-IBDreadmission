@@ -238,6 +238,16 @@ def _densify_lookup_entry(lookup: Dict[str, Any]) -> Dict[str, Any]:
                 dense[episodes, timesteps] = entries
             lookup[key].append(dense)
 
+        # The table row behind each slot, -1 where no record is. Not 0,
+        # which is a real row: an ATC code or a string.
+        indices = block.get('indices')
+        if indices is not None:
+            dense = torch.full((batch_size, max_ts_len, *indices.shape[1:]),
+                               -1, dtype=torch.int64, device=indices.device)
+            if episodes.numel():
+                dense[episodes, timesteps] = indices.to(torch.int64)
+            lookup.setdefault('slot_indices', []).append(dense)
+
     return lookup
 
 
@@ -263,7 +273,8 @@ def densify_lookup_slots(batch: MixedTensorDataset) -> MixedTensorDataset:
 
     Returns:
         The same batch, with ``slot_values``, ``doses`` and ``masks`` in
-        place of the sparse blocks.
+        place of the sparse blocks, and ``slot_indices`` -- each slot's
+        table row, -1 where empty -- when the blocks carry them.
     """
 
     lookup = (batch.get('val_data', {}).get('lookup')

@@ -161,7 +161,9 @@ def main(argv=None) -> int:
     parser.add_argument('--scorer', default='grad_x_input', choices=sorted(SCORERS))
     parser.add_argument('--cause', type=int, default=0,
                         help='Position of the cause in the grid, not its EVENT_TYPE')
-    parser.add_argument('--horizon-bin', type=int, default=0)
+    parser.add_argument('--horizon-bin', type=int, default=0,
+                        help='Bin whose right edge is the horizon; bin 0 ends at the first '
+                             'TIME_GRID_CUTS_DAYS cut (46.45 d under the shipped grid)')
     parser.add_argument('--quantile', type=float, default=0.0,
                         help="TSR's time-relevance gate")
     parser.add_argument('--chunk', type=int, default=64)
@@ -195,7 +197,7 @@ def main(argv=None) -> int:
 
     model = build_classifier(dataset_config, experiment_config, grid, data_dir)
     weights = os.path.join(args.model_dir, args.experiment_name, args.fold,
-                           'pretrained', 'finetuned_readmission.pt')
+                           'pretrained', 'finetuned_competing_risks.pt')
     model.load_state_dict(torch.load(weights, map_location='cpu', weights_only=False))
     model = model.to(device).eval()
 

@@ -21,6 +21,13 @@ scikit-learn>=1.3.0
 tensorboard>=2.13.0
 dlordinal>=2.4.0
 
+# The sibling IBDdataprep checkout, for superfeature.py: TransEHR2 masks a
+# field out of a stored TEXT_SUPERFEATURE and re-embeds it, and the masked
+# string must be written in exactly the dialect extraction wrote. Resolved
+# against the working directory, so install from this repository's root,
+# with IBDdataprep beside it as the project layout has it.
+-e ../IBDdataprep
+
 # Configuration and utilities
 dotenv>=0.9.9
 pyyaml>=6.0

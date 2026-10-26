@@ -402,6 +402,54 @@ def cif_logit_target(
     return target
 
 
+def interpolated_cif_logit_target(
+    cause: int, horizon_days: float, grid: 'TimeGrid'
+) -> Callable[[Tensor], Tensor]:
+    """`cif_logit_target` at any horizon, read off the Hyman curve.
+
+    The clinical horizons (30 days, a year) fall between the grid's cuts,
+    so the incidence there is the interpolated one -- the same curve
+    `interpolate_cif` draws for every reported metric -- and that is the
+    quantity explained, not the incidence at the nearest cut.
+
+    The log-odds for the reason `cif_logit_target` gives. It cannot use
+    that function's log-sum-exp form, because the spline is a weighted
+    combination of the cut incidences rather than a partition of the
+    simplex, so ``F`` is formed and the logit taken from it, in float64.
+    ``F`` is strictly inside (0, 1) whenever the head's softmax is: the
+    curve interpolates monotonely between ``F(0) = 0`` and cut values
+    that are sums of positive mass, and ``1 - F`` is at least the
+    survival leftover plus the other causes' mass. What that costs is
+    precision at extreme saturation, where float64 still resolves a
+    leftover of 1e-300 and float32 would not; the gradient stays nonzero
+    there instead of being clamped to zero.
+
+    Args:
+        cause (int): Position of the cause in ``grid.cause_names``.
+        horizon_days (float): Where to read the curve, inside the grid.
+        grid (TimeGrid): The grid the head was trained on.
+
+    Returns:
+        A callable mapping the head's ``(batch, n_causes * n_bins)``
+        logits to the summed log-odds over the batch, as
+        `cif_logit_target`'s does.
+    """
+    if not 0 <= cause < grid.n_causes:
+        raise ValueError(f'cause {cause} outside [0, {grid.n_causes})')
+    if not 0 < horizon_days <= grid.edges_days[-1]:
+        raise ValueError(f'horizon {horizon_days} d outside (0, '
+                         f'{grid.edges_days[-1]}]')
+    times = np.array([float(horizon_days)])
+
+    def target(logits: Tensor) -> Tensor:
+        pmf, _ = deephit_distribution(logits.double(), grid.n_causes,
+                                      grid.n_bins)
+        cif = interpolate_cif(cif_from_pmf(pmf)[:, cause], grid, times)
+        return (torch.log(cif) - torch.log1p(-cif)).sum()
+
+    return target
+
+
 # --------------------------------------------------------------- metrics
 
 def cause_specific_concordance(

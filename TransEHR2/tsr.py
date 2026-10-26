@@ -113,7 +113,7 @@ def _repeat(tensor: Tensor, copies: int) -> Tensor:
     return tensor.repeat(copies, *([1] * (tensor.dim() - 1)))
 
 
-def _leaf_values(batch, copies: int = 1) -> Tuple[Dict, Dict[str, List[Tensor]]]:
+def _with_input_gradients(batch, copies: int = 1) -> Tuple[Dict, Dict[str, List[Tensor]]]:
     """A shallow copy of ``batch`` whose consumed value tensors are fresh leaves.
 
     The gradients TSR needs are with respect to what the model *consumes*: the per-feature value
@@ -135,9 +135,13 @@ def _leaf_values(batch, copies: int = 1) -> Tuple[Dict, Dict[str, List[Tensor]]]
     val_data = dict(batch['val_data'])
     leaves = {}
 
-    for key in ('times', 'masks'):
-        if key in val_data:
-            val_data[key] = _repeat(val_data[key], copies)
+    if 'times' in val_data:
+        val_data['times'] = _repeat(val_data['times'], copies)
+    if 'masks' in val_data:
+        # Cloned as well as tiled, because deleting a timestep writes here: `_repeat` hands back
+        # the caller's own tensor at one copy, and a write through it would mask the timestep in
+        # the batch every later pass reads.
+        val_data['masks'] = _repeat(val_data['masks'], copies).clone()
 
     for family in FAMILIES:
         if family not in val_data:
@@ -170,12 +174,32 @@ def _leaf_values(batch, copies: int = 1) -> Tuple[Dict, Dict[str, List[Tensor]]]
     return masked, leaves
 
 
+def _units(perturbation) -> List[Tuple]:
+    """One replica's perturbation as a list of units: None is none, a bare unit is one."""
+    if perturbation is None:
+        return []
+    if isinstance(perturbation, tuple) and isinstance(perturbation[0], int):
+        return [perturbation]
+    return list(perturbation)
+
+
 def _zero_many(batch, leaves, index, perturbations, n_items: int) -> None:
-    """Delete each replica's timestep or cell, with one scatter per tensor.
+    """Delete each replica's units, with one scatter per tensor where it can.
 
     In place on the leaves, which are clones, and before the graph exists. The indicator goes
     with the value: a feature whose value is zero but whose indicator still says "observed" is
     not a deleted feature, it is an observed zero, and the model reads the two differently.
+
+    **A deleted timestep is masked**, not just emptied: a timestep with every cell zeroed but
+    its mask still set is a record of nothing, which no extraction ever writes. The same goes
+    for a timestep that the cell and drug deletions in one replica leave empty, which is checked
+    after all of them are written rather than assumed from the unit list.
+
+    **A drug is deleted by its ATC code.** The model consumes the dose-weighted pool of a
+    timestep's slots, divided by the *count* of filled slots, so clearing the mask of every slot
+    holding the code and re-pooling is the record with that drug never dispensed -- the other
+    drugs then share the pool as they would in a real record. Zeroing the code's vector instead
+    would leave it counted in the divisor.
 
     Written against the whole chunk rather than one replica at a time because the writes, not
     the arithmetic, were the cost. A replica deleting a whole timestep touches every feature's
@@ -191,6 +215,7 @@ def _zero_many(batch, leaves, index, perturbations, n_items: int) -> None:
     val_data = batch['val_data']
     device = next(iter(leaves.values()))[0].device
     offsets = torch.arange(n_items, device=device)
+    masks = val_data.get('masks')
 
     def rows_and_steps(entries):
         """The (row, timestep) pairs a group of replicas writes to, flattened."""
@@ -199,26 +224,74 @@ def _zero_many(batch, leaves, index, perturbations, n_items: int) -> None:
         rows = (replicas.unsqueeze(1) * n_items + offsets).reshape(-1)
         return rows, steps.repeat_interleave(n_items)
 
-    whole = [(replica, perturbation[0])
-             for replica, perturbation in enumerate(perturbations)
-             if perturbation is not None and perturbation[1] is None]
+    whole, by_feature, by_drug, embeds = [], {}, {}, []
+    for replica, perturbation in enumerate(perturbations):
+        for unit in _units(perturbation):
+            if unit[1] is None:
+                whole.append((replica, unit[0]))
+            elif len(unit) == 2:
+                by_feature.setdefault(unit[1], []).append((replica, unit[0]))
+            elif torch.is_tensor(unit[2]):
+                embeds.append((replica,) + tuple(unit))
+            else:
+                by_drug.setdefault(unit[1], []).append((replica, unit[0], int(unit[2])))
+
     if whole:
         rows, steps = rows_and_steps(whole)
         for family, tensors in leaves.items():
             for tensor in tensors:
                 tensor.data[rows, steps] = 0
             val_data[family]['indicators'][rows, steps] = 0
+        if masks is not None:
+            masks[rows, steps] = 0
 
-    by_feature: Dict[int, List[Tuple[int, int]]] = {}
-    for replica, perturbation in enumerate(perturbations):
-        if perturbation is not None and perturbation[1] is not None:
-            by_feature.setdefault(perturbation[1], []).append(
-                (replica, perturbation[0]))
+    touched_rows, touched_steps = [], []
     for feature, entries in by_feature.items():
         family, position = index[feature]
         rows, steps = rows_and_steps(entries)
         leaves[family][position].data[rows, steps] = 0
         val_data[family]['indicators'][rows, steps, position] = 0
+        touched_rows.append(rows)
+        touched_steps.append(steps)
+
+    for feature, entries in by_drug.items():
+        family, position = index[feature]
+        lookup = val_data['lookup']
+        rows, steps = rows_and_steps([(r, t) for r, t, _ in entries])
+        codes = torch.tensor([c for _, _, c in entries],
+                             device=device).repeat_interleave(n_items)
+        items = rows % n_items
+        held = lookup['slot_indices'][position][items, steps]
+        filled = lookup['masks'][position][items, steps]
+        kept = filled * (held != codes.unsqueeze(-1))
+        # An item that never held the code at this timestep is left alone rather than
+        # re-pooled, so it stays bit-identical to the unperturbed pass.
+        present = (kept != filled).any(dim=-1)
+        rows, steps, items, kept = rows[present], steps[present], items[present], kept[present]
+        if not rows.numel():
+            continue
+        weights = (lookup['doses'][position][items, steps] * kept).unsqueeze(-1)
+        pooled = ((lookup['slot_values'][position][items, steps] * weights).sum(dim=-2)
+                  / kept.sum(dim=-1).clamp(min=1).unsqueeze(-1))
+        leaves[family][position].data[rows, steps] = pooled
+        emptied = kept.sum(dim=-1) == 0
+        val_data[family]['indicators'][rows[emptied], steps[emptied], position] = 0
+        touched_rows.append(rows)
+        touched_steps.append(steps)
+
+    for replica, step, feature, vector in embeds:
+        family, position = index[feature]
+        rows = replica * n_items + offsets
+        leaves[family][position].data[rows, step] = vector.to(leaves[family][position].dtype)
+
+    if masks is not None and touched_rows:
+        rows, steps = torch.cat(touched_rows), torch.cat(touched_steps)
+        alive = torch.zeros(rows.shape, dtype=torch.bool, device=device)
+        for family, tensors in leaves.items():
+            alive |= (val_data[family]['indicators'][rows, steps] != 0).any(dim=-1)
+            for tensor in tensors:
+                alive |= (tensor.data[rows, steps] != 0).flatten(1).any(dim=-1)
+        masks[rows[~alive], steps[~alive]] = 0
 
 
 def saliency_many(model, batch, perturbations: Sequence[Optional[Tuple[int, Optional[int]]]],
@@ -236,8 +309,12 @@ def saliency_many(model, batch, perturbations: Sequence[Optional[Tuple[int, Opti
     Args:
         model: Any module taking the batch and returning a tensor.
         batch: A collated `MixedTensorDataset`.
-        perturbations: One entry per replica. ``None`` leaves that replica unperturbed,
-            ``(timestep, None)`` deletes the whole timestep, ``(timestep, feature)`` one cell.
+        perturbations: One entry per replica: ``None`` leaves that replica unperturbed, and
+            otherwise a unit or a list of units, all deleted together. A unit is
+            ``(timestep, None)``, the whole timestep; ``(timestep, feature)``, one cell;
+            ``(timestep, feature, code)``, the drug with table row ``code`` in a multi-slot
+            lookup cell; or ``(timestep, feature, vector)``, a lookup cell's value replaced by
+            ``vector`` -- a re-embedded text, which is how a text field is deleted.
         target (callable, optional): Maps the model's output to the scalar to differentiate.
             Defaults to summing it.
         index (sequence, optional): `feature_index(batch)`, required when any perturbation names
@@ -260,14 +337,14 @@ def saliency_many(model, batch, perturbations: Sequence[Optional[Tuple[int, Opti
     # padding need not have; `feature_index` already takes the same tensor as given.
     n_items = next(val_data[family]['indicators'].shape[0]
                    for family in FAMILIES if family in val_data)
-    masked, leaves = _leaf_values(batch, copies=copies)
+    masked, leaves = _with_input_gradients(batch, copies=copies)
+    _zero_many(masked, leaves, index, perturbations, n_items)
 
+    # After the deletions, so a re-pooled drug or a substituted text sits on the path too.
     if alpha != 1.0:
         for tensors in leaves.values():
             for tensor in tensors:
                 tensor.data.mul_(alpha)
-
-    _zero_many(masked, leaves, index, perturbations, n_items)
 
     output = model(masked)
     scalar = output.sum() if target is None else target(output)
@@ -370,7 +447,7 @@ def _deltas(model, batch, perturbations, baseline, target, index, chunk,
 def _occupied(batch) -> Tensor:
     """(batch, max_ts_len, n_features) bool: cells whose deletion could change anything.
 
-    `_zero` sets a cell's value row and its indicator to zero. A cell where both are already
+    `_zero_many` sets a cell's value row and its indicator to zero. A cell where both are already
     zero is therefore bit-identical before and after, so the model returns the same output, the
     same gradients, and ``|R(X) - R(X~)| == 0`` exactly. Those are not passes worth approximating
     away -- they are arithmetic that does not need the model run to do it, and at EHR density
@@ -380,6 +457,9 @@ def _occupied(batch) -> Tensor:
     unobserved numerics with zeros (`preprocessing.ProcessedEpisode._process_numeric` allocates
     zeros and writes `nan_to_num`), but a cell carrying a stray value under a cleared indicator
     would make the skip wrong, and checking costs one reduction per feature.
+
+    Padding is excluded by the mask as well. Gating keeps a padded cell at zero, but a
+    timestep the mask says is not there is not one whose cells can be deleted.
 
     The column order is `feature_index`'s, which is the same iteration.
     """
@@ -396,7 +476,85 @@ def _occupied(batch) -> Tensor:
         for position, tensor in enumerate(tensors):
             columns.append((entry['indicators'][..., position] != 0)
                            | (tensor != 0).any(dim=-1))
-    return torch.stack(columns, dim=-1)
+    occupied = torch.stack(columns, dim=-1)
+    if 'masks' in val_data:
+        occupied &= (val_data['masks'] != 0).unsqueeze(-1)
+    return occupied
+
+
+@torch.no_grad()
+def outputs_many(model, batch, perturbations: Sequence, index: Optional[Sequence] = None,
+                 chunk: int = 64) -> Tensor:
+    """The model's output under each perturbation, forward only.
+
+    The deletion and insertion experiments need f(X') and no gradient. This runs exactly the
+    perturbation `saliency_many` differentiates through -- the same leaves, the same deletion
+    routine, the same masking of emptied timesteps -- so what TSR measured and what the
+    experiments delete cannot drift apart. An insertion is the deletion of everything not
+    restored.
+
+    Args:
+        perturbations: One entry per replica, as `saliency_many` takes them.
+        index (sequence, optional): `feature_index(batch)`; built when omitted.
+        chunk (int): Replicas per model call.
+
+    Returns:
+        Tensor: (len(perturbations), batch, *output shape).
+    """
+    index = feature_index(batch) if index is None else index
+    val_data = batch['val_data']
+    n_items = next(val_data[family]['indicators'].shape[0]
+                   for family in FAMILIES if family in val_data)
+    out = []
+    for start in range(0, len(perturbations), chunk):
+        part = list(perturbations[start:start + chunk])
+        masked, leaves = _with_input_gradients(batch, copies=len(part))
+        _zero_many(masked, leaves, index, part, n_items)
+        output = model(masked)
+        out.append(output.reshape(len(part), n_items, *output.shape[1:]))
+    return torch.cat(out, dim=0)
+
+
+def crop_to_length(batch) -> Tuple[Dict, int]:
+    """Drop the leading columns no episode in the batch occupies.
+
+    Extraction left-pads every episode to one width, so an episode explained alone carries
+    columns of padding in front of its first record. They cost a pass each in the time loop
+    and contribute nothing: a masked timestep is not read. Cropping before TSR removes them.
+
+    Every (batch, max_ts_len, ...) tensor under ``val_data`` and ``event_data`` is sliced,
+    densified first so the lookup family has its dense tensors to slice. The memoized pool is
+    dropped and rebuilt from the sliced slots on the next read.
+
+    Returns:
+        (dict, int): the cropped batch, and the number of columns dropped -- add it to a
+        cropped timestep to get the column it had on the extracted axis.
+    """
+    densify_lookup_slots(batch)
+    densify_one_hot(batch)
+    masks = batch['val_data']['masks']
+    n_items, width = masks.shape
+    used = (masks != 0).any(dim=0).nonzero()
+    # One column is kept even for a batch with nothing in it, so no tensor has a zero-length
+    # time axis, which the model's guards do not cover.
+    start = int(used[0]) if used.numel() else width - 1
+
+    def crop(obj):
+        if torch.is_tensor(obj):
+            if obj.dim() >= 2 and obj.shape[0] == n_items and obj.shape[1] == width:
+                return obj[:, start:]
+            return obj
+        if isinstance(obj, dict):
+            return {k: crop(v) for k, v in obj.items() if k != 'embedded_values'}
+        if isinstance(obj, list):
+            return [crop(v) for v in obj]
+        return obj
+
+    cropped = dict(batch)
+    for key in ('val_data', 'event_data'):
+        if key in batch:
+            cropped[key] = crop(batch[key])
+    return cropped, start
 
 
 def _maxscale(values: Tensor) -> Tensor:
@@ -463,9 +621,9 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
         ig_steps (int, optional): Replace grad x input as TSR's R(.) with integrated gradients
             over this many path points. 0, the default, keeps grad x input. Every pass is
             multiplied by this, and nothing else about the method changes -- TSR rescales
-            whatever R(.) returns. Note that the quantity reaching the token pass is then no
-            longer a gradient, so `attribution.token_attributions` would have to integrate too
-            for stage 2 to stay consistent with stage 1.
+            whatever R(.) returns. ``lookup_grads`` are then the path-averaged gradients
+            ``mean_alpha grad(alpha * x)`` (see `_relevance`), which is the upstream gradient
+            `attribution.token_attributions` wants for stage 2 to integrate alongside stage 1.
 
     Returns:
         dict: ``scores`` (batch, max_ts_len, n_features) rescaled saliency, ``baseline`` the
@@ -478,7 +636,15 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
         ``occupied`` (batch, max_ts_len, n_features) bool, the cells a pass was worth taking
         for, and ``passes``, the number of perturbations evaluated. ``passes`` counts work, not
         model calls -- ``calls`` is those -- and it is below ``1 + T + T*N`` by however many
-        cells were empty.
+        cells were empty or alone in their timestep.
+        ``drugs`` holds one entry per (item, timestep, drug column, ATC row) held, as equal-
+        length tensors: ``item``, ``step``, ``column``, ``code``, ``share`` of the cell, ``score``
+        (the cell's TSR score times that share) and ``baseline``, the code's part of the cell's
+        R(X). See `_drug_units`.
+
+    A timestep holding a single occupied cell takes no cell pass. Its share is 1 whatever the
+    delta, and deleting its only cell is deleting the timestep -- both mask it -- so the raw
+    delta is ``delta_time`` exactly, and is recorded as that.
     """
     index = feature_index(batch)
     alphas = midpoint_alphas(ig_steps) if ig_steps else [1.0]
@@ -503,6 +669,7 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
         gate = time_contribution > threshold
 
     occupied = _occupied(batch)
+    single = occupied.sum(dim=-1) == 1
     feature_contribution = torch.where(
         occupied, torch.full_like(baseline, gated_value),
         torch.zeros_like(baseline))
@@ -510,8 +677,9 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
     # reference nests are independent of each other given the gate, so they flatten into one
     # chunked run. An empty cell is left at exactly zero rather than the floor -- that is a
     # measurement, not a stand-in for one, because deleting what is not there moves nothing.
+    # A cell alone in its timestep is left out too; it is filled from `delta_time` below.
     cells = [(int(t), int(c)) for t, c in
-             (occupied & gate.unsqueeze(-1)).any(dim=0).nonzero().tolist()]
+             (occupied & (gate & ~single).unsqueeze(-1)).any(dim=0).nonzero().tolist()]
     if cells:
         delta_feature = _deltas(model, batch, cells, baseline, target, index, chunk,
                                 alphas).t()
@@ -526,6 +694,11 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
             gate[:, steps], delta_feature,
             torch.full_like(delta_feature, gated_value))
 
+    alone = occupied & (gate & single).unsqueeze(-1)
+    feature_contribution = torch.where(
+        alone, delta_time.unsqueeze(-1).expand_as(feature_contribution),
+        feature_contribution)
+
     feature_contribution = _share(feature_contribution)
     if gated_value:
         # After the share, not before. A constant held across a gated timestep's cells shares
@@ -537,8 +710,83 @@ def tsr_scores(model, batch, target: Optional[Callable] = None,
             gate.unsqueeze(-1), feature_contribution,
             feature_contribution * gated_value)
     scores = time_contribution.unsqueeze(-1) * feature_contribution
+    drugs, drug_passes, drug_calls = _drug_units(
+        model, batch, scores, baseline, lookup_grads, occupied & gate.unsqueeze(-1),
+        target, index, chunk, alphas)
+    passes += drug_passes
+    calls += drug_calls
     return {'scores': scores, 'baseline': baseline, 'delta_time': delta_time,
             'time_contribution': time_contribution,
             'feature_contribution': feature_contribution, 'gate': gate,
-            'occupied': occupied, 'calls': calls,
+            'occupied': occupied, 'calls': calls, 'drugs': drugs,
             'lookup_grads': lookup_grads, 'index': index, 'passes': passes}
+
+
+def _drug_units(model, batch, scores, baseline, lookup_grads, admitted, target, index,
+                chunk, alphas) -> Tuple[Dict[str, Tensor], int, int]:
+    """Split each drug cell's TSR score among the ATC codes it holds.
+
+    The cell is the pool of a timestep's dispensations, so its score says the drugs mattered
+    and not which. This is TSR's own step one level down: delete each code (see `_zero_many`),
+    measure ``sum |R(X) - R(X~)|``, and give each code its share of the cell. A cell holding one
+    code gives it the whole score without a pass, for the reason a lone cell does in
+    `tsr_scores`. Shares sum to 1 over a cell, so code scores sum to the cell's score and sit on
+    the same scale as every other unit.
+
+    ``baseline`` is the code's part of the cell's R(X), exact rather than apportioned: the pool
+    is linear in each slot, so ``R = g . pool = sum_code g . (sum of its weighted slots) / n``
+    with ``g`` the path-averaged gradient at the pool. Its sign is the code's direction, against
+    the zero baseline the IG path starts from.
+
+    Codes come from ``slot_indices``, which `MixedDataset` carries. A batch without them -- one
+    built by hand -- has no drug units, and this returns empty tensors.
+    """
+    device = scores.device
+    names = ('item', 'step', 'column', 'code')
+    rows = {name: [] for name in names}
+    rows.update(share=[], score=[], baseline=[])
+    lookup = batch['val_data'].get('lookup', {})
+    columns = [(c, position) for c, (family, position) in enumerate(index)
+               if family == 'lookup' and 'slot_indices' in lookup
+               and lookup['doses'][position] is not None]
+
+    units, needs_pass = [], set()
+    for column, position in columns:
+        codes = lookup['slot_indices'][position]
+        filled = lookup['masks'][position] != 0
+        for item, step in admitted[:, :, column].nonzero().tolist():
+            held = torch.unique(codes[item, step][filled[item, step]]).tolist()
+            units.append((item, step, column, position, held))
+            if len(held) > 1:
+                needs_pass.update((step, column, code) for code in held)
+
+    perturbations = sorted(needs_pass)
+    deltas = (_deltas(model, batch, perturbations, baseline, target, index, chunk, alphas)
+              if perturbations else None)
+    where = {p: i for i, p in enumerate(perturbations)}
+
+    for item, step, column, position, held in units:
+        if len(held) > 1:
+            raw = torch.stack([deltas[where[(step, column, code)], item] for code in held])
+            share = _share(raw.unsqueeze(0))[0]
+        else:
+            share = torch.ones(len(held), device=device)
+        slots = lookup['slot_values'][position][item, step]
+        weights = lookup['doses'][position][item, step] * lookup['masks'][position][item, step]
+        n_filled = lookup['masks'][position][item, step].sum().clamp(min=1)
+        gradient = lookup_grads[position][item, step]
+        for k, code in enumerate(held):
+            mine = (lookup['slot_indices'][position][item, step] == code).float() * weights
+            part = (slots * mine.unsqueeze(-1)).sum(dim=0) / n_filled
+            for name, value in zip(names, (item, step, column, code)):
+                rows[name].append(value)
+            rows['share'].append(share[k])
+            rows['score'].append(scores[item, step, column] * share[k])
+            rows['baseline'].append((gradient * part).sum())
+
+    out = {name: torch.tensor(rows[name], dtype=torch.long, device=device) for name in names}
+    for name in ('share', 'score', 'baseline'):
+        out[name] = (torch.stack(rows[name]) if rows[name]
+                     else torch.zeros(0, device=device))
+    n = len(alphas)
+    return out, n * len(perturbations), n * math.ceil(len(perturbations) / chunk)

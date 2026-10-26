@@ -37,6 +37,11 @@ pip install -r requirements.txt
 deactivate
 ```
 
+Run it from this repository's root with the IBDdataprep checkout beside it
+(`../IBDdataprep`): `requirements.txt` installs that package in editable
+mode, because text attribution writes masked text superfeatures with its
+`superfeature` module.
+
 `requirements.txt` does not install NVIDIA's `transformer-engine`. If you
 want fp8 precision, build and install it before the other requirements.
 

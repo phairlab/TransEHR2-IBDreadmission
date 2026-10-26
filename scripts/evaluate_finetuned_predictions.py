@@ -52,11 +52,12 @@ from TransEHR2.survival import (
     DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES, DEFAULT_CR_DCAL_ALPHA,
     DEFAULT_CR_DCAL_CHI2_BINS, DEFAULT_CR_DCAL_N_RHO,
     DEFAULT_CR_DCAL_TEST_LEVEL, DEFAULT_CUTS_DAYS,
-    DEFAULT_EVAL_HORIZONS_DAYS, RECAL_FLOOR, TimeGrid, aalen_johansen,
-    brier_times, cause_specific_brier, cause_specific_concordance,
-    cr_d_calibration, cr_d_calibration_from_values, cr_dcal_chi2_from_values,
-    cr_dcal_chi2, event_times_days, format_days, integrated_brier,
-    integrated_brier_to, interpolate_cif, lee_weighted_concordance,
+    DEFAULT_EVAL_HORIZONS_DAYS, RECAL_FLOOR, TimeGrid, _cr_dcal_values,
+    aalen_johansen, brier_times, cause_specific_brier,
+    cause_specific_concordance, cr_d_calibration_from_values,
+    cr_dcal_chi2_from_values, event_times_days, format_days,
+    integrated_brier, integrated_brier_to, interpolate_cif,
+    lee_weighted_concordance,
     metric_label
 )
 
@@ -213,6 +214,61 @@ def csc_reads(curve: CSCCurve, days: np.ndarray, grid: TimeGrid,
     return {'times': times, 'shared': shared, 'rows': rows}
 
 
+def dcal_values(data: Dict, grid: TimeGrid, k: int, days: np.ndarray,
+                csc: Optional[Dict] = None
+                ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(F_k(t_i), F_k(tau), S(t_i))``, the three values CR D-cal reads.
+
+    From the grid curve through Hyman, or, with ``csc`` (:func:`csc_reads`),
+    from the CSC's exact curve: S(C) = 1 - sum_k F_k(C), floored as a
+    recalibrated survival is, since it divides and a repaired curve can sum
+    to one.
+    """
+    if csc is None:
+        return _cr_dcal_values(data['cif'], data['pmf'], data['p_survive'],
+                               days, k, grid)
+    at = np.searchsorted(csc['times'], grid.horizon_days)
+    assert csc['times'][at] == grid.horizon_days
+    return (csc['rows'][:, k], csc['shared'][:, k, at],
+            np.maximum(1.0 - csc['rows'].sum(axis=1), RECAL_FLOOR))
+
+
+def load_csc_curve(experiment_dir: str, fold_name: str, split: str,
+                   idx: np.ndarray, grid: TimeGrid) -> Optional[CSCCurve]:
+    """The fold's CSC curve for the dump rows ``idx``, or None.
+
+    None when no CSC parameters sit beside the dumps, so the model is read
+    on its grid. ``test_recal_aj`` reads the test linear predictors shifted
+    by the fold's dense offsets.
+    """
+    def path(template, part=None):
+        return os.path.join(experiment_dir, fold_name, TASK,
+                            template.format(task=TASK, split=part))
+
+    baseline = read_csc_baseline(path(BASELINE_FILE), grid)
+    if baseline is None:
+        return None
+    recal = split == 'test_recal_aj'
+    lp_path = path(LP_FILE, 'test' if recal else split)
+    lp = read_csc_lp(lp_path, grid)
+    if lp is None:
+        raise FileNotFoundError(f'{fold_name} has a CSC baseline hazard '
+                                f'but no {lp_path}')
+    at = pd.Index(lp['idx']).get_indexer(idx)
+    if np.any(at < 0):
+        raise ValueError(f'{lp_path} lacks {int(np.sum(at < 0))} '
+                         f'episodes of the {split} dump')
+    offsets = None
+    if recal:
+        offsets_path = path(OFFSETS_FILE)
+        offsets = read_csc_offsets(offsets_path, grid)
+        if offsets is None:
+            raise FileNotFoundError(
+                f'{fold_name} has a recalibrated CSC dump but no '
+                f'{offsets_path}; rerun recalibrate_predictions.py')
+    return CSCCurve(lp['lp'][at], baseline, offsets=offsets)
+
+
 def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
           censoring: Optional[Tuple[np.ndarray, np.ndarray]],
           csc: Optional[Dict] = None) -> Dict[str, float]:
@@ -301,24 +357,11 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
             out[f'{key}_IPA_to_{label}'] = (1.0 - ibs / null if null > 0
                                             else float('nan'))
 
-        if csc is None:
-            prediction = (data['cif'], data['pmf'], data['p_survive'], days,
-                          ci, ev, k, grid)
-            out[f'{key}_CR_DCal'] = cr_d_calibration(
-                *prediction, alpha=dcal['alpha'], n_rho=dcal['n_rho'])
-            statistic, p_value = cr_dcal_chi2(*prediction,
-                                              n_bins=dcal['chi2_bins'])
-        else:
-            # S(C) = 1 - sum_k F_k(C), floored as a recalibrated survival
-            # is: it divides, and a repaired curve can sum to one.
-            values = (csc['rows'][:, k],
-                      exact_at(np.array([grid.horizon_days]))[:, k, 0],
-                      np.maximum(1.0 - csc['rows'].sum(axis=1), RECAL_FLOOR),
-                      ci, ev, k)
-            out[f'{key}_CR_DCal'] = cr_d_calibration_from_values(
-                *values, alpha=dcal['alpha'], n_rho=dcal['n_rho'])
-            statistic, p_value = cr_dcal_chi2_from_values(
-                *values, n_bins=dcal['chi2_bins'])
+        values = (*dcal_values(data, grid, k, days, csc), ci, ev, k)
+        out[f'{key}_CR_DCal'] = cr_d_calibration_from_values(
+            *values, alpha=dcal['alpha'], n_rho=dcal['n_rho'])
+        statistic, p_value = cr_dcal_chi2_from_values(
+            *values, n_bins=dcal['chi2_bins'])
         out[f'{key}_CR_DCal_Chi2'] = statistic
         out[f'{key}_CR_DCal_Chi2_P'] = p_value
 
@@ -385,35 +428,8 @@ def main():
         return read_predictions(
             f'{stem(fold_name, split)}_finetuned_output.csv', grid)
 
-    def csc_path(fold_name, template, split=None):
-        return os.path.join(experiment_dir, fold_name, TASK,
-                            template.format(task=TASK, split=split))
-
     def csc_curve(fold_name, split, idx):
-        """The fold's CSC curve for the dump rows ``idx``, or None."""
-        baseline = read_csc_baseline(csc_path(fold_name, BASELINE_FILE),
-                                     grid)
-        if baseline is None:
-            return None
-        recal = split == 'test_recal_aj'
-        lp_path = csc_path(fold_name, LP_FILE, 'test' if recal else split)
-        lp = read_csc_lp(lp_path, grid)
-        if lp is None:
-            raise FileNotFoundError(f'{fold_name} has a CSC baseline hazard '
-                                    f'but no {lp_path}')
-        at = pd.Index(lp['idx']).get_indexer(idx)
-        if np.any(at < 0):
-            raise ValueError(f'{lp_path} lacks {int(np.sum(at < 0))} '
-                             f'episodes of the {split} dump')
-        offsets = None
-        if recal:
-            offsets_path = csc_path(fold_name, OFFSETS_FILE)
-            offsets = read_csc_offsets(offsets_path, grid)
-            if offsets is None:
-                raise FileNotFoundError(
-                    f'{fold_name} has a recalibrated CSC dump but no '
-                    f'{offsets_path}; rerun recalibrate_predictions.py')
-        return CSCCurve(lp['lp'][at], baseline, offsets=offsets)
+        return load_csc_curve(experiment_dir, fold_name, split, idx, grid)
 
     censoring = {}
 

@@ -54,6 +54,13 @@ COMPARISONS:
   - [TransEHR2_noRank recal, TransEHR2_noRank raw]
   - [TabDeepHit_noRank recal, TabDeepHit_noRank raw]
   - [TransEHR2_CSC recal, TransEHR2_CSC raw]
+  # Each Cox head against the no-ranking-loss DeepHit on the same features
+  # (user, 2026-10-27), for the IBS figure. Drawn without significance: the
+  # model set, and so the BH family, may still shrink.
+  - [TransEHR2_CSC raw, TransEHR2_noRank raw]
+  - [TabDeepHit_noRank raw, CSC raw]
+  - [TransEHR2_CSC recal, TransEHR2_noRank recal]
+  - [TabDeepHit_noRank recal, CSC recal]
 
 # Metric keys in the evaluation YAMLs. {cause} is the metric label of each
 # modelled cause, {tau} each horizon as the evaluation spells it.

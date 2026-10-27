@@ -140,6 +140,10 @@ def test_the_shipped_config_names_the_planned_design(config):
     expected += [[f'{m} recal', f'{m} raw']
                  for m in ('TransEHR2_noRank', 'TabDeepHit_noRank',
                            'TransEHR2_CSC')]
+    # Each Cox head against the no-rank DeepHit (user, 2026-10-27).
+    expected += [[f'{a} {v}', f'{b} {v}'] for v in ('raw', 'recal')
+                 for a, b in [('TransEHR2_CSC', 'TransEHR2_noRank'),
+                              ('TabDeepHit_noRank', 'CSC')]]
     assert config['COMPARISONS'] == expected
 
 
@@ -159,15 +163,15 @@ def test_p_values_and_bh_match_the_definitions(tmp_path, monkeypatch,
                 b = read_evaluation(model_dir, *arm_b.split(' '))[metric]
                 expected.append(expected_p(a, b))
         rows = table[table['metric'].isin(tested)]
-        # 11 tested metrics x 20 comparisons in one family.
-        assert len(rows) == len(expected) == 220
+        # 11 tested metrics x 24 comparisons in one family.
+        assert len(rows) == len(expected) == 264
         assert rows['p'].to_numpy() == pytest.approx(expected, rel=1e-9)
         assert rows['p_bh'].to_numpy() == pytest.approx(
             step_up(expected), rel=1e-9)
         assert (rows['df'] == 4).all()
 
         untested = table[table['metric'].isin(reported)]
-        assert len(untested) == 5 * 20
+        assert len(untested) == 5 * 24
         assert untested[['t', 'p', 'p_bh']].isna().all().all()
 
 

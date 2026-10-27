@@ -231,6 +231,26 @@ class CSCCurve:
                 self.n * self.hazard.shape[0] * self.offsets[0].size)
         return shared, rows_out
 
+    def half_incidence_times(self, horizon: float) -> np.ndarray:
+        """(n, n_causes) each estimated time, as ``half_incidence_time``.
+
+        The first time ``F_k`` reaches half of ``F_k(horizon)``: on a step
+        curve, the knot where it steps to or past that level. NaN where
+        ``F_k(horizon) = 0``.
+        """
+        out = np.empty((self.n, self.hazard.shape[0]))
+        for lo in range(0, self.n, self.chunk):
+            rows = slice(lo, min(lo + self.chunk, self.n))
+            knots, values, _ = self._knots(rows)
+            end = np.searchsorted(knots, horizon, side='right')
+            target = 0.5 * values[:, :, end:end + 1]
+            # values[..., 0] is the curve before the first knot, zero, so a
+            # positive target is first reached at index j >= 1: knot j - 1.
+            first = np.argmax(values[:, :, :end + 1] >= target, axis=2)
+            out[rows] = np.where(target[:, :, 0] > 0.0,
+                                 knots[np.maximum(first - 1, 0)], np.nan)
+        return out
+
     def mean_at(self, times: np.ndarray) -> np.ndarray:
         """(n_causes, p) the patients' mean ``F`` at ``times``."""
         times = np.asarray(times, dtype=np.float64)

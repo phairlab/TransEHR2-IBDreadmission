@@ -37,7 +37,10 @@ def metric_keys(cause):
     key = metric_label(cause)
     tested = ([f'{key}_Cindex_Lee_at_{t}' for t in TAUS]
               + [f'{key}_IBS_to_{t}' for t in TAUS] + [f'{key}_CR_DCal'])
-    return tested, [f'{key}_IPA_to_{t}' for t in TAUS]
+    reported = [f'{key}_IPA_to_{t}' for t in TAUS] + [
+        f'{key}_{side}estimation_{stat}' for side in ('Over', 'Under')
+        for stat in ('MAE', 'N')]
+    return tested, reported
 
 
 def header(split, override):
@@ -171,7 +174,7 @@ def test_p_values_and_bh_match_the_definitions(tmp_path, monkeypatch,
         assert (rows['df'] == 4).all()
 
         untested = table[table['metric'].isin(reported)]
-        assert len(untested) == 5 * 24
+        assert len(untested) == 9 * 24
         assert untested[['t', 'p', 'p_bh']].isna().all().all()
 
 

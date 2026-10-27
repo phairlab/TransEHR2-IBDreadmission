@@ -29,12 +29,14 @@ from TransEHR2.survival import (
     cif_from_pmf,
     cif_logit_target,
     event_times_days,
+    half_incidence_time,
     integrated_brier,
     interpolate_cif,
     interpolate_tail,
     pmf_from_logits,
     survival_from_pmf,
     survival_metrics,
+    time_errors,
 )
 
 
@@ -804,3 +806,52 @@ def test_head_width_follows_the_cause_count():
         assert pmf.shape == (4, expected, grid.n_bins)
         assert torch.allclose(pmf.sum(dim=(1, 2)) + p_survive,
                               torch.ones(4), atol=1e-6)
+
+
+# ------------------------------------------------- the estimated time of event
+
+def test_the_estimated_time_is_where_the_curve_is_half_way():
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    rng = np.random.default_rng(0)
+    pmf, _ = deephit_distribution(
+        torch.as_tensor(rng.normal(size=(50, 2 * grid.n_bins))), 2,
+        grid.n_bins)
+    cif_k = cif_from_pmf(pmf).numpy()[:, 0, :]
+    estimated = half_incidence_time(cif_k, grid)
+    target = 0.5 * cif_k[:, -1]
+
+    assert np.all((estimated >= 0.0) & (estimated <= grid.horizon_days))
+    np.testing.assert_allclose(
+        interpolate_cif(cif_k, grid, estimated, per_row=True), target,
+        rtol=0, atol=1e-12)
+    assert np.all(interpolate_cif(cif_k, grid, estimated - 1e-6,
+                                  per_row=True) < target)
+
+
+def test_a_flat_stretch_at_half_way_gives_its_start():
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    estimated = half_incidence_time(np.array([[0.2, 0.2, 0.4]]), grid)
+    assert estimated[0] == pytest.approx(30.0, abs=1e-4)
+
+
+def test_a_cause_with_no_incidence_has_no_estimate():
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    estimated = half_incidence_time(np.array([[0.0, 0.0, 0.0],
+                                              [0.1, 0.2, 0.3]]), grid)
+    assert np.isnan(estimated[0]) and np.isfinite(estimated[1])
+
+
+def test_time_errors_by_hand():
+    estimated = np.array([10.0, 10.0, 10.0, 10.0, 10.0, 10.0, np.nan])
+    days = np.array([4.0, 15.0, 10.0, 3.0, 20.0, 7.0, 5.0])
+    cause_index = np.array([0, 0, 0, 0, 1, 0, 0])
+    is_event = np.array([True, True, True, False, True, True, True])
+
+    # 0 and 5 came before the estimate, by 6 and 3 days; 1 after, by 5; 2
+    # on it; 3 censored, 4 another cause, 6 without an estimate.
+    assert time_errors(estimated, days, cause_index, is_event, 0) == {
+        'Overestimation_MAE': 4.5, 'Overestimation_N': 2,
+        'Underestimation_MAE': 5.0, 'Underestimation_N': 1}
+    out = time_errors(estimated, days, cause_index, is_event, 1)
+    assert out['Overestimation_N'] == 0 and np.isnan(out['Overestimation_MAE'])
+    assert out['Underestimation_N'] == 1

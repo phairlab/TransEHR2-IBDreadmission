@@ -232,6 +232,28 @@ def test_every_recalibrated_read_comes_from_one_curve():
     assert np.all(np.diff(shared, axis=2) >= 0)
 
 
+def test_the_estimated_time_is_the_knot_reaching_half_way():
+    from evaluate_finetuned_predictions import outcomes
+
+    grid = TimeGrid(CUTS, CAUSES)
+    baseline, val, test = val_and_test(grid)
+    _, ci, ev, days = outcomes(val, grid)
+    offsets = csc_dense_offsets(CSCCurve(val['lp'], baseline), baseline[0],
+                                days, ci, ev, grid)
+    for curve in (CSCCurve(test['lp'], baseline, chunk=33),
+                  CSCCurve(test['lp'], baseline, offsets=offsets, chunk=33)):
+        estimated = curve.half_incidence_times(grid.horizon_days)
+        total, _ = curve.read(np.array([grid.horizon_days]))
+        target = 0.5 * total[:, :, 0]
+        assert np.all(estimated <= grid.horizon_days)
+        for k in range(len(CAUSES)):
+            _, at = curve.read(np.array([0.0]), estimated[:, k])
+            _, before = curve.read(np.array([0.0]),
+                                   np.nextafter(estimated[:, k], -np.inf))
+            assert np.all(at[:, k] >= target[:, k])
+            assert np.all(before[:, k] < target[:, k])
+
+
 def test_the_axis_holds_both_sides_of_a_val_event():
     grid = TimeGrid(CUTS, CAUSES)
     axis = recalibration_axis(np.array([10.0, 500.0]), np.array([20.0, 30.0]),

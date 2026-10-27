@@ -71,8 +71,14 @@ TESTED_METRICS:
 
 # Reported with means and differences but not tested: IPA is IBS over a null
 # every model shares on the test partition, so it carries the IBS comparison.
+# The time-of-event errors and their counts (user, 2026-10-27) are for the
+# figure; the model set, and so any family they joined, may still shrink.
 REPORTED_METRICS:
   - "{cause}_IPA_to_{tau}"
+  - "{cause}_Overestimation_MAE"
+  - "{cause}_Overestimation_N"
+  - "{cause}_Underestimation_MAE"
+  - "{cause}_Underestimation_N"
 
 # One BH family per cause table, covering every tested metric and comparison
 # in it. The only scope implemented.

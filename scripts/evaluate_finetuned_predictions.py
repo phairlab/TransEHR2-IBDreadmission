@@ -56,9 +56,8 @@ from TransEHR2.survival import (
     aalen_johansen, brier_times, cause_specific_brier,
     cause_specific_concordance, cr_d_calibration_from_values,
     cr_dcal_chi2_from_values, event_times_days, format_days,
-    integrated_brier, integrated_brier_to, interpolate_cif,
-    lee_weighted_concordance,
-    metric_label
+    half_incidence_time, integrated_brier, integrated_brier_to,
+    interpolate_cif, lee_weighted_concordance, metric_label, time_errors
 )
 
 
@@ -205,13 +204,15 @@ def csc_reads(curve: CSCCurve, days: np.ndarray, grid: TimeGrid,
 
     ``F`` at each point of every Brier axis and at the last cut, as
     ``times`` and ``shared`` (n, n_causes, p), and at each patient's own
-    ``days`` as ``rows`` (n, n_causes).
+    ``days`` as ``rows`` (n, n_causes); and each estimated time of event,
+    as ``half`` (n, n_causes).
     """
     times = np.unique(np.concatenate(
         [brier_times(grid), [grid.horizon_days]]
         + [brier_times(grid, tau) for tau in horizons]))
     shared, rows = curve.read(times, days)
-    return {'times': times, 'shared': shared, 'rows': rows}
+    return {'times': times, 'shared': shared, 'rows': rows,
+            'half': curve.half_incidence_times(grid.horizon_days)}
 
 
 def dcal_values(data: Dict, grid: TimeGrid, k: int, days: np.ndarray,
@@ -285,9 +286,16 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
     the same score of the split's own Aalen-Johansen curve, fitted and
     scored on these episodes; and IPA, one minus their ratio.
 
+    Per cause, the mean absolute error of the estimated time of event --
+    where ``F_k(t) / F_k(tau)`` reaches one half -- among the patients with
+    that cause, split by whether the estimate fell after their event
+    (overestimation) or before it (underestimation), each with its count
+    (:func:`time_errors`), in days.
+
     ``csc`` is :func:`csc_reads` of the CSC's exact curve. With it, those
-    four, the integrated Brier score and CR D-calibration read that curve;
-    without it, they read the grid curve through ``interpolate_cif``.
+    four, the integrated Brier score, CR D-calibration and the estimated
+    times read that curve; without it, they read the grid curve through
+    ``interpolate_cif``.
 
     ``dcal`` holds the CR_DCAL_* settings: ``alpha``, ``n_rho``,
     ``chi2_bins`` and ``test_level``. ``CR_DCal`` is the paper's sum over
@@ -364,6 +372,11 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
             *values, n_bins=dcal['chi2_bins'])
         out[f'{key}_CR_DCal_Chi2'] = statistic
         out[f'{key}_CR_DCal_Chi2_P'] = p_value
+
+        estimated = (half_incidence_time(cif[:, k, :], grid) if csc is None
+                     else csc['half'][:, k])
+        for name, value in time_errors(estimated, days, ci, ev, k).items():
+            out[f'{key}_{name}'] = value
 
     labels = [metric_label(c) for c in grid.cause_names]
     out['CR_DCal'] = float(sum(out[f'{key}_CR_DCal'] for key in labels))

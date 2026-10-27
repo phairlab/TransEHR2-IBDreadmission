@@ -1202,6 +1202,64 @@ def cr_dcal_chi2_from_values(
     return statistic, float(chi2.sf(statistic, df=n_bins))
 
 
+def half_incidence_time(cif_k: np.ndarray, grid: TimeGrid,
+                        n_halvings: int = 60) -> np.ndarray:
+    """Each patient's estimated time of cause ``k``, in days.
+
+    The first ``t`` at which ``F_k(t) / F_k(tau) = 1/2`` on the curve
+    :func:`interpolate_cif` draws, ``tau`` the last cut (user, 2026-10-27).
+    The curve is monotone and runs from 0 at discharge to ``F_k(tau)`` at
+    the horizon, so the half-way level is crossed exactly once, or along a
+    flat stretch whose start is the time returned. Found by bisection on
+    ``[0, tau]``: sixty halvings leave an interval far below a minute.
+
+    Args:
+        cif_k: (n, n_bins) cumulative incidence of one cause at the cuts.
+
+    Returns:
+        (n,) days in ``[0, tau]``; NaN where ``F_k(tau) = 0``.
+    """
+    cif_k = np.asarray(cif_k, dtype=np.float64)
+    target = 0.5 * cif_k[:, -1]
+    lo = np.zeros(cif_k.shape[0])
+    hi = np.full(cif_k.shape[0], grid.horizon_days)
+    for _ in range(n_halvings):
+        mid = 0.5 * (lo + hi)
+        reached = interpolate_cif(cif_k, grid, mid, per_row=True) >= target
+        hi = np.where(reached, mid, hi)
+        lo = np.where(reached, lo, mid)
+    return np.where(target > 0.0, hi, np.nan)
+
+
+def time_errors(estimated: np.ndarray, days: np.ndarray,
+                cause_index: np.ndarray, is_event: np.ndarray,
+                k: int) -> Dict[str, float]:
+    """Mean absolute error of the estimated time of cause ``k``, by sign.
+
+    Among the patients observed to have cause ``k``: overestimation over
+    those whose event came before the estimate, underestimation over those
+    whose event came after it (user, 2026-10-27). A patient whose event
+    falls exactly on the estimate is in neither. Censored patients and
+    those with another cause have no observed time of ``k`` and are not
+    counted. Each mean is NaN when its group is empty.
+
+    Args:
+        estimated: (n,) :func:`half_incidence_time`, days.
+        days: (n,) observed times, days, as :func:`event_times_days`.
+    """
+    failed_k = (np.asarray(is_event, dtype=bool)
+                & (np.asarray(cause_index) == k))
+    error = np.asarray(days, dtype=np.float64) - estimated
+    out = {}
+    for name, group in (('Overestimation', failed_k & (error < 0.0)),
+                        ('Underestimation', failed_k & (error > 0.0))):
+        n = int(group.sum())
+        out[f'{name}_MAE'] = (float(np.abs(error[group]).mean()) if n
+                              else float('nan'))
+        out[f'{name}_N'] = n
+    return out
+
+
 def aj_recalibration_offsets(
     cif: np.ndarray,
     times_days: np.ndarray,

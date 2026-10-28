@@ -1,0 +1,82 @@
+# Part 1 recut: part1_csc.yaml on another time grid (user, 2026-10-28).
+#
+# part1_csc.yaml with these changes, and nothing else:
+#   - EXPERIMENT_NAME is part1_recut_csc;
+#   - TIME_GRID_CUTS_DAYS is [8, 31, 181, 366, 913, 1826, 6454.83]. The
+#     horizon, the last cut, is unchanged.
+# Every hyperparameter is part1_csc's, not retuned for this grid
+# (user, 2026-10-28).
+#
+# The copied body below keeps part1_csc.yaml's own header comment.
+
+# Part 1 baseline: cause-specific Cox on the baseline features.
+#
+# Read by scripts/fit_baseline_csc.R, which fits one Cox model per modelled
+# cause on each fold's train partition and exports the linear predictors and
+# baseline cumulative hazards, and by the Python scripts downstream of it
+# (dump_baseline_csc_predictions.py, recalibrate_predictions.py,
+# evaluate_finetuned_predictions.py), which read the grid, the causes, the
+# horizons and the D-calibration settings from here.
+#
+# The CSC draws no random numbers, so there is no seed: a refit on the same
+# fold reproduces the same parameters.
+
+EXPERIMENT_NAME: "part1_recut_csc"
+
+# Under the dataset config's DATA_DIR, beside labels.csv and fold{i}/. Written
+# by IBDdataprep's lace.py, one row per drawn episode, keyed by its
+# labels.csv row as idx; a missing value is an empty cell.
+BASELINE_FEATURES_FILE: "baseline_features.csv"
+
+# Output goes to {MODEL_DIR}/{EXPERIMENT_NAME}/fold{i}/competing_risks/.
+MODEL_DIR: "/uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/models"
+
+# fold0 is the tuning fold and is not quoted.
+FOLDS: [1, 2, 3, 4, 5]
+
+# ---- Shared with part1_recut_transehr2 and part1_recut_tabdh ---------------
+
+# The recut grid (user, 2026-10-28); the last cut is the horizon, the
+# largest observed readmission time. The CSC is fitted in continuous
+# time; the grid only shapes its dumps and its evaluation.
+TIME_GRID_CUTS_DAYS: [8, 31, 181, 366, 913, 1826, 6454.83]
+
+# EVENT_TYPEs fitted as competing causes, in output order. Any other
+# EVENT_TYPE is censoring.
+MODELLED_CAUSES: ["readmission", "death", "out_migration"]
+
+# Lee's C(tau) and IBS to tau, in days.
+EVAL_HORIZONS_DAYS: [30, 90, 365, 1095, 1825]
+
+BRIER_INTEGRATION_DAYS: 365
+
+CR_DCAL_ALPHA: 2
+CR_DCAL_N_RHO: 1000
+CR_DCAL_CHI2_BINS: 10
+CR_DCAL_TEST_LEVEL: 0.05
+
+# ---- Encoding (identical to the tabular DeepHit's, plan "Features") ---------
+#
+# Linear terms, entered as they are. The quintiles are linear to keep their
+# order.
+LINEAR_FEATURES: ["AGE", "L", "A", "E", "CCI", "QUINTMAT", "QUINTSOC"]
+
+# Linear terms whose missing cells take the train-partition median of the
+# observed values, with a 0/1 "<feature>_missing" indicator (user,
+# 2026-10-18, for age). A quintile is missing at raw 0 or with no REG row
+# yet; age with no REG row or birth year at all. L, A, E and CCI are
+# computed by lace.py and never empty, so a missing cell there stops the run.
+MEDIAN_FILL_FEATURES: ["AGE", "QUINTMAT", "QUINTSOC"]
+
+# Treatment dummies against the first level: the observed train levels,
+# sorted, then a "missing" level.
+# ZONE_NAME is left out (user, 2026-10-19): its missing level all but
+# duplicated Rural's, so the CSC could not separate the two and did not
+# converge.
+CATEGORICAL_FEATURES: ["SEX", "Rural", "INDEX_TYPE"]
+
+# ---- CSC --------------------------------------------------------------------
+
+# Tie handling in each cause's partial likelihood (riskRegression::CSC's
+# default). Event times are recorded to the minute, so ties are rare.
+CSC_TIES: "efron"

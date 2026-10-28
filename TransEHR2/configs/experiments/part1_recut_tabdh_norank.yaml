@@ -1,0 +1,107 @@
+# Part 1 recut: part1_tabdh_norank.yaml on another time grid (user, 2026-10-28).
+#
+# part1_tabdh_norank.yaml with these changes, and nothing else:
+#   - EXPERIMENT_NAME is part1_recut_tabdh_norank;
+#   - TIME_GRID_CUTS_DAYS is [8, 31, 181, 366, 913, 1826, 6454.83]. The
+#     horizon, the last cut, is unchanged.
+# Every hyperparameter is part1_tabdh_norank's, not retuned for this grid
+# (user, 2026-10-28).
+#
+# The copied body below keeps part1_tabdh_norank.yaml's own header comment.
+
+# Part 1 ablation: tabular DeepHit without the ranking loss (user, 2026-10-26).
+#
+# part1_tabdh.yaml with these changes, and nothing else:
+#   - EXPERIMENT_NAME is part1_tabdh_norank;
+#   - DEEPHIT_RANK_WEIGHT is 0, so the head trains on the likelihood alone.
+# FINETUNE_LEARNING_RATE stays the rate part1_tabdh's learning-rate check
+# chose: no new check, so the loss is the only difference.
+#
+# The copied body below keeps part1_tabdh.yaml's own header comment.
+
+# Part 1 tabular DeepHit: TransEHR2's DeepHit head on the baseline features.
+#
+# Read by scripts/fit_baseline_deephit.py and
+# scripts/dump_baseline_deephit_predictions.py, and by the recalibration
+# and evaluation scripts through --experiment_config.
+#
+# The head, the loss and the finetuning schedule are TransEHR2's, unchanged,
+# so that the comparison with TransEHR2 isolates the EHR encoder. They equal
+# part1_transehr2.yaml's tuned values (synced by hand 2026-10-23, after the
+# post-major-fixes tuning rerun): phase 2's finetuning rate and half-life,
+# phase 4's head widths.
+
+EXPERIMENT_NAME: "part1_recut_tabdh_norank"
+
+MODEL_DIR: "/uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/models"
+
+# Under the dataset config's DATA_DIR, beside labels.csv, extracted_rows.npy
+# and fold{i}/. Written by IBDdataprep's lace.py, one row per drawn episode,
+# keyed by its labels.csv row as idx; a missing value is an empty cell.
+BASELINE_FEATURES_FILE: "baseline_features.csv"
+
+# ---- Encoding (identical to the CSC's, plan "Features") -------------------
+#
+# Linear terms, standardized with the fold's train-partition mean and
+# population SD after any median fill. The quintiles are linear to keep
+# their order.
+LINEAR_FEATURES: ["AGE", "L", "A", "E", "CCI", "QUINTMAT", "QUINTSOC"]
+
+# Linear terms whose missing cells take the train-partition median of the
+# observed values, with a 0/1 "<feature>_missing" indicator (user,
+# 2026-10-18, for age). A quintile is missing at raw 0 or with no REG row
+# yet; age with no REG row or birth year at all. L, A, E and CCI are
+# computed by lace.py and never empty, so a missing cell there is an error.
+MEDIAN_FILL_FEATURES: ["AGE", "QUINTMAT", "QUINTSOC"]
+
+# One-hot over the levels seen on the train partition, none dropped.
+# ZONE_NAME is left out (user, 2026-10-19): its missing level all but
+# duplicated Rural's, so the CSC could not separate the two and did not
+# converge.
+CATEGORICAL_FEATURES: ["SEX", "Rural", "INDEX_TYPE"]
+
+# As in fit_baseline_csc.R, an indicator or a missing level exists only if
+# train has a missing value; val or test needing one that train lacks stops
+# the run.
+
+# ---- Training ----------------------------------------------------------------
+
+# Seeds the head's initialization, dropout and the train shuffle.
+SEED: 20261018
+
+# TransEHR2's finetuning batch size, and must stay equal to it (user,
+# 2026-10-18). DeepHit's ranking term compares pairs within a batch, so this
+# is part of the objective, not only of the speed.
+BATCH_SIZE: 200
+
+FINETUNE_LEARNING_RATE: 0.002
+FINETUNE_TOTAL_EPOCH: 500
+FINETUNE_LR_HALF_LIFE: 480
+FINETUNE_SELECTION_METRIC: "brier"
+
+# The small learning-rate check on fold0 (fit_baseline_deephit.py
+# --lr_check). The first value is the one above.
+LR_CHECK_RATES: [5.0e-05, 0.0002, 0.0006, 0.002]
+
+# ---- Competing risks (DeepHit), as in TransEHR2 -----------------------------
+
+TIME_GRID_CUTS_DAYS: [8, 31, 181, 366, 913, 1826, 6454.83]
+MODELLED_CAUSES: ["readmission", "death", "out_migration"]
+BRIER_INTEGRATION_DAYS: 365
+
+DEEPHIT_RANK_WEIGHT: 0.0
+DEEPHIT_SIGMA: 0.1
+DEEPHIT_CAUSE_WEIGHTS: null
+
+DEEPHIT_HEAD_D_SHARED: [256, 128]
+DEEPHIT_HEAD_D_CAUSE: [128, 64]
+DEEPHIT_HEAD_DROPOUT: 0.1
+
+# ---- Evaluation (evaluate_finetuned_predictions.py) -------------------------
+
+EVAL_HORIZONS_DAYS: [30, 90, 365, 1095, 1825]
+
+CR_DCAL_ALPHA: 2
+CR_DCAL_N_RHO: 1000
+CR_DCAL_CHI2_BINS: 10
+CR_DCAL_TEST_LEVEL: 0.05

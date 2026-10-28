@@ -1,0 +1,94 @@
+# Part 1 recut model comparisons, read by scripts/compare_models.py --config.
+#
+# part1_comparisons.yaml with each model pointed at its part1_recut_*
+# experiment (user, 2026-10-28), and nothing else: the same model keys,
+# comparisons, metrics and families, so the two runs' tables read alike.
+#
+# Every setting that changes a reported P value is here: which evaluations
+# are compared, on which metrics, over which BH family, and the ratio the
+# Nadeau-Bengio correction uses. The causes and horizons are not repeated:
+# they are read from the evaluation headers, which must agree.
+
+# n_test / n_train of one fold. split.py makes 6 folds with fold0 reserved
+# for tuning, and holds 0.2 of each fold's training patients out for val:
+# test 1/6, train 0.8 * 5/6 = 4/6. Val is not counted as training data.
+N_TRAIN_TEST_RATIO: 0.25
+
+# Evaluation YAML under {model_dir}/{experiment}/, per variant.
+EVALUATION_FILE: "{split}_evaluation.yaml"
+
+# The dump split each variant is scored from.
+VARIANTS:
+  raw: test
+  recal: test_recal_aj
+
+# Every model is fit on, and scored on, all drawn episodes.
+MODELS:
+  TransEHR2: part1_recut_transehr2
+  CSC: part1_recut_csc
+  TabDeepHit: part1_recut_tabdh
+  # The ablations (user, 2026-10-26): each DeepHit without its ranking loss,
+  # and TransEHR2's encoder with a cause-specific Cox head. Every model listed
+  # must have its evaluations before compare_models.py runs.
+  TransEHR2_noRank: part1_recut_transehr2_norank
+  TabDeepHit_noRank: part1_recut_tabdh_norank
+  TransEHR2_CSC: part1_recut_transehr2_csc
+
+# Paired, two-sided. The difference is the first minus the second.
+COMPARISONS:
+  - [TransEHR2 raw, CSC raw]
+  - [TransEHR2 raw, TabDeepHit raw]
+  - [TabDeepHit raw, CSC raw]
+  - [TransEHR2 recal, CSC recal]
+  - [TransEHR2 recal, TabDeepHit recal]
+  - [TabDeepHit recal, CSC recal]
+  - [TransEHR2 recal, TransEHR2 raw]
+  - [CSC recal, CSC raw]
+  - [TabDeepHit recal, TabDeepHit raw]
+  # Each ablation against its reference only (user, 2026-10-26): the ranking
+  # loss, and the head.
+  - [TransEHR2_noRank raw, TransEHR2 raw]
+  - [TabDeepHit_noRank raw, TabDeepHit raw]
+  - [TransEHR2_CSC raw, TransEHR2 raw]
+  - [TransEHR2_CSC raw, CSC raw]
+  - [TransEHR2_noRank recal, TransEHR2 recal]
+  - [TabDeepHit_noRank recal, TabDeepHit recal]
+  - [TransEHR2_CSC recal, TransEHR2 recal]
+  - [TransEHR2_CSC recal, CSC recal]
+  - [TransEHR2_noRank recal, TransEHR2_noRank raw]
+  - [TabDeepHit_noRank recal, TabDeepHit_noRank raw]
+  - [TransEHR2_CSC recal, TransEHR2_CSC raw]
+  # Each Cox head against the no-ranking-loss DeepHit on the same features
+  # (user, 2026-10-27), for the IBS figure. Drawn without significance: the
+  # model set, and so the BH family, may still shrink.
+  - [TransEHR2_CSC raw, TransEHR2_noRank raw]
+  - [TabDeepHit_noRank raw, CSC raw]
+  - [TransEHR2_CSC recal, TransEHR2_noRank recal]
+  - [TabDeepHit_noRank recal, CSC recal]
+
+# Metric keys in the evaluation YAMLs. {cause} is the metric label of each
+# modelled cause, {tau} each horizon as the evaluation spells it.
+TESTED_METRICS:
+  - "{cause}_Cindex_Lee_at_{tau}"
+  - "{cause}_IBS_to_{tau}"
+  - "{cause}_CR_DCal"
+
+# Reported with means and differences but not tested: IPA is IBS over a null
+# every model shares on the test partition, so it carries the IBS comparison.
+# The time-of-event errors and their counts (user, 2026-10-27) are for the
+# figure; the model set, and so any family they joined, may still shrink.
+REPORTED_METRICS:
+  - "{cause}_IPA_to_{tau}"
+  - "{cause}_Overestimation_MAE"
+  - "{cause}_Overestimation_N"
+  - "{cause}_Underestimation_MAE"
+  - "{cause}_Underestimation_N"
+
+# One BH family per cause table, covering every tested metric and comparison
+# in it. The only scope implemented.
+BH_FAMILY: cause
+
+# CR D-calibration chi-squared, a per-model goodness-of-fit test kept out of
+# the BH family. A cause passes a fold when p > LEVEL * K, K the number of
+# modelled causes (Alberge et al. 2026, appendix E).
+DCAL_CHI2_LEVEL: 0.05

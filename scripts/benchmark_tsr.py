@@ -223,7 +223,8 @@ def _fits(grid, n):
 
 
 def time_phase2(model, loader, target, device, args, embed, strings):
-    """Per-episode medians of every phase-2 cost, measured or projected."""
+    """Per-episode medians of every phase-2 cost, measured or projected, and the
+    mean, 90th percentile and maximum of the total."""
     from TransEHR2.text_fields import text_field_units
 
     fields = [f for f in args.text_fields.split(',') if f]
@@ -300,12 +301,19 @@ def time_phase2(model, loader, target, device, args, embed, strings):
         })
     if not rows:
         return None
+    totals = [row['total'] for row in rows]
+    # The cohort's GPU-hours are a sum, so they scale with the mean, not the median;
+    # the two part when a few long episodes dominate.
+    p90 = (statistics.quantiles(totals, n=10, method='inclusive')[-1]
+           if len(totals) > 1 else totals[0])
     return {key: statistics.median(row[key] for row in rows) for key in rows[0]} | {
-        'episodes': len(rows)}
+        'episodes': len(rows), 'total_mean': statistics.fmean(totals),
+        'total_p90': p90, 'total_max': max(totals)}
 
 
 def report_phase2(medians, args):
-    """The per-episode medians and what they come to over the cohort."""
+    """The per-episode medians, the spread of the total, and what the mean comes to
+    over the cohort."""
     print()
     print(f"phase 2, {medians['episodes']} episodes timed, medians per episode per target")
     print(f"  occupied cells {medians['cells']:.0f}, features {medians['features']:.0f}, "
@@ -316,10 +324,12 @@ def report_phase2(medians, args):
     print(f"  fwd      {medians['fwd'] * 1e3:9.3f} ms per perturbed replica")
     print(f"  curves   {medians['curves']:9.3f} s  projected: deletion + insertion, "
           f"{args.null_draws} null draws, {medians['curve_strings']:.0f} re-embeds")
-    print(f"  total    {medians['total']:9.3f} s")
-    hours = medians['total'] * args.targets * args.cohort / 3600
-    print(f"  cohort   {hours:9.2f} GPU-h for {args.cohort} episodes x {args.targets} "
-          f"targets on one card; the planted model's run repeats tsr + fields + curves")
+    print(f"  total    {medians['total']:9.3f} s  (mean {medians['total_mean']:.3f}, "
+          f"p90 {medians['total_p90']:.3f}, max {medians['total_max']:.3f})")
+    hours = medians['total_mean'] * args.targets * args.cohort / 3600
+    print(f"  cohort   {hours:9.2f} GPU-h at the mean, for {args.cohort} episodes x "
+          f"{args.targets} targets on one card; the planted model's run repeats tsr + "
+          f"fields + curves")
 
 
 def main(argv=None) -> int:

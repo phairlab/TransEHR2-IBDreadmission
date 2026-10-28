@@ -167,12 +167,20 @@ def test_phase2_times_every_cost_and_projects_the_cohort(cohort, capsys, monkeyp
     assert main([dataset_config, experiment_config, '--device', 'cpu', '--fold', 'fold0',
                  '--split', 'test', '--warmup', '0', '--batches', '2', '--workers', '0',
                  '--chunk', '8', '--phase2', '--horizon-days', '30', '--ig-steps', '2',
-                 '--cohort', '10']) == 0
+                 '--cohort', '1800']) == 0
     out = capsys.readouterr().out
     for label in ('horizon 30 d (interpolated)', 'tsr ', 'fields ', 'fwd ', 'curves ',
                   'cohort '):
         assert label in out, out
     assert 'diagnosis' not in out
+    # The spread of the total is reported, and the cohort projects from its mean: at 1800
+    # episodes x 2 targets the GPU-hours equal the mean total in seconds.
+    spread = re.search(r'mean ([\d.]+), p90 ([\d.]+), max ([\d.]+)', out)
+    assert spread, out
+    mean, p90, peak = (float(value) for value in spread.groups())
+    assert mean <= peak and p90 <= peak, out
+    hours = re.search(r'cohort\s+([\d.]+) GPU-h at the mean', out)
+    assert hours and abs(float(hours.group(1)) - mean) < 0.01, out
     # The text path really ran: the fixture's episodes carry notes, so strings were embedded.
     embedded = re.search(r'over (\d+) strings', out)
     assert embedded and int(embedded.group(1)) > 0, out

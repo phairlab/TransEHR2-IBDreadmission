@@ -347,7 +347,8 @@ def main(argv=None) -> int:
     parser.add_argument('--gated-value', type=float, default=0.0)
     parser.add_argument('--cause', type=int, default=0)
     parser.add_argument('--horizon-bin', type=int, default=0)
-    parser.add_argument('--device', default='auto')
+    parser.add_argument('--device', default=None,
+                        help='Omitted: CUDA, then MPS, then the CPU (cli.resolve_device).')
     phase2 = parser.add_argument_group('phase 2')
     phase2.add_argument('--phase2', action='store_true',
                         help='Time the phase-2 per-episode costs instead of the batch sweep.')

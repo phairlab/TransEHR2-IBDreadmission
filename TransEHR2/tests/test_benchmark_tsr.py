@@ -13,6 +13,7 @@ import numpy as np
 import pickle
 import pytest
 import re
+import torch
 import yaml
 
 from pathlib import Path
@@ -88,6 +89,17 @@ def test_it_runs_the_production_classifier_over_real_episodes(cohort, capsys):
 def test_integrated_gradients_is_reported_as_such(cohort, capsys):
     assert _run(cohort, ('--ig-steps', '2')) == 0
     assert 'IG x2' in capsys.readouterr().out
+
+
+def test_the_device_is_picked_when_omitted(cohort, capsys, monkeypatch):
+    """The SLURM script passes no --device, so the default must resolve."""
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: False)
+    monkeypatch.setattr(torch.backends.mps, 'is_available', lambda: False)
+    dataset_config, experiment_config = cohort
+    assert main([dataset_config, experiment_config, '--fold', 'fold0',
+                 '--split', 'test', '--batch-sizes', '1', '--batches', '1',
+                 '--warmup', '1', '--workers', '0', '--chunk', '8']) == 0
+    assert 'device cpu' in capsys.readouterr().out
 
 
 def test_every_batch_size_in_the_sweep_gets_a_row(cohort, capsys):

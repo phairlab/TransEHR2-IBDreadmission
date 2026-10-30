@@ -1,0 +1,142 @@
+# Part 1 recut2: part1_transehr2.yaml on a third time grid (user, 2026-10-30).
+#
+# part1_transehr2.yaml with these changes, and nothing else:
+#   - EXPERIMENT_NAME is part1_recut2_transehr2;
+#   - TIME_GRID_CUTS_DAYS is [8, 31, 91, 181, 366, 913, 1826, 6454.83],
+#     the recut grid with a cut at 91 days. The horizon, the last cut,
+#     is unchanged.
+#   - EVAL_HORIZONS_DAYS is [7, 30, 90, 180, 365, 1095, 1825], where
+#     Part 1's is [30, 90, 365, 1095, 1825] (user, 2026-10-30).
+#   - PRETRAINED_FROM: part1_transehr2. Pretraining reads no grid key,
+#     so each fold starts from part1_transehr2's pretrained encoder,
+#     copied in, rather than pretraining it again.
+# Every hyperparameter is part1_transehr2's, not retuned for this grid
+# (user, 2026-10-28).
+#
+# The copied body below keeps part1_transehr2.yaml's own header comment.
+
+# Part 1 TransEHR2: the fold0 tuning winner, run on folds 1-5.
+#
+# The body below is phase 4's winning trial config
+# (tuning/phase4/phase4_rope_shared_256x128_cause_128x64.yaml), as
+# select_tuned_cell.py writes it, with three changes:
+#   - EXPERIMENT_NAME is part1_transehr2;
+#   - FINETUNE_SEED and PRETRAIN_SEED were dropped in ddafbed because nothing
+#     read them; they are back (major-fixes, 2026-10-19) and are now required
+#     and read, each stage seeding with its key plus the fold index;
+#   - the evaluation keys at the end are added, equal to part1_csc.yaml's and
+#     part1_tabdh.yaml's, which compare_models.py requires.
+#
+# Provenance of the tuned values: the full rerun after the major-fixes
+# changes (2026-10-23; decision records in tuning/*_cell.yaml), which
+# supersedes the 2026-10-18 campaign:
+#   - phase 1: PRETRAIN_LEARNING_RATE 0.0006, PRETRAIN_LR_HALF_LIFE 60
+#     (loss 0.17326).
+#   - phase 2 (rope): FINETUNE_LEARNING_RATE 5e-05, FINETUNE_LR_HALF_LIFE 480.
+#   - phase 3: CMPNT_MASK_RATIO 0.5, RECORD_MASK_RATIO 0.25, 2 encoder
+#     blocks.
+#   - phase 4: DEEPHIT_HEAD_D_SHARED [256, 128], DEEPHIT_HEAD_D_CAUSE
+#     [128, 64] (0.068031; the four heads span 0.068031-0.068676).
+#   - POSITION_ENCODING rope is the user's choice (2026-10-18).
+# The epoch budgets stay at the tuning budgets (200 pretraining, 500
+# finetuning; user, 2026-10-18), so the selected schedules apply as tuned.
+#
+# The finetuning settings shared with part1_tabdh.yaml (BATCH_SIZE, the
+# DeepHit head and loss, the learning rate and its half-life) are kept equal
+# by hand.
+
+EXPERIMENT_NAME: part1_recut2_transehr2
+PRETRAINED_FROM: part1_transehr2
+
+BATCH_SIZE: 200
+BRIER_INTEGRATION_DAYS: 365
+CMPNT_MASK_RATIO: 0.5
+DEEPHIT_CAUSE_WEIGHTS: null
+DEEPHIT_HEAD_DROPOUT: 0.1
+DEEPHIT_HEAD_D_CAUSE:
+- 128
+- 64
+DEEPHIT_HEAD_D_SHARED:
+- 256
+- 128
+DEEPHIT_RANK_WEIGHT: 1.0
+DEEPHIT_SIGMA: 0.1
+DISCRIMINATOR_DIM_FEEDFORWARD: 256
+DISCRIMINATOR_ENCODER_ACTIVATION: gelu
+DISCRIMINATOR_ENCODER_DIM_FEEDFORWARD: 256
+DISCRIMINATOR_ENCODER_DROPOUT: 0.1
+DISCRIMINATOR_ENCODER_D_MODEL: 256
+DISCRIMINATOR_ENCODER_NORM: LayerNorm
+DISCRIMINATOR_ENCODER_NORM_FIRST: true
+DISCRIMINATOR_ENCODER_N_ENCODER_BLOCKS: 2
+DISCRIMINATOR_ENCODER_N_HEADS: 2
+DISC_LOSS_WEIGHT: 1.0
+EVENT_LADDER_P_MAX: 379993.0
+EVENT_LADDER_P_MIN: 0.0680556
+FINETUNE_LEARNING_RATE: 5.0e-05
+FINETUNE_LR_HALF_LIFE: 480
+FINETUNE_SEED: 0
+FINETUNE_SELECTION_METRIC: brier
+FINETUNE_TOTAL_EPOCH: 500
+GENERATOR_DIM_FEEDFORWARD: 256
+GENERATOR_D_MODEL: 256
+GENERATOR_ENCODER_ACTIVATION: gelu
+GENERATOR_ENCODER_DIM_FEEDFORWARD: 256
+GENERATOR_ENCODER_DROPOUT: 0.1
+GENERATOR_ENCODER_D_MODEL: 256
+GENERATOR_ENCODER_NORM: LayerNorm
+GENERATOR_ENCODER_NORM_FIRST: true
+GENERATOR_ENCODER_N_ENCODER_BLOCKS: 2
+GENERATOR_ENCODER_N_HEADS: 2
+MODELLED_CAUSES:
+- readmission
+- death
+- out_migration
+MODEL_DIR: /uhome/pr3/projects/p60290_2/TransEHR2-IBDreadmission/models
+OBS_UNOBS_SAMPLE_RATIO: 10.0
+POSITION_ENCODING: rope
+PREDICTOR_AGGREGATION_METHOD: mean
+PREDICT_INDICATORS: true
+PRETRAIN_LEARNING_RATE: 0.0006
+PRETRAIN_LR_HALF_LIFE: 60
+PRETRAIN_SEED: 0
+PRETRAIN_TOTAL_EPOCH: 200
+RECORD_MASK_RATIO: 0.25
+THP_ENCODER_DROPOUT: 0.1
+THP_ENCODER_D_INNER: 256
+THP_ENCODER_D_K: 128
+THP_ENCODER_D_MODEL: 256
+THP_ENCODER_D_V: 64
+THP_ENCODER_NORM_FIRST: true
+THP_ENCODER_N_HEADS: 2
+THP_ENCODER_N_LAYERS: 1
+THP_LOSS_MC_SAMPLES: 100
+THP_LOSS_NLL_WEIGHT: 0.01
+THP_PRED_LOSS_TIME_WT: 1.0e-06
+THP_PRED_LOSS_TYPE_WT: 1.0
+TIME_GRID_CUTS_DAYS:
+- 8
+- 31
+- 91
+- 181
+- 366
+- 913
+- 1826
+- 6454.83
+USE_THP: false
+# One event type (ADMIT_DAD) makes every event token identical, and under rope
+# the event encoder then returns one fixed vector; the head leaves it out.
+USE_EVENT_ENCODER: false
+USE_THP_PRED_LOSS: true
+VALUE_LADDER_P_MAX: 412357.0
+VALUE_LADDER_P_MIN: 0.00138889
+
+# ---- Evaluation (evaluate_finetuned_predictions.py) -------------------------
+# Equal to part1_recut2_csc.yaml and part1_recut2_tabdh.yaml.
+
+EVAL_HORIZONS_DAYS: [7, 30, 90, 180, 365, 1095, 1825]
+
+CR_DCAL_ALPHA: 2
+CR_DCAL_N_RHO: 1000
+CR_DCAL_CHI2_BINS: 10
+CR_DCAL_TEST_LEVEL: 0.05

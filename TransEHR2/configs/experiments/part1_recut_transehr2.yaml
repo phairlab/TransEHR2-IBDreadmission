@@ -4,6 +4,8 @@
 #   - EXPERIMENT_NAME is part1_recut_transehr2;
 #   - TIME_GRID_CUTS_DAYS is [8, 31, 181, 366, 913, 1826, 6454.83]. The
 #     horizon, the last cut, is unchanged.
+#   - EVAL_HORIZONS_DAYS is [7, 30, 90, 180, 365, 1095, 1825], where
+#     Part 1's is [30, 90, 365, 1095, 1825] (user, 2026-10-30).
 #   - PRETRAINED_FROM: part1_transehr2. Pretraining reads no grid key,
 #     so each fold starts from part1_transehr2's pretrained encoder,
 #     copied in, rather than pretraining it again.
@@ -128,9 +130,9 @@ VALUE_LADDER_P_MAX: 412357.0
 VALUE_LADDER_P_MIN: 0.00138889
 
 # ---- Evaluation (evaluate_finetuned_predictions.py) -------------------------
-# Equal to part1_csc.yaml and part1_tabdh.yaml.
+# Equal to part1_recut_csc.yaml and part1_recut_tabdh.yaml.
 
-EVAL_HORIZONS_DAYS: [30, 90, 365, 1095, 1825]
+EVAL_HORIZONS_DAYS: [7, 30, 90, 180, 365, 1095, 1825]
 
 CR_DCAL_ALPHA: 2
 CR_DCAL_N_RHO: 1000

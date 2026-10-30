@@ -4,6 +4,8 @@
 #   - EXPERIMENT_NAME is part1_recut_csc;
 #   - TIME_GRID_CUTS_DAYS is [8, 31, 181, 366, 913, 1826, 6454.83]. The
 #     horizon, the last cut, is unchanged.
+#   - EVAL_HORIZONS_DAYS is [7, 30, 90, 180, 365, 1095, 1825], where
+#     Part 1's is [30, 90, 365, 1095, 1825] (user, 2026-10-30).
 # Every hyperparameter is part1_csc's, not retuned for this grid
 # (user, 2026-10-28).
 #
@@ -46,7 +48,7 @@ TIME_GRID_CUTS_DAYS: [8, 31, 181, 366, 913, 1826, 6454.83]
 MODELLED_CAUSES: ["readmission", "death", "out_migration"]
 
 # Lee's C(tau) and IBS to tau, in days.
-EVAL_HORIZONS_DAYS: [30, 90, 365, 1095, 1825]
+EVAL_HORIZONS_DAYS: [7, 30, 90, 180, 365, 1095, 1825]
 
 BRIER_INTEGRATION_DAYS: 365
 

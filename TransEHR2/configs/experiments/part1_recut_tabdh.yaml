@@ -4,6 +4,8 @@
 #   - EXPERIMENT_NAME is part1_recut_tabdh;
 #   - TIME_GRID_CUTS_DAYS is [8, 31, 181, 366, 913, 1826, 6454.83]. The
 #     horizon, the last cut, is unchanged.
+#   - EVAL_HORIZONS_DAYS is [7, 30, 90, 180, 365, 1095, 1825], where
+#     Part 1's is [30, 90, 365, 1095, 1825] (user, 2026-10-30).
 # Every hyperparameter is part1_tabdh's, not retuned for this grid
 # (user, 2026-10-28).
 #
@@ -89,7 +91,7 @@ DEEPHIT_HEAD_DROPOUT: 0.1
 
 # ---- Evaluation (evaluate_finetuned_predictions.py) -------------------------
 
-EVAL_HORIZONS_DAYS: [30, 90, 365, 1095, 1825]
+EVAL_HORIZONS_DAYS: [7, 30, 90, 180, 365, 1095, 1825]
 
 CR_DCAL_ALPHA: 2
 CR_DCAL_N_RHO: 1000

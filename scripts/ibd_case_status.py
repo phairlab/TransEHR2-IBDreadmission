@@ -73,6 +73,8 @@ from IBDdataprep.superfeature import parse_superfeature
 SOURCES = ('DAD', 'AMB', 'CLM')
 GROUPS = ('CD', 'UC')
 DICTIONARIES = {'ICD10CA': ICD10CA, 'ICD9': ICD9}
+# The sources whose diagnoses the prepare scripts mapped through each one.
+DICTIONARY_SOURCES = {'ICD10CA': 'DAD, AMB', 'ICD9': 'CLM'}
 
 TIMESERIES_FILE = 'timeseries.csv'
 STAYS_FILE = 'stays.csv'
@@ -261,19 +263,54 @@ def case_table(data_dir: Path, descriptions: dict, definition: dict,
     return status, sum(result[1] for result in results)
 
 
+def _print_definition(definition: dict, path: Path) -> None:
+    """The definition the counts below it were made under, from its config."""
+
+    codes = definition['CODES']
+    print(f'IBD case definition ({path})')
+    print('  What is read: every timeseries.csv timestep at or before the '
+          "episode's INDEX_TIME,\n  not only the ones the model reads. A "
+          'record is a DAD stay, an AMB visit, or a\n  claim block (one per '
+          'service code per day) whose diagnoses carry a CD or UC code.')
+    print('  Codes, each taking every code under it (K50 takes K500-K509):')
+    for group in GROUPS:
+        listed = '; '.join(f'{name} {", ".join(codes[name][group])} '
+                           f'({DICTIONARY_SOURCES[name]})' for name in codes)
+        print(f'    {group}  {listed}')
+    print('  A case meets at least one source rule. Each rule counts its own '
+          'source only:')
+    for source in SOURCES:
+        rule = definition['RULES'][source]
+        print(f'    {source:<5} {rule["MIN_RECORDS"]} records on distinct '
+              f'dates, first to last under {rule["WINDOW_DAYS"]} days apart')
+    weights = ', '.join(f'{source} {definition["WEIGHTS"][source]}'
+                        for source in SOURCES)
+    print('  A case is classified by SCORE = sum over sources of weight x '
+          f'(UC records - CD records),\n  weights {weights}: CD if SCORE < '
+          f'{definition["CD_THRESHOLD"]}, UC if SCORE > '
+          f'{definition["UC_THRESHOLD"]}, IBDU otherwise.')
+    print(f'  Dates are calendar dates in {definition["LOCAL_TIMEZONE"]}.')
+
+
 def _print_summary(status: pd.DataFrame, unattributed: int,
                    output: Path) -> None:
+    def line(label, n):
+        print(f'  {label:<34}{n:>9}  '
+              f'({100 * n / max(len(status), 1):5.1f}%)')
+
     cases = status[status['IBD_CASE'] == 1]
-    print(f'case table:   {output}')
-    print(f'episodes:     {len(status)}')
-    print(f'  meeting the case definition: {len(cases)}')
+    print('\nResult (percentages are of all episodes)')
+    print(f'  case table: {output}')
+    line('episodes (rows of extracted_rows)', len(status))
+    line('meeting the case definition', len(cases))
     for group in ('CD', 'UC', 'IBDU'):
-        print(f'    {group:<5} {int((cases["STATUS"] == group).sum())}')
-    print('  meeting each source rule (they overlap):')
+        line(f'  classified {group}', int((cases['STATUS'] == group).sum()))
+    print('  meeting each source rule (a case can meet several):')
     for source in SOURCES:
-        print(f'    {source:<5} {int(status[f"QUALIFIES_{source}"].sum())}')
-    print(f'DIAGNOSES blocks with a CD or UC code on no stay\'s minute, '
-          f'not used: {unattributed}')
+        line(f'  {source}', int(status[f'QUALIFIES_{source}'].sum()))
+    print(f'  DIAGNOSES blocks with a CD or UC code on no DAD or AMB stay\'s '
+          f'minute: {unattributed}.\n  Their source is unknown, so no rule '
+          'or score counts them.')
 
 
 def main(argv=None) -> int:
@@ -302,6 +339,7 @@ def main(argv=None) -> int:
                                       max(args.n_workers, 1))
     output.parent.mkdir(parents=True, exist_ok=True)
     status.to_csv(output, index=False, lineterminator='\n')
+    _print_definition(definition, args.definition_config)
     _print_summary(status, unattributed, output)
     return 0
 

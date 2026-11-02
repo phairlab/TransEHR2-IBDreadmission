@@ -175,7 +175,7 @@ def test_diagnoses_on_no_stay_are_counted_and_not_used(root, capsys):
                         ('2015-02-10T18:00:00Z', 'DAD', diagnoses(CD10))], draw=0)
     row = _row(root.run(), 'p1')
     assert (row['DAD_CD'], row['AMB_CD']) == (1, 0)
-    assert "not used: 1" in capsys.readouterr().out
+    assert "stay's minute: 1." in capsys.readouterr().out
 
 
 def test_rows_follow_extracted_rows(root):
@@ -196,3 +196,17 @@ def test_a_description_shared_with_another_code_is_refused(root):
     codes = yaml.safe_load(DEFINITION.read_text())['CODES']
     with pytest.raises(ValueError, match='do not identify'):
         code_descriptions(root.data_dir / 'resources', codes)
+
+
+def test_the_output_states_the_definition_it_applied(root, capsys):
+    root.patient('p1', [('2015-01-10T18:00:00Z', 'DAD', diagnoses(CD10))], draw=0)
+    root.run()
+    out = capsys.readouterr().out
+    for text in ('CD  ICD10CA K50 (DAD, AMB); ICD9 555 (CLM)',
+                 'UC  ICD10CA K51 (DAD, AMB); ICD9 556 (CLM)',
+                 'DAD   2 records on distinct dates, first to last under 730 days',
+                 'CLM   4 records on distinct dates',
+                 'weights DAD 1.0, AMB 1.0, CLM 0.4',
+                 'CD if SCORE < -2, UC if SCORE > 2, IBDU otherwise',
+                 'America/Edmonton'):
+        assert text in out, out

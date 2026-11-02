@@ -1,0 +1,33 @@
+# IBD case definition and CD / UC / IBDU classification, read by
+# scripts/ibd_case_status.py. The values are those of the
+# ibd-patient-cohort-definition repository's config/default.yaml (8f62eff),
+# whose cohort.py the script re-implements over the timeseries TransEHR2
+# reads rather than over the raw RMT23345 tables.
+
+# Code prefixes, decimal point optional, per dictionary the prepare scripts
+# mapped diagnoses through: ICD-10-CA for DAD and AMB, ICD-9 for CLM. A prefix
+# admits its children (K50 takes K500 through K509).
+CODES:
+  ICD10CA: {CD: [K50], UC: [K51]}
+  ICD9: {CD: ["555"], UC: ["556"]}
+
+# A patient meets a source's rule with MIN_RECORDS records carrying a CD or UC
+# code on distinct dates, the first and last of them strictly less than
+# WINDOW_DAYS apart. The rules are applied one source at a time, and meeting
+# any one makes a case.
+RULES:
+  DAD: {MIN_RECORDS: 2, WINDOW_DAYS: 730}
+  AMB: {MIN_RECORDS: 2, WINDOW_DAYS: 730}
+  CLM: {MIN_RECORDS: 4, WINDOW_DAYS: 730}
+
+# SCORE = sum over sources of WEIGHT * (UC-coded records - CD-coded records).
+# SCORE < CD_THRESHOLD is CD, SCORE > UC_THRESHOLD is UC, anything between is
+# IBDU (Rezaie et al., Inflamm Bowel Dis 2012, Table 5, 0.4PC+aCCS+DaD).
+WEIGHTS: {DAD: 1.0, AMB: 1.0, CLM: 0.4}
+CD_THRESHOLD: -2
+UC_THRESHOLD: 2
+
+# Dates are calendar dates here. Timestamps are stored in UTC, and a date-only
+# field was set to 23:59 local before conversion, so the local date is the one
+# the raw table wrote.
+LOCAL_TIMEZONE: America/Edmonton

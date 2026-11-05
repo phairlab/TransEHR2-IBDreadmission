@@ -57,7 +57,7 @@ class Root:
         _write(resources / 'icd9_dictionary.csv',
                ['icd9code', 'long_description', 'short_description'],
                [['555.0', CD9, ''], ['556.0', UC9, ''], ['486', 'Pneumonia', '']],
-               encoding='latin-1')
+               encoding='utf-8')
 
     def patient(self, patid, events, draw):
         """``events``: (timestamp, source, text); DAD and AMB ones are stays.

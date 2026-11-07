@@ -90,11 +90,6 @@ CAUSE_CODES: Dict[str, int] = {
 # two-cause arm a config change rather than a code change.
 DEFAULT_CAUSES: Tuple[str, ...] = ("readmission", "death", "out_migration")
 
-# The default grid, in days: 30, 60 and 90 days, then 1, 3 and 5 years.
-# Overridden by TIME_GRID_CUTS_DAYS in the experiment config.
-DEFAULT_CUTS_DAYS: Tuple[float, ...] = (30.0, 60.0, 90.0, 365.0, 1095.0,
-                                        1825.0)
-
 # How far the cause-specific Brier score is integrated, in days, unless
 # BRIER_INTEGRATION_DAYS says otherwise. One year, because the model is
 # meant to be re-run whenever the patient sees a physician and a patient is
@@ -103,10 +98,10 @@ DEFAULT_CUTS_DAYS: Tuple[float, ...] = (30.0, 60.0, 90.0, 365.0, 1095.0,
 DEFAULT_BRIER_INTEGRATION_DAYS = 365.0
 
 # The fixed horizons Lee's concordance and the integrated Brier score are
-# reported at, in days, unless EVAL_HORIZONS_DAYS says otherwise: 30 and 90
-# days, then 1, 3 and 5 years.
-DEFAULT_EVAL_HORIZONS_DAYS: Tuple[float, ...] = (30.0, 90.0, 365.0, 1095.0,
-                                                 1825.0)
+# reported at, in days, unless EVAL_HORIZONS_DAYS says otherwise: 7, 30,
+# 90 and 180 days, then 1, 3 and 5 years.
+DEFAULT_EVAL_HORIZONS_DAYS: Tuple[float, ...] = (7.0, 30.0, 90.0, 180.0,
+                                                 365.0, 1095.0, 1825.0)
 
 # Competing-risks D-calibration (Alberge et al., AISTATS 2026), unless the
 # experiment config's CR_DCAL_* keys say otherwise. alpha = 2 makes the
@@ -135,7 +130,7 @@ class TimeGrid:
 
     def __init__(
         self,
-        cuts_days: Sequence[float] = DEFAULT_CUTS_DAYS,
+        cuts_days: Sequence[float],
         causes: Sequence[str] = DEFAULT_CAUSES,
         brier_integration_days: float = DEFAULT_BRIER_INTEGRATION_DAYS,
     ):
@@ -643,8 +638,8 @@ def censoring_survival(
 
     Fitted on the recorded times rather than on bin indices: the score is
     read at every day between zero and the bound, and a ``G`` that could
-    only step at the six cuts would hold a smooth numerator over a
-    six-step denominator.
+    only step at the cuts would hold a smooth numerator over a
+    step-function denominator.
 
     An episode whose outcome is observed at exactly a censoring time is
     counted as still at risk there, the usual convention for a tie

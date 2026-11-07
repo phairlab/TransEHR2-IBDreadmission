@@ -482,8 +482,7 @@ def test_shipped_configs_declare_a_usable_grid(name, config):
     """A grid that TimeGrid refuses would fail after the data is loaded and
     the model built, which is an expensive place to learn it."""
     cuts = config.get('TIME_GRID_CUTS_DAYS')
-    if cuts is None:
-        pytest.skip(f'{name} sets no grid; the default applies')
+    assert cuts is not None, f'{name} sets no TIME_GRID_CUTS_DAYS'
     grid = TimeGrid(cuts, config.get('MODELLED_CAUSES', DEFAULT_CAUSES),
                     config.get('BRIER_INTEGRATION_DAYS',
                                DEFAULT_BRIER_INTEGRATION_DAYS))

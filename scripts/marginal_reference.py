@@ -17,7 +17,8 @@ the fraction of the reference's error the model removes.
 so one run of this serves every cell of every sweep scored on that fold.
 
 Usage:
-    python scripts/marginal_reference.py <dataset_config> --fold fold0
+    python scripts/marginal_reference.py <dataset_config> --fold fold0 \\
+        --experiment_config <a tuning cell's config>
     python scripts/marginal_reference.py <dataset_config> --fold fold0 \\
         --experiment_config <a tuning cell's config> --model_ibs 0.060461
 """
@@ -34,7 +35,7 @@ import yaml
 import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.survival import (DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES,
-                                DEFAULT_CUTS_DAYS, TimeGrid, metric_label,
+                                TimeGrid, metric_label,
                                 marginal_reference_metrics)
 
 
@@ -51,7 +52,7 @@ def main(argv=None) -> int:
                         choices=('train', 'val', 'test'),
                         help='Which partition to score. val is the one the '
                              'tuning sweeps select on.')
-    parser.add_argument('--experiment_config', default=None,
+    parser.add_argument('--experiment_config', required=True,
                         help='A config carrying TIME_GRID_CUTS_DAYS, '
                              'MODELLED_CAUSES and BRIER_INTEGRATION_DAYS. The '
                              'grid has to be the one the model was scored on, '
@@ -66,15 +67,12 @@ def main(argv=None) -> int:
     with open(args.dataset_config) as f_in:
         data_dir = args.data_dir or yaml.safe_load(f_in)['DATA_DIR']
 
-    cuts, causes = list(DEFAULT_CUTS_DAYS), list(DEFAULT_CAUSES)
-    brier_days = DEFAULT_BRIER_INTEGRATION_DAYS
-    if args.experiment_config:
-        with open(args.experiment_config) as f_in:
-            cfg = yaml.safe_load(f_in)
-        cuts = cfg.get('TIME_GRID_CUTS_DAYS', cuts)
-        causes = cfg.get('MODELLED_CAUSES', causes)
-        brier_days = cfg.get('BRIER_INTEGRATION_DAYS', brier_days)
-    grid = TimeGrid(cuts, causes, brier_days)
+    with open(args.experiment_config) as f_in:
+        cfg = yaml.safe_load(f_in)
+    grid = TimeGrid(cfg['TIME_GRID_CUTS_DAYS'],
+                    cfg.get('MODELLED_CAUSES', list(DEFAULT_CAUSES)),
+                    cfg.get('BRIER_INTEGRATION_DAYS',
+                            DEFAULT_BRIER_INTEGRATION_DAYS))
 
     extracted = os.path.join(data_dir, 'extracted')
     rows_path = os.path.join(data_dir, args.fold,

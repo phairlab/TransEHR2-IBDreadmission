@@ -51,8 +51,7 @@ from TransEHR2.csc import (
 from TransEHR2.survival import (
     DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES, DEFAULT_CR_DCAL_ALPHA,
     DEFAULT_CR_DCAL_CHI2_BINS, DEFAULT_CR_DCAL_N_RHO,
-    DEFAULT_CR_DCAL_TEST_LEVEL, DEFAULT_CUTS_DAYS,
-    DEFAULT_EVAL_HORIZONS_DAYS, RECAL_FLOOR, TimeGrid, _cr_dcal_values,
+    DEFAULT_CR_DCAL_TEST_LEVEL, DEFAULT_EVAL_HORIZONS_DAYS, RECAL_FLOOR, TimeGrid, _cr_dcal_values,
     aalen_johansen, brier_times, cause_specific_brier,
     cause_specific_concordance, cr_d_calibration_from_values,
     cr_dcal_chi2_from_values, event_times_days, format_days,
@@ -181,7 +180,7 @@ def load_config(path: Optional[str]) -> Tuple[TimeGrid, Dict]:
     if path:
         with open(path, 'r') as f_in:
             cfg = yaml.safe_load(f_in)
-    grid = TimeGrid(cfg.get('TIME_GRID_CUTS_DAYS', list(DEFAULT_CUTS_DAYS)),
+    grid = TimeGrid(cfg['TIME_GRID_CUTS_DAYS'],
                     cfg.get('MODELLED_CAUSES', list(DEFAULT_CAUSES)),
                     cfg.get('BRIER_INTEGRATION_DAYS',
                             DEFAULT_BRIER_INTEGRATION_DAYS))

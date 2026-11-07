@@ -97,11 +97,13 @@ THP_LOSS_NLL_WEIGHT: 0.01
 THP_PRED_LOSS_TIME_WT: 1.0e-06
 THP_PRED_LOSS_TYPE_WT: 1.0
 TIME_GRID_CUTS_DAYS:
-- 46.45
-- 178.67
-- 435.09
-- 898.92
-- 1736.54
+- 8
+- 31
+- 91
+- 181
+- 366
+- 913
+- 1826
 - 6454.83
 USE_THP: false
 # One event type (ADMIT_DAD) makes every event token identical, and under rope
@@ -114,7 +116,7 @@ VALUE_LADDER_P_MIN: 0.00138889
 # ---- Evaluation (evaluate_finetuned_predictions.py) -------------------------
 # Equal to part1_csc.yaml and part1_tabdh.yaml.
 
-EVAL_HORIZONS_DAYS: [30, 90, 365, 1095, 1825]
+EVAL_HORIZONS_DAYS: [7, 30, 90, 180, 365, 1095, 1825]
 
 CR_DCAL_ALPHA: 2
 CR_DCAL_N_RHO: 1000

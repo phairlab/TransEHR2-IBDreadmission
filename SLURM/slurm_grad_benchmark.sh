@@ -51,8 +51,11 @@
 # wrong is a linear error in the headline number. STEPS sweeps the episode length; 500 is
 # MAX_EPISODE_LEN_STEPS, and a shorter window is a real lever because T enters the T*N term.
 #
+# EXPERIMENT_CONFIG (part1_transehr2.yaml by default, relative to the TransEHR2 repo) gives
+# stage 1 its time grid: one DeepHit bin, and one timed horizon, per TIME_GRID_CUTS_DAYS cut.
+#
 # The default --time of one hour is sized for stage 2. The full shape is ~74.5k perturbations
-# per horizon and six horizons, so raise it if the job is cut off; the horizons cost the same
+# per horizon and one horizon per cut, so raise it if the job is cut off; the horizons cost the same
 # as each other, which two measured shapes now agree on, so one horizon is a defensible
 # shortcut.
 #
@@ -87,6 +90,7 @@ STEPS="${STEPS:-}"
 IG_STEPS="${IG_STEPS:-}"
 DENSITY="${DENSITY:-}"
 DATASET_CONFIG="${DATASET_CONFIG:-}"
+EXPERIMENT_CONFIG="${EXPERIMENT_CONFIG:-TransEHR2/configs/experiments/part1_transehr2.yaml}"
 GATE_QUANTILE="${GATE_QUANTILE:-}"
 SKIP_ENCODER="${SKIP_ENCODER:-}"
 
@@ -127,7 +131,8 @@ cmd=(python scripts/benchmark_grad_attribution.py
 [ -n "${TSR}" ] && cmd+=(--tsr "${TSR}")
 [ -n "${STAGE1_MS}" ] && cmd+=(--stage1-ms "${STAGE1_MS}")
 [ -n "${RENDER_CELLS}" ] && cmd+=(--render-cells "${RENDER_CELLS}")
-[ -n "${STAGE1}" ] && cmd+=(--stage1 "${STAGE1}" --stage1-batches "${STAGE1_BATCHES}")
+[ -n "${STAGE1}" ] && cmd+=(--stage1 "${STAGE1}" --stage1-batches "${STAGE1_BATCHES}"
+                            --experiment-config "${EXPERIMENT_CONFIG}")
 [ -n "${CHUNK}" ] && cmd+=(--chunk "${CHUNK}")
 [ -n "${STEPS}" ] && cmd+=(--steps "${STEPS}")
 [ -n "${IG_STEPS}" ] && cmd+=(--ig-steps "${IG_STEPS}")

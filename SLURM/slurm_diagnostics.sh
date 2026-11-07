@@ -84,6 +84,7 @@ TRANSEHR2_DIR="${TRANSEHR2_DIR:-${PROJECT_ROOT}/TransEHR2}"
 TRANSEHR2_VENV="${TRANSEHR2_VENV:-${TRANSEHR2_DIR}/venv/TransEHR2}"
 DATA_DIR="${DATA_DIR:-${PROJECT_ROOT}/data}"
 DATASET_CONFIG="${DATASET_CONFIG:-TransEHR2/configs/datasets/RMT23345.yaml}"
+EXPERIMENT_CONFIG="${EXPERIMENT_CONFIG:-TransEHR2/configs/experiments/experiment1_baseline.yaml}"
 FOLD="${FOLD:-fold0}"
 BATCH_SIZE="${BATCH_SIZE:-200}"
 # Enough to outrun the prefetch queue. With 16 workers and prefetch_factor 2 the loader
@@ -161,6 +162,7 @@ for blocks in 1 2; do
         --density "${DENSITY}" \
         --encoder-blocks "${blocks}" \
         --dataset-config "${DATASET_CONFIG}" \
+        --experiment-config "${EXPERIMENT_CONFIG}" \
         --ig-steps 0
     status=$(( status || $? ))
 done
@@ -188,7 +190,6 @@ echo "########## 6: the real pretraining step, phase by phase ##########"
 
 PHASE_WORKERS="${PHASE_WORKERS:-0,8}"
 PHASE_EVERY="${PHASE_EVERY:-100}"
-EXPERIMENT_CONFIG="${EXPERIMENT_CONFIG:-TransEHR2/configs/experiments/experiment1_baseline.yaml}"
 PHASE_DIR="${PROJECT_ROOT}/log/phase_timing_${SLURM_JOB_ID:-0}"
 
 if [ ! -f "${EXPERIMENT_CONFIG}" ]; then

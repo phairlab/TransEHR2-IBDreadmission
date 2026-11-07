@@ -163,7 +163,7 @@ def main(argv=None) -> int:
                         help='Position of the cause in the grid, not its EVENT_TYPE')
     parser.add_argument('--horizon-bin', type=int, default=0,
                         help='Bin whose right edge is the horizon; bin 0 ends at the first '
-                             'TIME_GRID_CUTS_DAYS cut (46.45 d under the shipped grid)')
+                             'TIME_GRID_CUTS_DAYS cut (8 d under the shipped grid)')
     parser.add_argument('--quantile', type=float, default=0.0,
                         help="TSR's time-relevance gate")
     parser.add_argument('--chunk', type=int, default=64)

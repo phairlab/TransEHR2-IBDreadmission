@@ -58,8 +58,7 @@ from TransEHR2.routines import (
     evaluate_finetuned_model, finetune_model, pretrain_model
 )
 from TransEHR2.survival import (
-    DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES, DEFAULT_CUTS_DAYS,
-    TimeGrid, format_days
+    DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES, TimeGrid, format_days
 )
 from TransEHR2.utils import (
     convert_to_python_types, create_timer,
@@ -335,8 +334,7 @@ def main():
         'FINETUNE_SELECTION_METRIC', 'brier')
 
     # The competing-risks head and its time grid.
-    TIME_GRID_CUTS_DAYS = experiment_config.get(
-        'TIME_GRID_CUTS_DAYS', list(DEFAULT_CUTS_DAYS))
+    TIME_GRID_CUTS_DAYS = experiment_config['TIME_GRID_CUTS_DAYS']
     MODELLED_CAUSES = experiment_config.get(
         'MODELLED_CAUSES', list(DEFAULT_CAUSES))
     BRIER_INTEGRATION_DAYS = experiment_config.get(

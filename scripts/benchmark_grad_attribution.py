@@ -190,6 +190,10 @@ def main(argv=None):
                              'VARIABLE_PROPERTIES_PATH, so N and every feature width are the '
                              "study's rather than --feat-width repeated. Needs both files, "
                              'which live on the cluster.')
+    parser.add_argument('--experiment-config', default=None, metavar='PATH',
+                        help='An experiment config, for TIME_GRID_CUTS_DAYS and '
+                             'MODELLED_CAUSES: the DeepHit head the stage-1 model is built '
+                             'with, and the horizons it is timed at. Required with --stage1.')
     parser.add_argument('--stage1', default=None, metavar='T,N',
                         help="time a TransEHR2 forward+backward at this shape, against batch "
                              "size: the pass TSR spends all its time in")
@@ -211,6 +215,8 @@ def main(argv=None):
                         help="skip the encoder table; --stage1 only")
     parser.add_argument('--seed', type=int, default=0)
     args = parser.parse_args(argv)
+    if args.stage1 and not args.experiment_config:
+        parser.error('--stage1 needs --experiment-config for the time grid')
 
     device = pick_device(args.device)
     rng = np.random.default_rng(args.seed)
@@ -392,7 +398,8 @@ def build_stage1(steps, widths, d_model, text_width, device, n_causes, n_bins):
         val_encoder=val_encoder, d_event_enc=0, d_val_enc=d_model, d_statics=0,
         num_classes=n_causes * n_bins, aggr='mean', use_lookup=True,
         head=DeepHitHead(d_in=width, n_causes=n_causes, n_bins=n_bins,
-                         d_shared=128, d_cause=64, dropout=0.0)).to(device)
+                         d_shared=[256, 128], d_cause=[128, 64],
+                         dropout=0.0)).to(device)
     model.eval()
     return model
 
@@ -448,11 +455,17 @@ def report_stage1(args, device):
     Every shape in `--steps` is reported separately, because T enters the dominant T*N term and
     a truncated window is a real lever on the cost rather than a rounding of it.
     """
-    from TransEHR2.survival import DEFAULT_CAUSES, DEFAULT_CUTS_DAYS
+    import yaml
+    from TransEHR2.survival import DEFAULT_CAUSES
+
+    with open(args.experiment_config) as f_in:
+        cfg = yaml.safe_load(f_in)
+    cuts_days = cfg['TIME_GRID_CUTS_DAYS']
+    causes = list(cfg.get('MODELLED_CAUSES', DEFAULT_CAUSES))
 
     declared_steps, features = (int(v) for v in args.stage1.split(','))
-    n_causes, n_bins = len(DEFAULT_CAUSES), len(DEFAULT_CUTS_DAYS)
-    cause = DEFAULT_CAUSES.index('readmission')
+    n_causes, n_bins = len(causes), len(cuts_days)
+    cause = causes.index('readmission')
 
     if args.dataset_config:
         config_steps, widths = dataset_widths(args.dataset_config, args.drug_width)
@@ -470,7 +483,7 @@ def report_stage1(args, device):
 
     for steps in sweep:
         _report_one_shape(args, device, steps, widths, source, cause, n_causes,
-                          n_bins, DEFAULT_CUTS_DAYS)
+                          n_bins, cuts_days)
 
 
 def _report_one_shape(args, device, steps, widths, source, cause, n_causes, n_bins,

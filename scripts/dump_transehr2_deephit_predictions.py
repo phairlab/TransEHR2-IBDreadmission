@@ -54,7 +54,7 @@ from TransEHR2.data.preprocessing import (
 from TransEHR2.models import MixedClassifier
 from TransEHR2.modules import DeepHitHead, EventDataEncoder, ValueDataEncoder
 from TransEHR2.survival import (
-    DEFAULT_CAUSES, DEFAULT_CUTS_DAYS, TimeGrid, cif_from_pmf,
+    DEFAULT_CAUSES, TimeGrid, cif_from_pmf,
     deephit_distribution, format_days
 )
 from TransEHR2.utils import move_batch_to_device
@@ -280,8 +280,7 @@ def setup(args: argparse.Namespace) -> Dict:
     SURVIVAL_HEAD = experiment_config.get('SURVIVAL_HEAD', 'deephit')
 
     grid = TimeGrid(
-        experiment_config.get('TIME_GRID_CUTS_DAYS',
-                              list(DEFAULT_CUTS_DAYS)),
+        experiment_config['TIME_GRID_CUTS_DAYS'],
         experiment_config.get('MODELLED_CAUSES', list(DEFAULT_CAUSES)))
 
     with open(VARIABLE_PROPERTIES_PATH, 'r') as f_in:

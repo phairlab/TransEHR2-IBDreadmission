@@ -179,10 +179,9 @@ the only thing still treated as censoring.
 cause axis; anything left out of it falls back to censoring, so the
 two-cause arm costs a config line rather than a code change.
 
-The grid is `TIME_GRID_CUTS_DAYS` in the experiment config, six bins by
-default: 30, 60 and 90 days, then 1, 3 and 5 years. The last cut is the
-horizon; an event past it is an episode observed through the whole grid
-without one.
+The grid is `TIME_GRID_CUTS_DAYS` in the experiment config, which every
+config must set; there is no default. The last cut is the horizon; an event
+past it is an episode observed through the whole grid without one.
 
 The MIMIC fork's three tasks are gone. In-hospital mortality does not exist
 in data that follows patients after discharge, and length of stay and

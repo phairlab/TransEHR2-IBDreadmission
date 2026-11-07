@@ -214,7 +214,7 @@ def main(argv=None):
                         help="DeepHit head's per-cause stack widths, per layer "
                              '(DEEPHIT_HEAD_D_CAUSE).')
     parser.add_argument('--d-model', type=int, default=256,
-                        help="value encoder width; experiment2_text.yaml's")
+                        help="value encoder width; part1_transehr2.yaml's")
     parser.add_argument('--feat-width', type=int, default=4,
                         help="per-feature value width for the synthetic --stage1 batch")
     parser.add_argument('--drug-width', type=int, default=128,
@@ -382,15 +382,16 @@ def build_stage1(steps, widths, d_model, text_width, device, n_causes, n_bins,
     """A MixedClassifier and a batch at the given shape, for timing only.
 
     Random weights, because a forward and backward cost the same whatever the weights say. The
-    shape is what has to be real: `experiment2_text.yaml` sets d_model 256, two heads, one
-    encoder block, so this is small enough that a batch-1 pass is probably latency-bound rather
-    than compute-bound -- which is the whole question, since TSR's loops are parallel over
-    perturbations and only a latency-bound pass has headroom to exploit.
+    shape is what has to be real: `part1_transehr2.yaml` sets d_model 256 and two heads, and this
+    builds one encoder block by default where it has two, so this is small enough that a batch-1
+    pass is probably latency-bound rather than compute-bound -- which is the whole question,
+    since TSR's loops are parallel over perturbations and only a latency-bound pass has headroom
+    to exploit.
 
     The event branch is omitted: TSR never perturbs it, so it adds a constant per-pass cost that
     would be the same for every variant. That makes this a lower bound on the real per-pass time.
 
-    The head is the real `DeepHitHead` at `experiment2_text.yaml`'s widths, because the target
+    The head is the real `DeepHitHead` at `part1_transehr2.yaml`'s widths, because the target
     being differentiated is read off its output: the attribution scalar is the log-odds of
     readmission by a horizon, not the training loss, so the pass has to produce a (cause, bin)
     block for `survival.cif_logit_target` to reduce.

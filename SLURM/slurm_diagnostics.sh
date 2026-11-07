@@ -84,7 +84,7 @@ TRANSEHR2_DIR="${TRANSEHR2_DIR:-${PROJECT_ROOT}/TransEHR2}"
 TRANSEHR2_VENV="${TRANSEHR2_VENV:-${TRANSEHR2_DIR}/venv/TransEHR2}"
 DATA_DIR="${DATA_DIR:-${PROJECT_ROOT}/data}"
 DATASET_CONFIG="${DATASET_CONFIG:-TransEHR2/configs/datasets/RMT23345.yaml}"
-EXPERIMENT_CONFIG="${EXPERIMENT_CONFIG:-TransEHR2/configs/experiments/experiment1_baseline.yaml}"
+EXPERIMENT_CONFIG="${EXPERIMENT_CONFIG:-TransEHR2/configs/experiments/part1_transehr2.yaml}"
 FOLD="${FOLD:-fold0}"
 BATCH_SIZE="${BATCH_SIZE:-200}"
 # Enough to outrun the prefetch queue. With 16 workers and prefetch_factor 2 the loader

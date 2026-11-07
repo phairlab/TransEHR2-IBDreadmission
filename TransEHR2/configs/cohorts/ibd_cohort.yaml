@@ -1,0 +1,110 @@
+# IBD cohort eligibility, the CD/UC/IBDU classification and the readmission
+# label's exclusions, read by IBDdataprep's ibd_eligibility.py and
+# build_labels.py.
+
+# Every date comparison is between local calendar dates. Timestamps are stored
+# in UTC, and a date-only field was set to 23:59 (or 00:00) local before
+# conversion, so converting back recovers the date the raw table wrote.
+LOCAL_TIMEZONE: America/Edmonton
+
+# The Crohn's disease (CD) and ulcerative colitis (UC) code prefixes per
+# source, compared with dots removed and in upper case: ICD-10-CA for AMB and
+# DAD, ICD-9 for CLM (quoted so they stay text). Eligibility uses both groups,
+# classification tells them apart.
+IBD_CODES:
+  AMB: {CD: [K50], UC: [K51]}
+  DAD: {CD: [K50], UC: [K51]}
+  CLM: {CD: ["555"], UC: ["556"]}
+
+# ---------------------------------------------------------------------------
+# Eligibility (ibd_eligibility.py), swept over the normalized AMB, DAD and CLM
+# tables.
+#
+# A record qualifies when any of its diagnosis codes is in IBD_CODES. Each
+# date scores the largest POINTS among the sources qualifying on it, so
+# qualifying AMB and DAD records on one date score 1 together and qualifying
+# claims on one date score 0.5 together. A DAD stay qualifies on its
+# discharge date, where its diagnoses are coded.
+#
+# A claim date scores nothing when it falls on the arrival date of a
+# qualifying AMB visit or anywhere from admission to discharge (inclusive) of
+# a qualifying DAD stay: that encounter is already counted. A coinciding
+# record without a qualifying code does not cancel it.
+#
+# A patient reaches a threshold on the first date d where the dates e with
+# d - e <= WINDOW_DAYS days score at least that much in total.
+# EVIDENCE_THRESHOLD dates the first evidence of IBD, ELIGIBILITY_THRESHOLD
+# the training cohort's eligibility; both hold forever once reached.
+# ---------------------------------------------------------------------------
+ELIGIBILITY:
+  POINTS: {AMB: 1, DAD: 1, CLM: 0.5}
+  WINDOW_DAYS: 730
+  EVIDENCE_THRESHOLD: 1
+  ELIGIBILITY_THRESHOLD: 2
+
+# ---------------------------------------------------------------------------
+# CD / UC / IBDU classification (ibd_eligibility.py), per patient over their
+# whole record. It stratifies the analysis and has no part in eligibility.
+# Rezaie et al., Inflamm Bowel Dis 2012, Table 5 (0.4PC+aCCS+DaD):
+#
+#   SCORE = sum over sources of WEIGHTS * (UC-coded records - CD-coded records)
+#   SCORE < CD_THRESHOLD is CD, SCORE > UC_THRESHOLD is UC, otherwise IBDU.
+#
+# Every record counts, dated or not and whatever the eligibility rule made
+# of it; a record with both a CD and a UC code counts toward both.
+# ---------------------------------------------------------------------------
+CLASSIFICATION:
+  WEIGHTS: {AMB: 1.0, DAD: 1.0, CLM: 0.4}
+  CD_THRESHOLD: -2
+  UC_THRESHOLD: 2
+
+# ---------------------------------------------------------------------------
+# Readmission exclusions (build_labels.py). A DAD stay matching any rule is
+# struck from the readmission candidates: it does not count as a readmission,
+# and an episode whose next unplanned admission it is races on to whatever
+# comes after it. Rules are read off the stay's DX_CODES, DX_TYPES and DISP in
+# stays.csv.
+#
+# A rule matches a stay when one of its diagnoses
+#   - starts with one of `codes`,
+#   - starts with none of `except` (if given),
+#   - has a diagnosis type in `dx_types` (if given; M = most responsible), and
+#   - has its 6th character in `sixth_character` (if given),
+# or when its discharge disposition is one of `dispositions`. Dispositions are
+# compared zero-padded to two digits, so "7" and "07" are the same.
+#
+# The mental illness, palliative, MAID, chemotherapy and delivery rules follow
+# the CIHI readmission indicator as ibd-patient-cohort-definition implements
+# it (config/default.yaml, readmission.cihi.exclusions). Mental illness is
+# CIHI's MCC 17, which the extract does not carry; a chapter F most
+# responsible diagnosis approximates it.
+# ---------------------------------------------------------------------------
+READMISSION_EXCLUSIONS:
+  # ICD-10-CA chapter XX (V00-Y99) in any position, less the blocks naming a
+  # treatment as the cause: Y40-Y59 (drugs in therapeutic use) and Y83-Y84
+  # (procedures). Decided 2026-10-07.
+  external_cause:
+    codes: [V, W, X, Y]
+    except: [Y4, Y5, Y83, Y84]
+  mental_illness:
+    codes: [F]
+    dx_types: [M]
+  palliative:
+    codes: [Z515]
+    dx_types: [M]
+  chemotherapy:
+    codes: [Z511]
+    dx_types: [M, "1", C, W, X, Y]
+  # Obstetric codes whose 6th character is 1 or 2 (delivered), and Z37
+  # (outcome of delivery) in any position.
+  delivery:
+    codes: [O10, O11, O12, O13, O14, O15, O16, O21, O22, O23, O24, O25, O26,
+            O27, O28, O29, O30, O31, O32, O33, O34, O35, O36, O37, O40, O41,
+            O42, O43, O44, O45, O46, O48, O60, O61, O62, O63, O64, O65, O66,
+            O67, O68, O69, O70, O71, O72, O73, O74, O75, O85, O86, O87, O88,
+            O89, O90, O91, O92, O95, O98, O99]
+    sixth_character: ["1", "2"]
+  delivery_outcome:
+    codes: [Z37]
+  maid:
+    dispositions: ["73"]

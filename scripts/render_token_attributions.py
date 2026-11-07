@@ -27,7 +27,7 @@ of the cell the tokens come from), ``token_index``, ``token_id``, ``token``, ``s
 per non-padding token of each explained cell.
 
 **That file contains record text**, which is why it is a file and not stdout: the summary
-printed here is counts alone, in the house style of ``ibd_onset.py`` and ``episode_occupancy.py``.
+printed here is counts alone, in the house style of ``ibd_eligibility.py`` and ``episode_occupancy.py``.
 Treat the CSV as patient data.
 
 Cost

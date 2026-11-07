@@ -68,9 +68,6 @@ Thumbs.db
 
 .cache/
 
-# mimic4dataprep library
-mimic4dataprep/
-
 # Bash scripts in root directory
 /*.sh
 

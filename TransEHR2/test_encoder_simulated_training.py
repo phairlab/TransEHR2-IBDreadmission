@@ -169,7 +169,9 @@ def _build_classifier(transform=None):
     )
     return MixedClassifier(
         event_encoder=event_encoder, val_encoder=value_encoder, d_event_enc=D_MODEL,
-        d_val_enc=D_MODEL, d_statics=0, num_classes=1, aggr='mean',
+        d_val_enc=D_MODEL, d_statics=0, aggr='mean',
+        head=torch.nn.Sequential(torch.nn.Linear(2 * D_MODEL, 32), torch.nn.GELU(),
+                                 torch.nn.Linear(32, 1)),
     )
 
 

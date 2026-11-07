@@ -340,7 +340,6 @@ def setup(args: argparse.Namespace) -> Dict:
             d_event_enc=d_event_enc,
             d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
             d_statics=static_dim,
-            num_classes=grid.n_causes * head_bins,
             aggr=PREDICTOR_AGGREGATION_METHOD,
             use_lookup=use_lookup,
             head=DeepHitHead(

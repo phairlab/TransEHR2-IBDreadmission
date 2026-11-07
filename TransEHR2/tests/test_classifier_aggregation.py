@@ -51,11 +51,10 @@ def _build_model(aggr='max') -> MixedClassifier:
         d_event_enc=D_ENC,
         d_val_enc=0,
         d_statics=0,
-        num_classes=D_ENC,
+        # Read the aggregated embedding directly, not a learned projection of it.
+        head=torch.nn.Identity(),
         aggr=aggr,
     )
-    # Read the aggregated embedding directly, not a learned projection of it.
-    model.head = torch.nn.Identity()
     model.eval()
     return model
 

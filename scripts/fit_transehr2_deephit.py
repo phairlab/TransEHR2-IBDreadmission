@@ -5,8 +5,8 @@ One process, one GPU. Parallelism across folds is parallelism across
 memory-mapped read-only, so five shells or one SLURM array does the job
 that FSDP used to:
 
-    for f in 0 1 2 3 4; do
-        CUDA_VISIBLE_DEVICES=$f python scripts/fit_transehr2_deephit.py \\
+    for f in 1 2 3 4 5; do
+        CUDA_VISIBLE_DEVICES=$((f-1)) python scripts/fit_transehr2_deephit.py \\
             dataset.yaml experiment.yaml --folds fold$f &
     done; wait
 
@@ -477,7 +477,6 @@ def main():
             d_event_enc=d_event_enc,
             d_val_enc=DISCRIMINATOR_ENCODER_D_MODEL,
             d_statics=static_dim,
-            num_classes=grid.n_causes * head_bins,
             aggr=PREDICTOR_AGGREGATION_METHOD,
             use_lookup=use_lookup,
             head=DeepHitHead(

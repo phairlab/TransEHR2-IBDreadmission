@@ -31,7 +31,7 @@ A fold without both a validation and a test dump is skipped.
 
 Usage:
     python scripts/recalibrate_predictions.py <experiment_name> \\
-        [--model_dir ./models] [--experiment_config <yaml>]
+        [--model_dir ./models] --experiment_config <yaml>
 """
 
 import argparse
@@ -110,7 +110,7 @@ def main():
     parser.add_argument('--model_dir', type=str, default='./models',
                         help='Root directory containing the experiment')
     parser.add_argument(
-        '--experiment_config', type=str, default=None,
+        '--experiment_config', type=str, required=True,
         help='Experiment YAML, read for TIME_GRID_CUTS_DAYS and '
              'MODELLED_CAUSES, as evaluate_finetuned_predictions.py reads it.')
     args = parser.parse_args()

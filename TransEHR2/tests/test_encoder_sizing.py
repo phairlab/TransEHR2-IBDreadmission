@@ -179,8 +179,10 @@ def test_the_classifier_runs_a_forward_with_a_drug_feature(drug_root):
     model = MixedClassifier(
         event_encoder=event_encoder(n_event_types),
         val_encoder=value_encoder(n_features, feat_dim),
-        d_event_enc=16, d_val_enc=D_MODEL, d_statics=0, num_classes=2,
-        aggr='mean', use_lookup=True
+        d_event_enc=16, d_val_enc=D_MODEL, d_statics=0,
+        aggr='mean', use_lookup=True,
+        head=torch.nn.Sequential(torch.nn.Linear(16 + D_MODEL, 32), torch.nn.GELU(),
+                                 torch.nn.Linear(32, 2)),
     )
     model.eval()
 

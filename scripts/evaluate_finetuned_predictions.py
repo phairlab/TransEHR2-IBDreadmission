@@ -28,7 +28,7 @@ which is the same curve there.
 
 Usage:
     python scripts/evaluate_finetuned_predictions.py <experiment_name> \\
-        [--model_dir ./models] [--experiment_config <yaml>]
+        [--model_dir ./models] --experiment_config <yaml>
 """
 
 import argparse
@@ -174,12 +174,10 @@ def outcomes(data: Dict, grid: TimeGrid):
             event_times_days(data['time_to_event'], grid))
 
 
-def load_config(path: Optional[str]) -> Tuple[TimeGrid, Dict]:
-    """The grid and the experiment config, or the defaults without a path."""
-    cfg = {}
-    if path:
-        with open(path, 'r') as f_in:
-            cfg = yaml.safe_load(f_in)
+def load_config(path: str) -> Tuple[TimeGrid, Dict]:
+    """The grid and the experiment config, which must set TIME_GRID_CUTS_DAYS."""
+    with open(path, 'r') as f_in:
+        cfg = yaml.safe_load(f_in)
     grid = TimeGrid(cfg['TIME_GRID_CUTS_DAYS'],
                     cfg.get('MODELLED_CAUSES', list(DEFAULT_CAUSES)),
                     cfg.get('BRIER_INTEGRATION_DAYS',
@@ -399,12 +397,11 @@ def main():
     parser.add_argument('--model_dir', type=str, default='./models',
                         help='Root directory containing the experiment')
     parser.add_argument(
-        '--experiment_config', type=str, default=None,
+        '--experiment_config', type=str, required=True,
         help='Experiment YAML, read for TIME_GRID_CUTS_DAYS, '
              'MODELLED_CAUSES, BRIER_INTEGRATION_DAYS, EVAL_HORIZONS_DAYS '
-             'and the CR_DCAL_* keys. Without it the defaults are assumed, '
-             'and a mismatch with the dumped columns is an error rather than '
-             'a silent rescoring.')
+             'and the CR_DCAL_* keys. A mismatch with the dumped columns is '
+             'an error rather than a silent rescoring.')
     args = parser.parse_args()
 
     grid, cfg = load_config(args.experiment_config)

@@ -182,8 +182,10 @@ def build_classifier(dims, n_event_types):
     classifier = MixedClassifier(
         event_encoder=event_encoder(n_event_types),
         val_encoder=value_encoder(dims),
-        d_event_enc=16, d_val_enc=D_MODEL, d_statics=0, num_classes=2,
-        aggr='max', use_lookup=True
+        d_event_enc=16, d_val_enc=D_MODEL, d_statics=0,
+        aggr='max', use_lookup=True,
+        head=torch.nn.Sequential(torch.nn.Linear(16 + D_MODEL, 32), torch.nn.GELU(),
+                                 torch.nn.Linear(32, 2)),
     )
     classifier.eval()
     return classifier

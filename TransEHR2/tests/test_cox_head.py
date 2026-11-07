@@ -43,7 +43,7 @@ def cox_predictor(grid):
     return MixedClassifier(
         event_encoder=_event_encoder(), val_encoder=_value_encoder(),
         d_event_enc=D_EVENT, d_val_enc=D_MODEL, d_statics=0,
-        num_classes=grid.n_causes, aggr='mean',
+        aggr='mean',
         head=DeepHitHead(d_in=D_EVENT + D_MODEL, n_causes=grid.n_causes,
                          n_bins=1, d_shared=[16, 16], d_cause=[8, 8],
                          dropout=0.0))

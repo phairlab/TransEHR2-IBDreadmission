@@ -3,7 +3,7 @@
 The text features reach TransEHR2 as rows of a precomputed lookup table, so the encoder is not
 in the training graph and a backward pass stops at the stored vector. Reinstating the encoder to
 get token-level scores would mean carrying its weights and activations through every step of
-every epoch -- the arrangement the Llama-era model was restructured to escape.
+every epoch -- the arrangement the earlier decoder-based model was restructured to escape.
 
 It is not necessary. The chain rule splits at the lookup boundary:
 

@@ -224,8 +224,12 @@ def test_indicator_heads_read_the_encoder_and_train_it():
 def test_without_an_event_encoder_the_event_stream_is_ignored():
     torch.manual_seed(0)
     full = _build_classifier()
+    width = MixedClassifier.encoding_width(d_event_enc=0, d_val_enc=D_MODEL, d_statics=0)
     classifier = MixedClassifier(event_encoder=None, val_encoder=full.val_encoder, d_event_enc=0,
-                                 d_val_enc=D_MODEL, d_statics=0, num_classes=1, aggr='mean')
+                                 d_val_enc=D_MODEL, d_statics=0, aggr='mean',
+                                 head=torch.nn.Sequential(torch.nn.Linear(width, 32),
+                                                          torch.nn.GELU(),
+                                                          torch.nn.Linear(32, 1)))
     classifier.eval()
     batch, _ = _simulate_cohort()
     with torch.no_grad():
@@ -240,7 +244,7 @@ def test_an_event_width_without_an_event_encoder_is_refused():
     full = _build_classifier()
     try:
         MixedClassifier(event_encoder=None, val_encoder=full.val_encoder, d_event_enc=D_MODEL,
-                        d_val_enc=D_MODEL, d_statics=0, num_classes=1)
+                        d_val_enc=D_MODEL, d_statics=0, head=torch.nn.Identity())
     except ValueError:
         return
     raise AssertionError('a nonzero d_event_enc with no event encoder was accepted')

@@ -685,24 +685,3 @@ def finetune_trials(manifest: Dict[str, Any], arm: Optional[str] = None) -> List
         t for t in manifest['trials']
         if t['needs_finetune'] and (arm is None or t['arm'] == arm)
     ]
-
-
-def extra_trials(manifest: Dict[str, Any], arm: Optional[str] = None) -> List[Dict[str, Any]]:
-    """The one-off ablations attached to a sweep, as distinct from its grid cells.
-
-    These are reported and never selected on: each is a single named change from its arm's
-    centre, so it reads as a head-to-head rather than as a coordinate with an ordered set of
-    values to rank.
-
-    Args:
-        manifest: A loaded manifest.
-        arm: Restrict to one encoding arm, or None for every arm.
-
-    Returns:
-        The matching trials, in manifest order. Empty for a sweep with no EXTRA_TRIALS block,
-        including any manifest written before extras existed.
-    """
-    return [
-        t for t in manifest['trials']
-        if t.get('is_extra', False) and (arm is None or t['arm'] == arm)
-    ]

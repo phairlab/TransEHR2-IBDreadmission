@@ -270,8 +270,8 @@ def test_rope_under_batchnorm_is_refused():
 
 # --- the configs and the construction sites -----------------------------
 
-@pytest.mark.parametrize('name', ['experiment1_baseline', 'experiment2_text',
-                                  'experiment3_nohistory'])
+@pytest.mark.parametrize('name', ['part1_transehr2', 'part1_transehr2_csc',
+                                  'part1_transehr2_norank'])
 def test_every_config_declares_an_arm_and_four_float_bounds(name):
     """A bound written in unsigned scientific notation parses as a *string*
     under YAML 1.1 and reaches the ladder builder as one."""

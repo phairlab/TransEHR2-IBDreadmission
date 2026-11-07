@@ -27,14 +27,13 @@
 #   DRY_RUN=0     remove it, then run the pipeline
 #   CLEAN_ROOT=1  also remove data/root, the per-patient tree (default 1)
 #   FIRST_STEP=N  start at step N (default 0). Steps 0-2 are Stage A (R): normalize, prepare
-#                 each table, fold in the LAB variable properties. Steps 3-8 are the Python
-#                 half. Use 3 to keep the prepared tables, or 6 with CLEAN_ROOT=0 to keep the
-#                 per-patient root as well
-#   RAW_DIR=P     the raw extract (default data/ibd/RMT23345). Read-only: nothing here writes
-#                 to it, and PREPARED_DIR is a subdirectory of it rather than a copy.
-#   CALIBRATE=1   after extraction, measure what the outlier rules would remove (default 0).
-#                 Reports only. The filter itself is a cut table applied at load time, so
-#                 nothing here reads or writes one.
+#                 each table, fold in the LAB variable properties. Steps 3-9 are the Python
+#                 half. Use 3 to keep the prepared tables, 6 with CLEAN_ROOT=0 to keep the
+#                 per-patient root as well, or 8 with CLEAN_ROOT=0 to re-run the outlier
+#                 calibration and the cut application over arrays that are already extracted
+#   RAW_DIR=P     the raw extract (default data/ibd/RMT23345, a symlink to the RDSS copy).
+#                 Read-only: nothing here writes to it, and PREPARED_DIR sits beside it rather
+#                 than under it, so the prepared tables stay on local disk.
 #   N_WORKERS=N   extract_data.py worker processes (default 8, matching --cpus-per-task)
 #
 # WHAT THIS INVALIDATES
@@ -56,7 +55,6 @@ set -uo pipefail
 DRY_RUN="${DRY_RUN:-1}"
 CLEAN_ROOT="${CLEAN_ROOT:-1}"
 FIRST_STEP="${FIRST_STEP:-0}"
-CALIBRATE="${CALIBRATE:-0}"
 N_WORKERS="${N_WORKERS:-8}"
 
 # Same layout on the cluster as locally, which is what lets IBDdataprep's paths.py resolve
@@ -68,11 +66,14 @@ PROJECT_ROOT="${PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 IBDDATAPREP_DIR="${IBDDATAPREP_DIR:-${PROJECT_ROOT}/IBDdataprep}"
 TRANSEHR2_DIR="${TRANSEHR2_DIR:-${PROJECT_ROOT}/TransEHR2}"
 DATA_DIR="${DATA_DIR:-${PROJECT_ROOT}/data}"
-# The raw extract, read and never written. Nothing in this pipeline opens it for writing, and
-# the prepared tables go in a subdirectory of it rather than over it.
+# The raw extract, read and never written. It is a symlink to the RDSS copy, so the prepared
+# tables go beside it in data/ibd rather than under it: that keeps them on local disk, and it
+# is where IBDdataprep/slurm_prepare_RMT23345.sh writes when one table is re-prepared on its
+# own, which is only the same table if both scripts name the same directory.
 RAW_DIR="${RAW_DIR:-${DATA_DIR}/ibd/RMT23345}"
-PREPARED_DIR="${PREPARED_DIR:-${RAW_DIR}/RMT23345_prepared}"
+PREPARED_DIR="${PREPARED_DIR:-${DATA_DIR}/ibd/RMT23345_prepared}"
 DATASET_CONFIG="${DATASET_CONFIG:-${TRANSEHR2_DIR}/TransEHR2/configs/datasets/RMT23345.yaml}"
+COHORT_CONFIG="${COHORT_CONFIG:-${TRANSEHR2_DIR}/TransEHR2/configs/cohorts/ibd_cohort.yaml}"
 VARIABLE_PROPERTIES="${VARIABLE_PROPERTIES:-${DATA_DIR}/ibd/variable_properties.yaml}"
 RESOURCES_DIR="${RESOURCES_DIR:-${DATA_DIR}/resources}"
 
@@ -93,6 +94,10 @@ NORMALIZE_TABLES="${NORMALIZE_TABLES:-AMB CLM DAD DI LAB PIN REG}"
 # downstream reads. Add it back here if that changes. SCU is absent for the opposite reason --
 # prepare_RMT23345_DAD.R writes RMT23345_SCU_prepared.csv beside its own output.
 PREPARE_TABLES="${PREPARE_TABLES:-AMB CLM DAD LAB PIN REG}"
+# Normalized tables kept after preparation rather than reclaimed: step 6's ibd_eligibility.py
+# and Part 1's lace.py read their codes and dates, which the prepared tables have replaced with
+# descriptions. Keeping them is what lets a 'labels' run re-date eligibility.
+KEEP_NORMALIZED="AMB CLM DAD"
 
 # Two dependency sets: the R-side successors need pandas and pyyaml, extraction needs torch.
 # Set both to the same path if one environment carries everything.
@@ -105,7 +110,7 @@ TRANSEHR2_VENV="${TRANSEHR2_VENV:-${TRANSEHR2_DIR}/venv/TransEHR2}"
 echo "Job started at $(date)"
 echo "Running on node: $(hostname)"
 echo "Job ID: ${SLURM_JOB_ID:-<none>}"
-echo "DRY_RUN=${DRY_RUN}  CLEAN_ROOT=${CLEAN_ROOT}  FIRST_STEP=${FIRST_STEP}  CALIBRATE=${CALIBRATE}"
+echo "DRY_RUN=${DRY_RUN}  CLEAN_ROOT=${CLEAN_ROOT}  FIRST_STEP=${FIRST_STEP}"
 
 cd "${SLURM_SUBMIT_DIR:-$(pwd)}" || exit 1
 mkdir -p log
@@ -130,10 +135,11 @@ if [ "${FIRST_STEP}" -gt 1 ] && [ ! -d "${PREPARED_DIR}" ]; then
     echo "       ${PREPARED_DIR} to read. Start from step 0." >&2
     exit 1
 fi
-# PREPARED_DIR is an rm -rf target below when the R stage runs. A mis-set RAW_DIR would
-# otherwise aim it somewhere expensive.
+# PREPARED_DIR is an rm -rf target below when the R stage runs. A mis-set one would otherwise
+# aim it somewhere expensive -- data/ibd among them, since that is its parent now and holds
+# the raw symlink.
 case "${PREPARED_DIR}" in
-    "${RAW_DIR}"|"${DATA_DIR}"|"${PROJECT_ROOT}"|/|"")
+    "${RAW_DIR}"|"${DATA_DIR}/ibd"|"${DATA_DIR}"|"${PROJECT_ROOT}"|/|"")
         echo "ERROR: PREPARED_DIR is ${PREPARED_DIR}, which is not a directory this script" >&2
         echo "       may remove. It must be a subdirectory of its own." >&2
         exit 1 ;;
@@ -290,10 +296,15 @@ echo ""
 echo "  Normalization intermediates whose prepared counterpart already exists. These are"
 echo "  ${PREPARED_DIR}/*_normalized.csv, superseded by the *_prepared.csv derived from them,"
 echo "  and reclaiming them is pure disk saving. One with no prepared counterpart is left"
-echo "  alone: it is the input a preparation step has not consumed yet."
+echo "  alone: it is the input a preparation step has not consumed yet. So are ${KEEP_NORMALIZED},"
+echo "  whose codes step 6 reads."
 STALE_NORMALIZED=""
 for NORMALIZED in "${PREPARED_DIR}"/RMT23345_*_normalized.csv; do
     [ -f "${NORMALIZED}" ] || continue
+    TABLE="$(basename "${NORMALIZED}" _normalized.csv)"
+    case " ${KEEP_NORMALIZED} " in
+        *" ${TABLE#RMT23345_} "*) continue ;;
+    esac
     if [ -f "${NORMALIZED%_normalized.csv}_prepared.csv" ]; then
         report_target "${NORMALIZED}" && N_FOUND=$((N_FOUND + 1))
         STALE_NORMALIZED="${STALE_NORMALIZED} ${NORMALIZED}"
@@ -498,26 +509,26 @@ run_step 5 "Validating the root" \
         --root "${DATA_DIR}/root" \
         --log "${SLURM_SUBMIT_DIR:-$(pwd)}/log/validate_root_${SLURM_JOB_ID:-$$}.log"
 
-# ibd_onset.py and external_cause.py each read the whole root rather than
-# stays.csv alone, so this step is no longer the cheap one it was. They run
-# here rather than in step 4 because both predicates -- which codes name IBD,
-# and which name an external cause -- are label policy: changing either must
-# cost a 'labels' run, not a root rebuild.
+# Everything here is label policy, so changing it costs a 'labels' run, not a
+# root rebuild: which patients are eligible and from when (ibd_eligibility.py,
+# swept from the normalized AMB, CLM and DAD tables kept above), registry
+# coverage (registry_coverage.py, from the prepared REG table; build_labels
+# censors each episode where its patient's coverage ends), and the readmission
+# exclusions build_labels applies to the codes in stays.csv. The rules are in
+# COHORT_CONFIG.
 run_step 6 "Building labels and partitioning into folds" \
-    bash -c "python -m IBDdataprep.ibd_onset \
-                 --root '${DATA_DIR}/root' \
-                 --output '${DATA_DIR}/ibd_onset.csv' \
-                 --resources '${RESOURCES_DIR}' \
-                 --n-workers '${N_WORKERS}' \
-             && python -m IBDdataprep.external_cause \
-                 --root '${DATA_DIR}/root' \
-                 --output '${DATA_DIR}/external_cause.csv' \
-                 --resources '${RESOURCES_DIR}' \
-                 --n-workers '${N_WORKERS}' \
+    bash -c "python -m IBDdataprep.ibd_eligibility \
+                 --normalized '${PREPARED_DIR}' \
+                 --config '${COHORT_CONFIG}' \
+                 --output '${DATA_DIR}/ibd_eligibility.csv' \
+             && python -m IBDdataprep.registry_coverage \
+                 --reg '${PREPARED_DIR}/RMT23345_REG_prepared.csv' \
+                 --output '${DATA_DIR}/registry_coverage.csv' \
              && python -m IBDdataprep.build_labels \
                  --root '${DATA_DIR}/root' --labels '${DATA_DIR}/labels.csv' \
-                 --ibd-onset '${DATA_DIR}/ibd_onset.csv' \
-                 --external-cause '${DATA_DIR}/external_cause.csv' \
+                 --eligibility '${DATA_DIR}/ibd_eligibility.csv' \
+                 --config '${COHORT_CONFIG}' \
+                 --registry-coverage '${DATA_DIR}/registry_coverage.csv' \
              && python -m IBDdataprep.split \
                  --labels '${DATA_DIR}/labels.csv' --output '${DATA_DIR}'"
 
@@ -532,14 +543,33 @@ run_step 7 "Extracting the cohort into arrays" \
         --data_dir "${DATA_DIR}" \
         --n_workers "${N_WORKERS}"
 
-if [ "${CALIBRATE}" -ne 0 ]; then
-    run_step 8 "Measuring what the outlier rules would remove" \
-        python scripts/calibrate_outlier_filter.py "${DATA_DIR}/extracted" \
-            --report "${SLURM_SUBMIT_DIR:-$(pwd)}/log/outlier_calibration_${SLURM_JOB_ID:-$$}.txt"
-else
-    echo ""
-    echo "Step 8: outlier calibration -- SKIPPED (CALIBRATE=0)"
-fi
+# The rule and its threshold are read from the dataset config rather than
+# defaulted here: both change what the model is trained on, so they belong in
+# a versioned file. No fallback -- a config without them should stop the run
+# rather than quietly pick a threshold of its own.
+read -r CUT_RULE CUT_U < <(python -c "
+import sys, yaml
+config = yaml.safe_load(open(sys.argv[1]))
+print(config['NUMERIC_CUT_RULE'], config['NUMERIC_CUT_U'])
+" "${DATASET_CONFIG}") || {
+    echo "ERROR: ${DATASET_CONFIG} has no NUMERIC_CUT_RULE/NUMERIC_CUT_U." >&2
+    exit 1
+}
+
+run_step 8 "Measuring the outlier rules and emitting the ${CUT_RULE} cuts" \
+    python scripts/calibrate_outlier_filter.py "${DATA_DIR}/extracted" \
+        --report "${SLURM_SUBMIT_DIR:-$(pwd)}/log/outlier_calibration_${SLURM_JOB_ID:-$$}.txt" \
+        --rule "${CUT_RULE}" --u "${CUT_U}" \
+        --emit_cuts "${DATA_DIR}/numeric_cuts.csv"
+
+# Step 7 wrote each fold's statistics before any table existed -- the table is
+# calibrated from the arrays it produced. This is the second pass, and it is
+# what makes the loader clip: the cuts are stored beside the statistics they
+# were measured under. Reads extracted/ memory-mapped and rewrites only the
+# per-fold statistics files.
+run_step 9 "Re-measuring the fold statistics under the cuts" \
+    python scripts/apply_numeric_cuts.py "${DATA_DIR}" \
+        --cuts "${DATA_DIR}/numeric_cuts.csv"
 
 PURGE_DECISION="purge"
 

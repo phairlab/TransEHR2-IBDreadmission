@@ -172,9 +172,10 @@ echo "########## 6: the real pretraining step, phase by phase ##########"
 # measured without a loader. This is the step itself, and it is the only thing
 # that can confirm the share the rest imply.
 #
-# Run at two worker counts because run_experiment.py defaults --num_workers to
-# 0, and section 2 puts 0 workers at 2.7x the cost of 4. If the pretraining jobs
-# have been taking that default, the cheapest available change is a flag.
+# Run at two worker counts because fit_transehr2_deephit.py defaults
+# --num_workers to 0, and section 2 puts 0 workers at 2.7x the cost of 4. If the
+# pretraining jobs have been taking that default, the cheapest available change
+# is a flag.
 #
 # The config is generated, not edited: PRETRAIN_TOTAL_EPOCH and
 # FINETUNE_TOTAL_EPOCH come down to 1, and MODEL_DIR and EXPERIMENT_NAME are
@@ -213,7 +214,7 @@ PYEOF
         echo
         echo "---------- pretraining, ${workers} dataloader worker(s) ----------"
         TRANSEHR2_PHASE_TIMING="${PHASE_EVERY}" \
-        python scripts/run_experiment.py \
+        python scripts/fit_transehr2_deephit.py \
             "${DATASET_CONFIG}" \
             "${PHASE_DIR}/experiment.yaml" \
             --folds "${FOLD}" \

@@ -48,7 +48,7 @@ def write_cohort(data_dir: Path, rng) -> None:
         'STAY_INDEX': 0,
         'TIME_TO_EVENT': np.round(times_days * 1440).astype(int),
         'EVENT_TYPE': rng.choice(4, N_LABELS, p=[0.4, 0.35, 0.15, 0.1]),
-        'POST_IBD_ONSET': 1,
+        'IBD_ELIGIBILITY': 2,
     })
     labels.to_csv(data_dir / 'labels.csv', index=False)
 

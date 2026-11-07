@@ -25,7 +25,19 @@ FOLDS: [1, 2, 3, 4, 5]
 
 # ---- Shared with part1_transehr2 and part1_tabdh -----------------------------
 
-# The recut2 grid; the last cut is the horizon. See experiment1_baseline.yaml.
+# The right edges of the discrete time bins, in days. Every cut but the
+# last was chosen by hand (user, 2026-10-30, the "recut2" grid) and is the
+# only grid in use since 2026-11-07.
+#
+# The last cut is the largest observed readmission time over the drawn
+# episodes, so it is the horizon rather than a choice: an event at or
+# beyond it is an episode observed through the whole grid without one,
+# which ``discretize()`` enforces by taking ``t < horizon`` strictly.
+# BRIER_INTEGRATION_DAYS must not exceed it. 6454.83 was measured on the
+# cohort before the 2026-11-06 eligibility and label rebuild; re-measure
+# it with ``scripts/time_grid_cuts.py`` after split.py and set it in every
+# experiment config.
+#
 # The CSC is fitted in continuous time; the grid only shapes its dumps and
 # its evaluation.
 TIME_GRID_CUTS_DAYS: [8, 31, 91, 181, 366, 913, 1826, 6454.83]

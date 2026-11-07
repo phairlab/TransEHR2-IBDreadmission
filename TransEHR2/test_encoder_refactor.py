@@ -308,19 +308,6 @@ def test_value_encoder_matches_the_encoder_layer_written_longhand():
     assert delta < 1e-5, f'value encoder is not the EncoderLayer block (max delta {delta:.3e})'
 
 
-def test_value_encoder_blocks_are_the_class_fsdp_wraps():
-    """The block class name has to stay one FSDP already knows.
-
-    ``fsdp_transformer_layer_cls_to_wrap`` is a comma-separated list of class *names*. A block
-    class not on that list is silently left unwrapped, its parameters fall into the root unit, and
-    the symptom is a memory surprise or an opaque flat-param error that names no config string.
-    """
-    encoder = _value_encoder(n_blocks=3)
-    assert len(encoder.layer_stack) == 3
-    assert all(isinstance(block, EncoderLayer) for block in encoder.layer_stack)
-    assert EncoderLayer.__name__ in 'EncoderLayer,TransformerEncoderLayer'.split(',')
-
-
 def test_value_encoder_attention_width_is_d_model_over_n_heads():
     """``EncoderLayer`` takes d_k and d_v explicitly; getting them wrong halves the attention."""
     encoder = _value_encoder(n_blocks=1)

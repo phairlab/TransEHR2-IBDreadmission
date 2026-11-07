@@ -38,7 +38,6 @@ TOKENIZER_PAD_TOKEN = '[PAD]'
 #
 # LLM_NAME = 'Alibaba-NLP/gte-base-en-v1.5'  # needs trust_remote_code; see above
 # LLM_NAME = 'BAAI/bge-m3'  # what ContrastiveBMMB was built to replace
-# LLM_NAME = 'meta-llama/Llama-3.1-70B'  # the decoder bge-m3 replaced, masked-mean pooled
 #
 # These are history, not alternatives selected by branch: the grad-benchmark work merged, so
 # what follows is simply what this repository runs.
@@ -78,6 +77,5 @@ MAX_TOKEN_LENGTH = 2048
 
 # Pooling used to reduce a token sequence to one embedding. 'cls' takes position 0, which is
 # what bge-m3 was contrastively trained to use; 'mean' is the masked mean over non-padding
-# tokens, which is what a decoder such as Llama needs because its position 0 is only a BOS
-# token.
+# tokens, which is what a decoder needs because its position 0 is only a BOS token.
 TEXT_POOLING = 'cls'

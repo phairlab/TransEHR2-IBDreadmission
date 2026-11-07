@@ -18,8 +18,8 @@ in the interest of protecting patient privacy, cannot be publicly
 distributed. Several of the supporting reference files — code-set
 dictionaries, drug vocabularies, feature definitions — are used under
 license and cannot be redistributed here either. [`manifest.csv`](manifest.csv)
-lists every file the pipeline expects, with its checksum and where it came
-from; you will need to obtain the licensed ones yourself.
+lists the shared files the pipeline verifies, with checksum and source. The
+licensed resources, such as ClinVec, are not listed; obtain them yourself.
 
 ## Installation
 
@@ -42,13 +42,11 @@ Run it from this repository's root with the IBDdataprep checkout beside it
 mode, because text attribution writes masked text superfeatures with its
 `superfeature` module.
 
-`requirements.txt` does not install NVIDIA's `transformer-engine`. If you
-want fp8 precision, build and install it before the other requirements.
-
-Text features require authorization to use Meta's Llama model. TransEHR2
-obtains it through HuggingFace; the exact version is set by `LLM_NAME` in
-[`TransEHR2/constants.py`](TransEHR2/constants.py). Put your HuggingFace
-token in a `.env` file at the repository root as `HF_READ_TOKEN`.
+Text is embedded by ContrastiveBMMB's A3 encoder, a contrastively
+fine-tuned BioClinical ModernBERT, loaded from a local checkpoint: `LLM_NAME`
+in [`TransEHR2/constants.py`](TransEHR2/constants.py) is the first existing
+path in `CONTRASTIVEBMMB_CANDIDATES`. Add your copy there. `TEXT_POOLING`
+(`cls`) must match the pooling the checkpoint was trained with.
 
 ## Data
 
@@ -62,7 +60,7 @@ bash scripts/setup_data.sh          # or: bash scripts/setup_data.sh /path/to/da
 
 Set `SHARED_DATA_ROOT` in your shell profile to avoid passing the path each
 time. Each file is verified against its checksum; the script is safe to
-re-run. To register a file you have added or changed:
+re-run. To refresh an existing entry after its file changes:
 
 ```shell
 bash scripts/update_manifest.sh <path/relative/to/data/root> <source> <source_type>
@@ -83,10 +81,15 @@ with its own environment. It writes `data/root/{PATID}/` — one
 `timeseries.csv`, `stays.csv` and `drugs.csv` per patient — then a
 cohort-wide `data/labels.csv` and the cross-validation folds in
 `data/fold{i}/`. See that repository's README for the commands.
+Eligibility, the CD/UC/IBDU classification and the readmission exclusions are
+[`TransEHR2/configs/cohorts/ibd_cohort.yaml`](TransEHR2/configs/cohorts/ibd_cohort.yaml),
+which IBDdataprep reads.
 
-The row order of `labels.csv` is the study's canonical episode order.
-Everything downstream indexes into it, so the folds, the extracted arrays
-and any saved predictions all address the same rows.
+`labels.csv` holds one row per stay and its row order is canonical.
+`split.py` draws one episode per patient and names them, as `labels.csv`
+rows, in `extracted_rows.npy`. The extracted arrays hold those episodes, the
+folds are positions within them, and every prediction dump carries the
+`labels.csv` row as `idx`.
 
 ### 2. Extract to arrays
 
@@ -94,13 +97,27 @@ and any saved predictions all address the same rows.
 python scripts/extract_data.py TransEHR2/configs/datasets/RMT23345.yaml
 ```
 
-Reads `data/root/` and `data/labels.csv` and writes `data/extracted/` — one
+Reads `data/root/`, `data/labels.csv`, `data/extracted_rows.npy` and each
+fold's training rows, and writes `data/extracted/` — one
 cohort-wide set of memory-mapped `.npy` arrays, plus one set of
 standardization statistics per fold, computed over that fold's training rows
 alone. Extraction runs **once for the whole cohort**, not once per fold: a
 fold is a set of row indices into these arrays.
 
 `data/extracted/` is cleared and rewritten on every run.
+
+Numeric outliers are then cut by a rule measured on the extraction. The rule
+and its threshold are `NUMERIC_CUT_RULE` and `NUMERIC_CUT_U` in the dataset
+config; pass them explicitly, since the script's own default differs:
+
+```shell
+python scripts/calibrate_outlier_filter.py <data>/extracted \
+    --rule standardized --u 50 --emit_cuts <data>/numeric_cuts.csv
+python scripts/apply_numeric_cuts.py <data> --cuts <data>/numeric_cuts.csv
+```
+
+The cut table lives outside `extracted/`; without the second step the loader
+trains on uncut values, so re-run it after every extraction.
 
 ### 3. Build the lookup tables
 
@@ -113,7 +130,8 @@ index into a table built once for the whole study, which is what makes the
 text feasible: a few million unique strings are embedded once instead of
 once per fold per timestep. `embed.py` writes `data/lookup_tables/` —
 
-- `text_embeddings.npy`, the LLM's mean-pooled output per unique string;
+- `text_embeddings.npy`, the encoder's CLS-pooled output per unique string
+  (`TEXT_POOLING`), unwhitened;
 - `text_tokens.npy`, the token ids behind them, kept for token-level
   attribution;
 - `drug_embeddings.npy`, the ClinVec ATC vectors plus an all-zero row that
@@ -123,22 +141,28 @@ once per fold per timestep. `embed.py` writes `data/lookup_tables/` —
 builds only the text pair. The tables are deliberately **not** in
 `data/extracted/`, so re-extracting does not delete an artifact that took
 GPU-hours to produce. Re-extracting does invalidate the text pair, though —
-it reassigns the string indices — and the loader refuses a table that no
-longer matches, so rebuild it after any re-extraction.
+it reassigns the string indices. The loader refuses a text table whose row
+count no longer matches the extraction, and checks every table against the
+checksum `embed.py` records in `manifest.csv`. Nothing detects a change of
+encoder: rebuild the text pair after any re-extraction, and after any change
+to `LLM_NAME`, `TEXT_POOLING` or `MAX_TOKEN_LENGTH`.
 
 ## Running an experiment
 
 ```shell
 python scripts/fit_transehr2_deephit.py \
     TransEHR2/configs/datasets/RMT23345.yaml \
-    TransEHR2/configs/experiments/experiment1_baseline.yaml
+    TransEHR2/configs/experiments/part1_transehr2.yaml
 ```
 
 An experiment is pretraining, finetuning, and evaluation on a held-out test
-set, repeated per fold.
+set, repeated per fold. Every run is seeded: a config without
+`PRETRAIN_SEED` and `FINETUNE_SEED` is refused.
 
 Parameters live in `TransEHR2/configs/`: one file per dataset under
-`datasets/`, one per experiment under `experiments/`. **The paths in the
+`datasets/`, one per experiment under `experiments/` (tuning specs and
+trials under `experiments/tuning/`), the cohort definition under `cohorts/`
+and the Part 1 comparisons under `reports/`. **The paths in the
 shipped configs are absolute and point at the original author's machine** —
 edit `DATA_DIR`, `VARIABLE_PROPERTIES_PATH`, `CLINVEC_PATH` and `MODEL_DIR`
 before your first run.
@@ -150,13 +174,16 @@ several is to give each one its own fold, which share nothing but the
 memory-mapped arrays.
 
 ```shell
-for f in 0 1 2 3 4; do
-    CUDA_VISIBLE_DEVICES=$f python scripts/fit_transehr2_deephit.py \
+for f in 1 2 3 4 5; do
+    CUDA_VISIBLE_DEVICES=$((f-1)) python scripts/fit_transehr2_deephit.py \
         TransEHR2/configs/datasets/RMT23345.yaml \
-        TransEHR2/configs/experiments/experiment1_baseline.yaml \
+        TransEHR2/configs/experiments/part1_transehr2.yaml \
         --folds fold$f &
 done; wait
 ```
+
+`fold0` is the tuning fold. Every script leaves it out unless `--folds`
+names it.
 
 `--device` picks the card directly when `CUDA_VISIBLE_DEVICES` is not how
 the scheduler hands them out.
@@ -182,6 +209,12 @@ two-cause arm costs a config line rather than a code change.
 The grid is `TIME_GRID_CUTS_DAYS` in the experiment config, which every
 config must set; there is no default. The last cut is the horizon; an event
 past it is an episode observed through the whole grid without one.
+`scripts/time_grid_cuts.py <data>` prints the horizon to set as the last
+cut, and `scripts/measure_ladder_bounds.py <data>` the `*_LADDER_P_MIN/MAX`
+keys.
+
+`SURVIVAL_HEAD: cox` replaces the DeepHit head with a cause-specific Cox
+head on the same encoder.
 
 The MIMIC fork's three tasks are gone. In-hospital mortality does not exist
 in data that follows patients after discharge, and length of stay and
@@ -196,16 +229,20 @@ not its scale, and no reweighting fixes it. With the switch off the event
 stream still reaches the classifier — the event encoder simply learns during
 finetuning rather than being handed pretrained weights.
 
+`USE_EVENT_ENCODER: False` drops the event branch altogether, and cannot be
+combined with `USE_THP`. With one event type every token is identical, so
+the Part 1 configs set it.
+
 ## Scoring a trained model
 
 ```shell
 python scripts/dump_transehr2_deephit_predictions.py \
     TransEHR2/configs/datasets/RMT23345.yaml \
-    TransEHR2/configs/experiments/experiment1_baseline.yaml \
-    experiment1_baseline --model_dir ./models
-python scripts/evaluate_finetuned_predictions.py experiment1_baseline \
+    TransEHR2/configs/experiments/part1_transehr2.yaml \
+    part1_transehr2 --model_dir ./models
+python scripts/evaluate_finetuned_predictions.py part1_transehr2 \
     --model_dir ./models \
-    --experiment_config TransEHR2/configs/experiments/experiment1_baseline.yaml
+    --experiment_config TransEHR2/configs/experiments/part1_transehr2.yaml
 ```
 
 The first writes each episode's cumulative incidence at every cut, per
@@ -227,7 +264,10 @@ At each of `EVAL_HORIZONS_DAYS` it also reports Lee et al.'s weighted
 concordance of `F_k(tau)` (`<Cause>_Cindex_Lee_at_<tau>`, with censoring
 weights fitted on the fold's train dump), and the Brier score integrated to
 `tau` with its Aalen-Johansen reference and IPA (`<Cause>_IBS_to_<tau>`,
-`<Cause>_IBS_Null_to_<tau>`, `<Cause>_IPA_to_<tau>`).
+`<Cause>_IBS_Null_to_<tau>`, `<Cause>_IPA_to_<tau>`). The error of the
+estimated event time, where the incidence reaches half its value at the
+horizon, is `<Cause>_Overestimation_MAE`/`_N` and
+`<Cause>_Underestimation_MAE`/`_N`.
 
 The cause-specific Cox baseline leaves its parameters rather than its
 curves: per fold, `competing_risks_{split}_csc_lp.csv` and
@@ -240,9 +280,9 @@ D-calibration.
 Recalibration is an optional step between the two:
 
 ```shell
-python scripts/recalibrate_predictions.py experiment1_baseline \
+python scripts/recalibrate_predictions.py part1_transehr2 \
     --model_dir ./models \
-    --experiment_config TransEHR2/configs/experiments/experiment1_baseline.yaml
+    --experiment_config TransEHR2/configs/experiments/part1_transehr2.yaml
 ```
 
 It fits AJ-k recalibration on each fold's validation predictions, applies it
@@ -260,6 +300,37 @@ treats `test_recal_aj` as one more split, through the same routines, so
 key. A recalibrated dump is made from the val and test dumps at the time it
 was written; after a re-dump, run the recalibration again.
 
+## Part 1 baselines and comparisons
+
+The `part1_*` experiment configs define the study's comparison. The
+baselines are fitted by `scripts/fit_baseline_deephit.py` (a tabular
+DeepHit; `--lr_check` for its learning-rate check) and
+`Rscript scripts/fit_baseline_csc.R --config <part1_csc.yaml>` (the
+cause-specific Cox model), on the LACE and Charlson features IBDdataprep's
+`lace.py` writes. `PRETRAINED_FROM` lets a TransEHR2 experiment reuse
+another's pretrained encoder. Each model has its dump script
+(`dump_baseline_deephit_predictions.py`, `dump_baseline_csc_predictions.py`,
+`dump_transehr2_csc_predictions.py`), scored as above.
+`scripts/compare_models.py --out_dir <dir>` runs the corrected t-tests and
+BH families listed in `configs/reports/part1_comparisons.yaml`;
+`marginal_reference.py`, `cr_dcal_curves.py` and `csc_dcal_at_cuts.py`
+supply the reference scores and calibration curves beside them.
+
+## Tuning
+
+`scripts/generate_tuning_configs.py <spec>` expands a spec under
+`configs/experiments/tuning/` into one config per trial and a manifest;
+`report_tuning_results.py` ranks the results and
+`select_tuned_cell.py <manifest> --arm <arm> --output <config>` writes the
+winner. All tuning runs on `fold0`.
+
+## Explaining a prediction
+
+`TransEHR2/tsr.py` ranks a prediction's input cells by temporal saliency
+rescaling, and `scripts/render_token_attributions.py` writes per-token scores
+for the highest-ranked text cells. Its CSV holds record text: treat it as
+patient data.
+
 ## Tests
 
 ```shell
@@ -268,7 +339,8 @@ python -m pytest TransEHR2/tests
 
 The suite needs no patient data. Most of it runs against a small cohort the
 tests write themselves; the end-to-end tests run against IBDdataprep's
-synthetic fixture and skip if it has not been generated.
+synthetic fixture and skip if it has not been generated; build it with
+`python -m IBDdataprep.make_fixture` in IBDdataprep.
 
 The R code here runs under this repository's renv (`renv.lock`;
 `renv::restore()` from the repository root). The CSC reconstruction is

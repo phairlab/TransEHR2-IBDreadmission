@@ -91,9 +91,7 @@ costs: switching the context to ``fork`` fixes the mapping and reopens the
 fork-after-CUDA-init hang, which is the wrong trade; and building one
 dataset per partition instead of one per cohort bounds the damage to a
 partition's rows without removing it, at the cost of three memmap sets
-over the same files. Nothing in the distributed path depends on this
-choice -- ``TextBalancedDistributedSampler`` reads only ``len(dataset)``,
-so per-rank sample counts are unchanged.
+over the same files.
 """
 
 import numpy as np

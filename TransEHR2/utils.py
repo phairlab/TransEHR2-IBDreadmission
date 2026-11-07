@@ -7,9 +7,8 @@ import yaml
 
 from datetime import timedelta
 from torch import Tensor
-from typing import Any, Dict, List, Optional, OrderedDict, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-from TransEHR2.data.datasets import MixedDataset
 from TransEHR2.data.custom_types import MixedTensorDataset
 
 
@@ -382,43 +381,6 @@ def move_batch_to_device(batch: MixedTensorDataset, device: torch.device) -> Mix
     # target device and only the family's records -- and the categorical
     # and ordinal index codes -- cross the boundary.
     return densify_one_hot(densify_lookup_slots(_move_to_device(batch)))
-
-
-def ensure_float32(data: MixedDataset) -> MixedDataset:
-    """Converts float64-valued tensors in `data` to float32.
-
-    MPS doesn't support float64 tensors, so this function is used to ensure that all tensors in the dataset are float32.
-
-    Args:
-        data (MixedDataset): The dataset to be converted.
-    
-    Returns:
-        MixedDataset: The converted dataset.
-    """
-
-    for i, tnsr in enumerate(data):
-        if tnsr.dtype == torch.float64:
-            data[i] = tnsr.float()
-    return data
-
-
-def get_non_pad_mask(seq: Tensor, padding_value: int = 0) -> Tensor:
-    """Get the mask for non-padding items in the input sequence
-    
-    Given a predetermined maximum sequence length, this function returns a mask tensor that indicates which tokens
-    in the sequence are *not* padding tokens.
-
-    Args:
-        seq (Tensor): A `Tensor` of shape [batch size, sequence length] containing the input sequence.
-        padding_value (int, optional): The value of the padding tokens in `seq`. Defaults to 0.
-    
-    Returns:
-        Tensor: A `Tensor` of shape [batch size, sequence length, 1] containing the mask for non-padding tokens.
-    """
-
-    assert seq.dim() == 2
-    non_padding_mask = seq.ne(padding_value).type(torch.float32).unsqueeze(-1)  # ne: not equal 
-    return non_padding_mask
 
 
 def pool_lookup_slots(
@@ -1102,32 +1064,6 @@ def sample_non_event_time_diff(time_diff_seq: Tensor, n: int, device: str) -> Te
     return sampled_time_diffs
 
 
-def get_param_shapes(model: torch.nn.Module) -> OrderedDict[str, Tuple[int]]:
-    """Get the expected shapes of all parameters and buffers in a model.
-    
-    This should be called BEFORE wrapping the model with FSDP, as FSDP will
-    flatten parameters and make their shapes unreliable. The returned dictionary
-    can then be used to reshape flattened parameters from FSDP state dicts.
-    
-    Args:
-        model: An unwrapped model (ELECTRA or MixedClassifier)
-    
-    Returns:
-        OrderedDict mapping parameter names to their shapes as tuples
-    """
-    param_shapes = OrderedDict()
-    
-    # Get all parameters
-    for name, param in model.named_parameters():
-        param_shapes[name] = tuple(param.shape)
-    
-    # Get all buffers (like running stats in BatchNorm)
-    for name, buffer in model.named_buffers():
-        param_shapes[name] = tuple(buffer.shape)
-    
-    return param_shapes
-
-
 def print_peak_memory(device: torch.device):
     """Print and reset peak CUDA memory for this process's device."""
     
@@ -1142,26 +1078,6 @@ def print_peak_memory(device: torch.device):
     print("="*60 + "\n")
     
     torch.cuda.reset_peak_memory_stats(device)
-
-
-def convert_model_to_dtype(model: torch.nn.Module, dtype: torch.dtype = torch.bfloat16) -> torch.nn.Module:
-    """Convert all parameters and buffers in a model to the specified dtype.
-    
-    Args:
-        model: The model to convert
-        dtype: Target dtype (default: torch.bfloat16)
-    
-    Returns:
-        The model with converted parameters/buffers
-    """
-    for param in model.parameters():
-        param.data = param.data.to(dtype)
-    for buffer_name, buffer in model.named_buffers():
-        # Skip buffers that should remain as integers (like position indices)
-        if buffer.dtype in (torch.int64, torch.int32, torch.long, torch.bool):
-            continue
-        buffer.data = buffer.data.to(dtype)
-    return model
 
 
 # How the generator loss selects masked positions, per feature type. Numeric and multilabel are

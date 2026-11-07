@@ -248,20 +248,6 @@ class ELECTRA(torch.nn.Module):
             return torch.bernoulli(torch.sigmoid(prediction))
         return prediction
 
-    def compute_conditional_intensity(self, encodings, prev_event_times, time_diff):
-        """Wrapper to access hawkes submodule's method from parent model.
-        
-        For compatibility with model sharding using Accelerate.
-        """
-        return self.hawkes.compute_conditional_intensity(encodings, prev_event_times, time_diff)
-
-    def compute_initial_intensity(self, batch_size):
-        """Wrapper to access hawkes submodule's method from parent model.
-
-        For compatibility with model sharding using Accelerate.
-        """
-        return self.hawkes.compute_initial_intensity(batch_size)
-
     def forward(
         self,
         batch: MixedTensorDataset,
@@ -382,10 +368,9 @@ class MixedClassifier(torch.nn.Module):
         d_event_enc: int,
         d_val_enc: int,
         d_statics: int,
-        num_classes: int,
+        head: torch.nn.Module,
         aggr: str = 'max',
         use_lookup: bool = False,
-        head: Optional[torch.nn.Module] = None,
     ):
         """Initialize MixedClassifier.
 
@@ -398,15 +383,11 @@ class MixedClassifier(torch.nn.Module):
             d_event_enc: Dimensionality of event encoder output
             d_val_enc: Dimensionality of time series encoder output
             d_statics: Dimensionality of static data (0 if no static data)
-            num_classes: Number of output classes
+            head: Module mapping the pooled encoding, ``encoding_width(d_event_enc, d_val_enc,
+                d_statics)`` wide, to logits: a DeepHitHead or a Cox head.
             aggr: Aggregation method ('max', 'mean' or 'none') for sequence-level encoding. 'none'
                 reads the most recent record: the last timestep the mask keeps.
             use_lookup: If True, the model will expect pre-computed lookup embeddings in the input batch.
-            head: Module mapping the pooled encoding to logits. Defaults to the
-                two-layer stack this class has always used, which returns
-                `num_classes` logits. A DeepHitHead goes here instead, because a
-                competing-risks head needs per-cause capacity that a shared
-                32-unit bottleneck cannot give it.
         """
 
         super().__init__()
@@ -414,13 +395,6 @@ class MixedClassifier(torch.nn.Module):
             raise ValueError(f'd_event_enc is {d_event_enc} but there is no event encoder')
         self.event_encoder = event_encoder
         self.val_encoder = val_encoder
-        d_enc = self.encoding_width(d_event_enc, d_val_enc, d_statics)
-        if head is None:
-            head = torch.nn.Sequential(
-                torch.nn.Linear(d_enc, 32),
-                torch.nn.GELU(),
-                torch.nn.Linear(32, num_classes),
-            )
         self.head = head
         self.aggr = aggr
         self.use_lookup = use_lookup
@@ -460,7 +434,7 @@ class MixedClassifier(torch.nn.Module):
             trace_grads (bool): Whether to trace gradients through the LLM
 
         Returns:
-            Tensor: Classification logits of shape (batch_size, num_classes)
+            Tensor: The head's logits for each episode
         """
 
         embeddings = []

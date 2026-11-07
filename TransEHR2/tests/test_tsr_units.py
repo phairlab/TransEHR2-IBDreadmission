@@ -61,7 +61,7 @@ def _model_and_batch(aggr='mean', seed=0):
             d_model=d_model, n_heads=2, n_encoder_blocks=1, dim_feedforward=d_model,
             dropout=0.0, norm='LayerNorm'),
         d_event_enc=0, d_val_enc=d_model, d_statics=0,
-        num_classes=N_CAUSES * N_BINS, aggr=aggr, use_lookup=True,
+        aggr=aggr, use_lookup=True,
         head=DeepHitHead(d_in=d_model, n_causes=N_CAUSES, n_bins=N_BINS,
                          d_shared=[8], d_cause=[4], dropout=0.0))
     model.eval()

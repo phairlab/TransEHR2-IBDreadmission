@@ -94,12 +94,6 @@ TransEHR2/configs/**/test*.yaml
 tests/
 # ...but not the package's own suite, which is a deliverable
 !TransEHR2/tests/
-analyze_timestep_counts.py
-analyze_dataload_times.py
-test_run_experiment_accelerate.py
-test_tunes_hyperparameters.py
-test_text_extraction.py
-test_data_integrity.py
 
 # Other
 misc/

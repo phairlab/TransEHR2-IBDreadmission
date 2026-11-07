@@ -314,7 +314,6 @@ def build_classifier(dataset_config, experiment_config, grid, data_dir) -> Mixed
             ladder_p_min=setting('VALUE_LADDER_P_MIN'),
             ladder_p_max=setting('VALUE_LADDER_P_MAX')),
         d_event_enc=d_thp, d_val_enc=d_disc, d_statics=static_dim,
-        num_classes=grid.n_causes * grid.n_bins,
         aggr=setting('PREDICTOR_AGGREGATION_METHOD', 'mean'),
         use_lookup=bool(lookup_dims),
         head=DeepHitHead(

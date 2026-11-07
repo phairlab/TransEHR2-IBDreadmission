@@ -36,7 +36,7 @@ from .conftest import CLINVEC_DIM, CLINVEC_ROWS
 from .test_datasets import run, write_tables
 
 
-PAD_ID = 128009  # Outside ASCII, as a Llama 3.x added token is.
+PAD_ID = 128009  # Outside ASCII, as an added special token is.
 STUB_DIM = 3
 STUB_LEN = 8
 

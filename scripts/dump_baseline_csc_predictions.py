@@ -12,7 +12,7 @@ themselves.
 
 Usage:
     python scripts/dump_baseline_csc_predictions.py <experiment_name> \\
-        [--model_dir ./models] [--experiment_config <yaml>]
+        [--model_dir ./models] --experiment_config <yaml>
 """
 
 import argparse
@@ -40,7 +40,7 @@ def main():
     parser.add_argument('--model_dir', type=str, default='./models',
                         help='Root directory containing the experiment')
     parser.add_argument(
-        '--experiment_config', type=str, default=None,
+        '--experiment_config', type=str, required=True,
         help='Experiment YAML, read for TIME_GRID_CUTS_DAYS and '
              'MODELLED_CAUSES, as evaluate_finetuned_predictions.py reads it.')
     args = parser.parse_args()

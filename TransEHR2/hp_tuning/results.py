@@ -15,7 +15,7 @@ makes the reconstruction task harder, so its pretraining loss is worse by constr
 import math
 import os
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import yaml
 
@@ -305,64 +305,6 @@ def rank_cells(
         'results': results,
         'best': chooser(usable, key=lambda r: r.value) if usable else None,
         'complete': bool(results) and len(usable) == len(results),
-    }
-
-
-def rank_all(manifest: Dict[str, Any]) -> List[Dict[str, Any]]:
-    """Rank every hyperparameter on every arm.
-
-    Args:
-        manifest: A loaded manifest.
-
-    Returns:
-        One ranking dict per (arm, hyperparameter), arms in manifest order.
-    """
-    return [
-        rank_hyperparameter(manifest, arm, hyperparameter)
-        for arm in manifest['arms']
-        for hyperparameter in manifest['grid']
-    ]
-
-
-def compare_arms(manifest: Dict[str, Any], criterion: str = 'readmission') -> Dict[str, Any]:
-    """Compare the encoding arms head to head at their shared centre.
-
-    The arms differ only in ``POSITION_ENCODING``, so their centres are the one pair of runs
-    that isolates the encoding: identical data, identical hyperparameters, identical frozen
-    ladder, one rotating the gap into the attention scores and one adding it to the embedding.
-
-    The revision plan flags the weakness of deciding here rather than at each arm's assembled
-    optimum, and the conclusion is only as good as that assumption. It is recorded, not hidden.
-
-    Args:
-        manifest: A loaded manifest.
-        criterion: Which criterion to compare on. Defaults to the downstream task.
-
-    Returns:
-        A dict with ``criterion``, ``metric``, ``direction``, ``results`` (one per arm) and
-        ``best`` (the winning result, or None).
-    """
-    spec = SELECTION_CRITERIA[criterion]
-    results = []
-    for arm in manifest['arms']:
-        centre = next(
-            (t for t in manifest['trials'] if t['arm'] == arm and t['is_centre']), None
-        )
-        if centre is None:
-            continue
-        result = read_result(manifest, centre, criterion)
-        result.grid_value = arm
-        results.append(result)
-
-    usable = [r for r in results if r.is_usable]
-    chooser = min if spec['direction'] == 'min' else max
-    return {
-        'criterion': criterion,
-        'metric': spec['metric'],
-        'direction': spec['direction'],
-        'results': results,
-        'best': chooser(usable, key=lambda r: r.value) if usable else None,
-        'complete': len(usable) == len(results),
     }
 
 

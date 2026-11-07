@@ -1,4 +1,3 @@
-import os
 import torch
 
 from dlordinal.output_layers import CLM
@@ -154,20 +153,8 @@ class GradientTraceableLLM(torch.nn.Module):
             raise ValueError(f"pooling: expected 'cls' or 'mean', got {pooling}.")
         self.pooling = pooling
         self.use_gradient_checkpointing = use_gradient_checkpointing
-        # Initialize the model on CPU to avoid GPU memory issues during FSDP wrapping
         # Try to load from local files to avoid hitting rate limits on Hugging Face
-        # Use the Llama-3.1-8B tokenizer explicitly because the
-        # Llama-3.2-1B tokenizer has a broken tekken.json path that
-        # causes AttributeError in convert_slow_tokenizer. The
-        # tokenizer vocabulary is compatible across Llama 3.x models.
-        name_or_basename = model_name + '/' + os.path.basename(model_name.rstrip('/'))
-        if 'Llama-3.2-1B' in name_or_basename:
-            if os.environ.get('HF_HUB_OFFLINE', '0') == '1':
-                tokenizer_name = os.path.join(os.path.dirname(model_name), 'Llama-3.1-8B')
-            else:
-                tokenizer_name = 'meta-llama/Llama-3.1-8B'
-        else:
-            tokenizer_name = model_name
+        tokenizer_name = model_name
         try:
             self.tokenizer = AutoTokenizer.from_pretrained(
                 tokenizer_name, 
@@ -181,7 +168,12 @@ class GradientTraceableLLM(torch.nn.Module):
                 token=HF_API_TOKEN,
                 device_map='cpu',
             )
-        # Llama ships without a padding token, so one has to be invented. Encoder models
+        # CLS pooling reads position 0, which is a pad token under left padding.
+        if pooling == 'cls' and getattr(self.tokenizer, 'padding_side', 'right') != 'right':
+            raise ValueError(
+                f'{model_name} tokenizes with padding_side={self.tokenizer.padding_side!r}; '
+                f'CLS pooling needs right padding.')
+        # A decoder may ship without a padding token, so one has to be invented. Encoder models
         # generally have one already -- bge-m3 uses '<pad>' -- and adding a second would both grow
         # the vocabulary by a row the checkpoint never trained and move padding off the token the
         # model was trained to ignore. Only add one when it is missing.
@@ -257,8 +249,8 @@ class GradientTraceableLLM(torch.nn.Module):
         if self.pooling == 'cls':
             # Position 0 is the sequence representation an encoder model was trained to
             # produce, and it is what bge-m3's contrastive objective optimized. This assumes
-            # right padding, which LLMTextProcessor asserts at tokenization time -- with left
-            # padding position 0 is a pad token and the embedding is content-free.
+            # right padding, which `__init__` checks -- with left padding position 0 is a pad
+            # token and the embedding is content-free.
             return hidden_states[:, 0]
         # Mean-pool the non-padding token embeddings of each sequence. Correct for a
         # decoder, whose position 0 carries only a BOS token.
@@ -300,58 +292,6 @@ class GradientTraceableLLM(torch.nn.Module):
     def _save_gradients(self, grad: Tensor) -> None:
         """Save gradients during the backward pass."""
         self.embedding_gradients = grad
-
-    def attribute():
-        # TODO: Implement text feature attributions to predictions at a token level.
-        #   Should return a tensor of scores with the same shape as `token_ids` from the forward pass.
-        raise NotImplementedError()  
-    
-    def get_attribution_text(self, token_ids: Tensor, scores: Tensor) -> List[List[List[List[Tuple[str, float]]]]]:
-        """Convert attribution scores to human-readable text with highlights.
-                
-        Args:
-            token_ids (Tensor): Tensor of token IDs with shape (batch_size, max_timeseries_length, n_text_features, max_token_length)
-            scores (Tensor): Attribution scores with matching shape
-                
-        Returns:
-            List[List[List[List[Tuple[str, float]]]]]: Nested lists representing decoded tokens with scores:
-                - First level: batch dimension
-                - Second level: timestep (record) dimension
-                - Third level: text features dimension
-                - Fourth level: list of (token, score) pairs for each token in the text feature
-        """
-
-        if token_ids.shape != scores.shape:
-            raise ValueError(
-                f'Expected token_ids and scores to have the same shape, got {token_ids.shape} and {scores.shape}.'
-            )
-
-        if token_ids.dim() != 4:
-            if token_ids.dim() == 3:
-                # Assume shape (max_timeseries_length, n_features, max_token_length), add batch dim of size 1
-                token_ids = token_ids.unsqueeze(0)
-                scores = scores.unsqueeze(0)  # Ensure scores also have batch dimension
-            else:
-                raise ValueError(f'Expected token_ids to be 3D or 4D, got {token_ids.dim()}D tensor.')
-
-        results = []
-        for batch_idx in range(token_ids.shape[0]):
-            timeseries_results = []
-            for time_idx in range(token_ids.shape[1]):
-                feature_results = []
-                for feature_idx in range(token_ids.shape[2]):
-                    sample_tokens = token_ids[batch_idx, time_idx, feature_idx]
-                    sample_scores = scores[batch_idx, time_idx, feature_idx]
-                    # Convert token IDs to text with score annotations
-                    decoded_tokens = self.tokenizer.convert_ids_to_tokens(sample_tokens)
-                    token_score_pairs = [(tk, sc.item()) for tk, sc in zip(decoded_tokens, sample_scores) 
-                                            if tk != self.tokenizer.pad_token]
-                    feature_results.append(token_score_pairs)
-                timeseries_results.append(feature_results)
-            results.append(timeseries_results)
-
-        return results
-
 
 class EventDataEncoder(torch.nn.Module): 
     # NOTE Originally from https://github.com/SimiaoZuo/Transformer-Hawkes-Process/blob/master/transformer/Models.py,
@@ -570,7 +510,7 @@ class ValueDataEncoder(torch.nn.Module):
         dim_feedforward: int,
         dropout: float = 0.1,
         activation: str = 'gelu',
-        norm: str = 'BatchNorm',
+        norm: str = 'LayerNorm',
         normalize_before: bool = False,
         query_key_transform: Optional[torch.nn.Module] = None,
         position_encoding: str = 'additive',
@@ -596,7 +536,8 @@ class ValueDataEncoder(torch.nn.Module):
                 `self.layer_stack` is built from `EncoderLayer` -- the repository's own block, shared with the
                 event stream, which owns its attention and can therefore carry a `query_key_transform`. If
                 'BatchNorm', it is built from `TransformerBatchNormEncoderLayer`, which delegates to
-                `torch.nn.MultiheadAttention` and cannot. No shipped experiment config selects 'BatchNorm'.
+                `torch.nn.MultiheadAttention` and cannot. Defaults to 'LayerNorm'; no shipped experiment
+                config selects 'BatchNorm'.
             normalize_before (bool, optional): Whether to apply normalization before attention and feedforward 
                 operations (Pre-LN). If False, normalization is applied after (Post-LN). Defaults to False.
             query_key_transform (torch.nn.Module, optional): A position-dependent transform applied to the query
@@ -677,8 +618,7 @@ class ValueDataEncoder(torch.nn.Module):
         if norm == 'LayerNorm':
             # The repository's own encoder block, the same class the event stream stacks. It owns its
             # attention in MultiHeadAttention instead of delegating to torch.nn.MultiheadAttention, which is
-            # what makes a query/key transform possible at all. Its class name is already in
-            # fsdp_transformer_layer_cls_to_wrap, so the FSDP config needs no change.
+            # what makes a query/key transform possible at all.
             #
             # normalize_before is passed explicitly: EncoderLayer defaults it to False while both of its
             # children default it to True, and this model is pre-LN because post-LN was unstable.

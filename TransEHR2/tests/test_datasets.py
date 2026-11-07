@@ -15,9 +15,7 @@ import torch
 
 from TransEHR2.data.datasets import LazyArray
 from TransEHR2.data.preprocessing import (
-    collate_tensorized, get_text_counts_from_dataset,
-    get_text_counts_from_dataset_vectorized, load_dataset,
-    prepare_dataloaders
+    collate_tensorized, load_dataset, prepare_dataloaders
 )
 
 from extract_data import main as extract_main
@@ -608,19 +606,6 @@ def test_a_missing_train_row_array_is_an_error(cohort):
         prepare_dataloaders(
             str(cohort.data_dir), 'fold0', batch_size=1, num_workers=0
         )
-
-
-def test_the_text_counts_are_counted_over_text_features_only(cohort):
-    """Text balancing exists to stop one rank receiving every text-heavy
-    episode, and it is the LLM-width embeddings that make an episode
-    heavy -- not the 128-wide drug ones. Both counters agree."""
-    dataset = load_dataset(str(cohort.extracted), fold='fold0')
-    counts = get_text_counts_from_dataset_vectorized(dataset)
-    np.testing.assert_array_equal(
-        counts, get_text_counts_from_dataset(dataset)
-    )
-    # One text entry per episode, and three episodes.
-    assert counts.tolist() == [1, 1, 1]
 
 
 def test_a_batch_survives_a_dataloader(cohort):

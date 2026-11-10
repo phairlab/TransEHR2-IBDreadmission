@@ -75,8 +75,13 @@ def make_embedder(llm, device, max_length: int = MAX_TOKEN_LENGTH,
     The pooled output reads only attended positions, so the padding length changes nothing but
     the cost; the table was built at 2,048 for storage reasons that do not apply here.
 
+    The LLM whitens its own output when it was loaded with a transform, so a re-embedded string
+    lands in the table's space without anything here applying one. Call `llm.check_table`
+    against the lookup tables first: an encoder that differs from the table's in checkpoint,
+    pooling or whitening gives vectors of the right shape in the wrong space.
+
     Args:
-        llm: A `modules.GradientTraceableLLM` with the table's encoder and pooling.
+        llm: A `modules.GradientTraceableLLM` with the table's encoder, pooling and whitening.
         device: Where the encoder runs.
         max_length: Truncation length; must match the table's.
         batch_size: Strings per encoder call.

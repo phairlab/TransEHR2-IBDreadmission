@@ -1,3 +1,6 @@
+import hashlib
+import json
+import os
 import torch
 
 from dlordinal.output_layers import CLM
@@ -11,8 +14,13 @@ from TransEHR2.constants import (
     MAX_TOKEN_LENGTH,
     PAD,
     TEXT_POOLING,
+    TEXT_WHITENING,
     TOKENIZER_PAD_TOKEN,
 )
+
+# Beside text_embeddings.npy: which encoder, pooling and whitening built the table, so a
+# re-embed or an attribution against it can check it is using the same ones.
+TEXT_TABLE_PROVENANCE = 'text_embeddings.json'
 from TransEHR2.data.custom_types import EventAssociatedTensorData, ValueAssociatedTensorData
 from TransEHR2.layers import (
     EncoderLayer,
@@ -129,6 +137,7 @@ class GradientTraceableLLM(torch.nn.Module):
         device_map: str = 'cpu',
         dtype=None,
         pooling: str = TEXT_POOLING,
+        whitening: Optional[str] = TEXT_WHITENING,
     ):
         """Initialize an instance.
 
@@ -143,15 +152,25 @@ class GradientTraceableLLM(torch.nn.Module):
                 name raises rather than warning. Defaults to None, which passes neither.
             pooling (str, optional): How a token sequence is reduced to one embedding, 'cls' or
                 'mean'. Defaults to `TEXT_POOLING`.
+            whitening (str, optional): A ContrastiveBMMB `*_whitening.pt`, applied after pooling
+                as `z = (e - mean) @ W`. Defaults to `TEXT_WHITENING`; None applies none.
 
         Raises:
-            ValueError: If `pooling` is neither 'cls' nor 'mean'.
+            ValueError: If `pooling` is neither 'cls' nor 'mean', or if `whitening` was fitted
+                on another checkpoint or pooling.
         """
 
         super().__init__()
         if pooling not in ('cls', 'mean'):
             raise ValueError(f"pooling: expected 'cls' or 'mean', got {pooling}.")
         self.pooling = pooling
+        self.model_name = model_name
+        self.whitening_path = None
+        self.whitening_sha256 = None
+        self.register_buffer('whitening_mean', None, persistent=False)
+        self.register_buffer('whitening_transform', None, persistent=False)
+        if whitening is not None:
+            self._load_whitening(whitening)
         self.use_gradient_checkpointing = use_gradient_checkpointing
         # Try to load from local files to avoid hitting rate limits on Hugging Face
         tokenizer_name = model_name
@@ -231,7 +250,7 @@ class GradientTraceableLLM(torch.nn.Module):
 
         with torch.set_grad_enabled(trace_grads):  # Only trace gradients if trace_grads is True
             outputs = self.model(token_ids, attention_mask=attention_mask)
-            embeddings = self._pool(outputs.last_hidden_state, attention_mask)
+            embeddings = self._whiten(self._pool(outputs.last_hidden_state, attention_mask))
 
             # Add a hook to save gradients during the backward pass, but only if we're tracing gradients
             if trace_grads and embeddings.requires_grad:
@@ -282,12 +301,84 @@ class GradientTraceableLLM(torch.nn.Module):
             attention_mask (Tensor, optional): (N, max_token_length) padding mask.
 
         Returns:
-            Tensor: (N, embed_dim) pooled embeddings, pooled exactly as `forward` pools them.
+            Tensor: (N, embed_dim) pooled embeddings, pooled and whitened exactly as `forward`
+                does it.
         """
         if attention_mask is not None and attention_mask.dtype != torch.long:
             attention_mask = attention_mask.long()
         outputs = self.model(inputs_embeds=inputs_embeds, attention_mask=attention_mask)
-        return self._pool(outputs.last_hidden_state, attention_mask)
+        return self._whiten(self._pool(outputs.last_hidden_state, attention_mask))
+
+    def _load_whitening(self, path: str) -> None:
+        """Load a ContrastiveBMMB whitening transform, refusing one fitted elsewhere.
+
+        A transform fitted on one encoder is meaningless applied to another, and the result
+        has the right shape, so nothing downstream would notice. run_arms.py records the
+        resolved checkpoint and the pooling it fitted on; both must match this encoder.
+        """
+        state = torch.load(path, map_location='cpu', weights_only=True)
+        fitted_on = state.get('checkpoint')
+        if fitted_on is None or os.path.realpath(fitted_on) != os.path.realpath(self.model_name):
+            raise ValueError(
+                f'{path} was fitted on {fitted_on}, not {self.model_name}. Set TEXT_WHITENING '
+                f'to the transform fitted on this encoder.')
+        if state.get('pooling') != self.pooling:
+            raise ValueError(
+                f"{path} was fitted under {state.get('pooling')!r} pooling, not "
+                f'{self.pooling!r}.')
+        self.whitening_mean = state['mean'].float().reshape(1, -1)
+        self.whitening_transform = state['transform'].float()
+        self.whitening_path = os.path.realpath(path)
+        with open(path, 'rb') as handle:
+            self.whitening_sha256 = hashlib.sha256(handle.read()).hexdigest()
+
+    def _whiten(self, pooled: Tensor) -> Tensor:
+        """`(e - mean) @ W` when a transform is loaded; the pooled embedding otherwise.
+
+        Its own method for `_pool`'s reason: `forward` and `forward_from_embeds` must apply
+        the same transform, or attribution would differentiate through a map the table was not
+        built with. Computed in float32 so the product adds no rounding of its own: W can be
+        large along near-null directions, and a bf16 matmul would amplify its error there.
+        """
+        if self.whitening_transform is None:
+            return pooled
+        mean = self.whitening_mean.to(pooled.device)
+        transform = self.whitening_transform.to(pooled.device)
+        return (pooled.float() - mean) @ transform
+
+    def provenance(self) -> Dict:
+        """What made this encoder's embeddings: what `embed.py` records beside the table."""
+        name = self.model_name
+        return {
+            'llm': os.path.realpath(name) if os.path.exists(name) else name,
+            'pooling': self.pooling,
+            'whitening': self.whitening_path,
+            'whitening_sha256': self.whitening_sha256,
+        }
+
+    def check_table(self, tables_dir: str) -> None:
+        """Refuse a text table built by another encoder, pooling or whitening.
+
+        A re-embedded string or a token attribution is only meaningful against the table it
+        is compared with, and a mismatch keeps every shape. A table with no record predates
+        it; that is accepted only when this encoder applies no whitening, as every such table
+        was built without one.
+        """
+        path = os.path.join(tables_dir, TEXT_TABLE_PROVENANCE)
+        if not os.path.exists(path):
+            if self.whitening_transform is None:
+                return
+            raise ValueError(
+                f'{path} is missing, so nothing says the text table was whitened with '
+                f'{self.whitening_path}. Re-embed it with scripts/embed.py.')
+        with open(path, 'r') as handle:
+            recorded = json.load(handle)
+        mine = self.provenance()
+        differ = sorted(k for k in mine if recorded.get(k) != mine[k])
+        if differ:
+            raise ValueError(
+                f"The text table was built with a different {', '.join(differ)} from this "
+                f'encoder ({path}). Re-embed it, or load the encoder it was built with.')
 
     def _save_gradients(self, grad: Tensor) -> None:
         """Save gradients during the backward pass."""

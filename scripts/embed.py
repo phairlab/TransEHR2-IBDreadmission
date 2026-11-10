@@ -67,6 +67,7 @@ Design decisions this script commits to
 """
 
 import argparse
+import json
 import numpy as np
 import os
 import pandas as pd
@@ -265,6 +266,21 @@ def record_pad_token_id(extracted_dir: str, pad_token_id: int) -> None:
     print(f"Recorded pad_token_id = {pad_token_id} in {path}")
 
 
+def record_text_provenance(out_dir: str, provenance: dict) -> str:
+    """Write which encoder, pooling and whitening built ``text_embeddings.npy``.
+
+    ``GradientTraceableLLM.check_table`` reads it back, so a re-embed or a
+    token attribution run against the table refuses an encoder that would
+    not have produced it. Written last, after the table is complete.
+    """
+    from TransEHR2.modules import TEXT_TABLE_PROVENANCE
+    path = os.path.join(out_dir, TEXT_TABLE_PROVENANCE)
+    with open(path, 'w') as f:
+        json.dump(provenance, f, indent=2)
+    print(f"Wrote {path}")
+    return path
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Build the global text and drug lookup tables"
@@ -343,6 +359,8 @@ def main(argv=None) -> int:
         input_device = next(llm.model.parameters()).device
         print(f"  {llm.model.config._name_or_path}, embed_dim="
               f"{embed_dim}, input_device={input_device}")
+        print(f"  pooling={llm.pooling}, whitening="
+              f"{llm.whitening_path or 'none'}")
 
         @torch.no_grad()
         def embed(ids: np.ndarray, mask: np.ndarray) -> np.ndarray:
@@ -359,6 +377,7 @@ def main(argv=None) -> int:
             batch_size=args.batch_size
         ))
         record_pad_token_id(extracted_dir, llm.tokenizer.pad_token_id)
+        record_text_provenance(out_dir, llm.provenance())
 
     print("Recording checksums in manifest.csv:")
     for path in written:

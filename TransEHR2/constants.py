@@ -48,10 +48,8 @@ TOKENIZER_PAD_TOKEN = '[PAD]'
 # `TEXT_POOLING` below must not drift from ContrastiveBMMB's `POOLING`, or the lookup table and
 # the encoder disagree about what a row means.
 #
-# A3 rather than A3w: the whitening transform lives outside the checkpoint, so loading this path
-# gives unwhitened embeddings. That is the right default until the transform is folded in, and
-# the attribution path takes it separately (`attribution.token_attributions`'s
-# `whitening_transform`).
+# The whitening transform is not in the checkpoint: a stock HF encoder has no place for a full
+# linear map after pooling. `TEXT_WHITENING` below supplies it instead.
 #
 # First existing candidate wins, so one tracked value works on the cluster and on a laptop. The
 # last is the fallback when none exist, which keeps the failure at `from_pretrained` -- where
@@ -79,3 +77,15 @@ MAX_TOKEN_LENGTH = 2048
 # what bge-m3 was contrastively trained to use; 'mean' is the masked mean over non-padding
 # tokens, which is what a decoder needs because its position 0 is only a BOS token.
 TEXT_POOLING = 'cls'
+
+# Whitening applied to every pooled text embedding, as `z = (e - mean) @ W`: a `*_whitening.pt`
+# written by ContrastiveBMMB's run_arms.py, or None for none. `GradientTraceableLLM` applies it
+# after pooling, so the lookup table (`embed.py`), every re-embed (`text_fields.py`) and token
+# attribution all see one transform, and attribution differentiates through it rather than
+# being handed it. The file records the checkpoint and pooling it was fitted on, and the LLM
+# refuses a transform fitted on another encoder.
+#
+# None while LLM_NAME is A3, whose deployed table is unwhitened. The plan is A4 with its A4w
+# transform (ContrastiveBMMB results/real/A4w_whitening.pt, fitted on the real-record fit
+# slice); switching means changing LLM_NAME and this together and re-embedding the text table.
+TEXT_WHITENING = None

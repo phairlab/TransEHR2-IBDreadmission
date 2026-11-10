@@ -93,6 +93,9 @@ def token_attributions(
             embedding was whitened as `z = (e_pool - mu) W`. The gradient is mapped back through
             it, `dL/d(e_pool) = (dL/dz) W^T`. ZCA's `W` is symmetric, so this is also `(dL/dz) W`
             -- equivalently the token vectors could be whitened instead, for identical scores.
+            Only for an encoder that does not whiten itself: an `llm` loaded with a
+            `whitening` file applies `W` inside `forward_from_embeds`, so the backward already
+            runs through it, and passing it here too would apply it twice.
 
         score (callable, optional): Reduces the (N, T, D) gradient and the (N, T, D) input
             embeddings to one number per token. One of `SCORERS`; defaults to `grad_x_input`.
@@ -106,6 +109,11 @@ def token_attributions(
         mask and they score whatever attention made of them, under either pooling --
         `text_cell_attributions` always derives one.
     """
+    if whitening_transform is not None and \
+            getattr(llm, 'whitening_transform', None) is not None:
+        raise ValueError(
+            'whitening_transform was passed to an encoder that already whitens '
+            f'({llm.whitening_path}); W would be applied twice.')
     inputs_embeds = llm.model.get_input_embeddings()(token_ids).detach().requires_grad_(True)
     pooled = llm.forward_from_embeds(inputs_embeds, attention_mask)
 

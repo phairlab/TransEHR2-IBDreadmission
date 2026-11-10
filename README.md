@@ -131,7 +131,12 @@ text feasible: a few million unique strings are embedded once instead of
 once per fold per timestep. `embed.py` writes `data/lookup_tables/` —
 
 - `text_embeddings.npy`, the encoder's CLS-pooled output per unique string
-  (`TEXT_POOLING`), unwhitened;
+  (`TEXT_POOLING`), whitened by `TEXT_WHITENING` when that names a
+  ContrastiveBMMB transform (it is `None` for A3, so A3's table is unwhitened);
+- `text_embeddings.json`, which encoder, pooling and whitening built it.
+  Token attribution and re-embedding check it before they run, because an
+  encoder that differs from the table's gives vectors of the right shape in
+  the wrong space;
 - `text_tokens.npy`, the token ids behind them, kept for token-level
   attribution;
 - `drug_embeddings.npy`, the ClinVec ATC vectors plus an all-zero row that

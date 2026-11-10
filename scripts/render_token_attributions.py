@@ -193,7 +193,10 @@ def main(argv=None) -> int:
     llm.model.eval()
     for parameter in llm.model.parameters():
         parameter.requires_grad_(False)
-    print(f'encoder: {LLM_NAME}')
+    # The stage 1 gradient is with respect to the table's rows, so the encoder has to be the
+    # one that built them -- including the whitening, which it then differentiates through.
+    llm.check_table(os.path.join(data_dir, 'lookup_tables'))
+    print(f'encoder: {LLM_NAME}  whitening: {llm.whitening_path or "none"}')
 
     model = build_classifier(dataset_config, experiment_config, grid, data_dir)
     weights = os.path.join(args.model_dir, args.experiment_name, args.fold,

@@ -13,6 +13,8 @@ transformers>=5.0.0
 numpy>=1.24.0
 pandas>=2.0.0
 scipy>=1.10.0
+# Figures written by the project's development/scripts
+matplotlib>=3.7.0
 
 # Machine learning utilities
 tensorboard>=2.13.0

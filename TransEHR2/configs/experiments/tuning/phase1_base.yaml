@@ -86,7 +86,7 @@ TIME_GRID_CUTS_DAYS:
 - 366
 - 913
 - 1826
-- 6454.83
+- 4275.08
 # USE_HISTORICAL_RECORDS is deliberately absent: no Python reads it, and
 # the IBD timeseries has no history region for it to describe. It
 # survives in the three shipped experiment configs as a MIMIC-ism.

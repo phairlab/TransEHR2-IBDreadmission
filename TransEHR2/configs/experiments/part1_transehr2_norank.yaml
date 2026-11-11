@@ -118,7 +118,7 @@ TIME_GRID_CUTS_DAYS:
 - 366
 - 913
 - 1826
-- 6454.83
+- 4275.08
 USE_THP: false
 # One event type (ADMIT_DAD) makes every event token identical, and under rope
 # the event encoder then returns one fixed vector; the head leaves it out.

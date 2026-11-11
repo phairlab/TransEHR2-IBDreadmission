@@ -6,7 +6,7 @@
 # this an additive sweep: each value is measured against one shared point.
 
 BATCH_SIZE: 200
-BRIER_INTEGRATION_DAYS: 365
+BRIER_INTEGRATION_DAYS: 30
 CMPNT_MASK_RATIO: 0.5
 DEEPHIT_CAUSE_WEIGHTS: null
 DEEPHIT_HEAD_DROPOUT: 0.1

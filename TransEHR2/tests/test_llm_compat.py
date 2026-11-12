@@ -90,20 +90,20 @@ def test_the_translated_keyword_is_actually_honoured(tiny_model):
 
 def test_the_wrapper_loads_at_the_dtype_embed_py_asks_for(tiny_model):
     """``scripts/embed.py`` constructs it with ``dtype=torch.bfloat16``."""
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=False,
                                dtype=torch.bfloat16)
     assert next(llm.model.parameters()).dtype is torch.bfloat16
 
 
 def test_the_wrapper_freezes_the_encoder(tiny_model):
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=False)
     assert not any(p.requires_grad for p in llm.model.parameters())
 
 
 def test_gradient_checkpointing_can_be_enabled(tiny_model):
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=True)
     assert llm.model.is_gradient_checkpointing
 
@@ -114,7 +114,7 @@ def test_an_existing_pad_token_is_left_alone(tiny_model):
     model learned to ignore."""
     tokenizer = AutoTokenizer.from_pretrained(tiny_model)
     before = len(tokenizer)
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=False)
     assert llm.tokenizer.pad_token == "<pad>"
     assert len(llm.tokenizer) == before
@@ -123,7 +123,7 @@ def test_an_existing_pad_token_is_left_alone(tiny_model):
 def test_the_embedding_matrix_is_resized_to_the_tokenizer(tiny_model):
     """The fixture's config vocabulary is deliberately wider than the
     tokenizer's, which is the condition the resize exists for."""
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=False)
     assert llm.model.get_input_embeddings().weight.size(0) == \
         len(llm.tokenizer)
@@ -137,7 +137,7 @@ def _encode(llm, strings, length=16):
 
 
 def test_cls_pooling_returns_one_vector_per_string(tiny_model):
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=False,
                                pooling='cls')
     encoded = _encode(llm, ["hello there", "a"])
@@ -150,7 +150,7 @@ def test_cls_pooling_returns_one_vector_per_string(tiny_model):
 def test_mean_pooling_excludes_padding(tiny_model):
     """Without the mask the padding rows join the mean, which is the bug
     the mask branch exists to avoid."""
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=False,
                                pooling='mean')
     encoded = _encode(llm, ["hello there"])
@@ -162,7 +162,7 @@ def test_mean_pooling_excludes_padding(tiny_model):
 
 def test_an_unknown_pooling_is_refused(tiny_model):
     with pytest.raises(ValueError, match='pooling'):
-        GradientTraceableLLM(tiny_model, max_length=16,
+        GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                              use_gradient_checkpointing=False,
                              pooling='max')
 
@@ -170,7 +170,7 @@ def test_an_unknown_pooling_is_refused(tiny_model):
 def test_gradients_reach_the_embedding_matrix(tiny_model):
     """Token-level attribution needs this; the encoder is frozen, so the
     gradient has to be re-enabled on the embeddings deliberately."""
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=False)
     llm.model.get_input_embeddings().weight.requires_grad_(True)
     encoded = _encode(llm, ["hello"])
@@ -182,7 +182,7 @@ def test_gradients_reach_the_embedding_matrix(tiny_model):
 
 
 def test_no_gradient_is_traced_by_default(tiny_model):
-    llm = GradientTraceableLLM(tiny_model, max_length=16,
+    llm = GradientTraceableLLM(tiny_model, max_length=16, whitening=None,
                                use_gradient_checkpointing=False)
     encoded = _encode(llm, ["hello"])
     out = llm(encoded['input_ids'],

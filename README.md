@@ -42,7 +42,7 @@ Run it from this repository's root with the IBDdataprep checkout beside it
 mode, because text attribution writes masked text superfeatures with its
 `superfeature` module.
 
-Text is embedded by ContrastiveBMMB's A3 encoder, a contrastively
+Text is embedded by ContrastiveBMMB's A4 encoder, a contrastively
 fine-tuned BioClinical ModernBERT, loaded from a local checkpoint: `LLM_NAME`
 in [`TransEHR2/constants.py`](TransEHR2/constants.py) is the first existing
 path in `CONTRASTIVEBMMB_CANDIDATES`. Add your copy there. `TEXT_POOLING`
@@ -132,7 +132,7 @@ once per fold per timestep. `embed.py` writes `data/lookup_tables/` —
 
 - `text_embeddings.npy`, the encoder's CLS-pooled output per unique string
   (`TEXT_POOLING`), whitened by `TEXT_WHITENING` when that names a
-  ContrastiveBMMB transform (it is `None` for A3, so A3's table is unwhitened);
+  ContrastiveBMMB transform (A4w, fitted on A4);
 - `text_embeddings.json`, which encoder, pooling and whitening built it.
   Token attribution and re-embedding check it before they run, because an
   encoder that differs from the table's gives vectors of the right shape in

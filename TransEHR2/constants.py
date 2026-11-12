@@ -42,8 +42,10 @@ TOKENIZER_PAD_TOKEN = '[PAD]'
 # These are history, not alternatives selected by branch: the grad-benchmark work merged, so
 # what follows is simply what this repository runs.
 #
-# It runs ContrastiveBMMB's A3 encoder: BioClinical ModernBERT large, contrastively
-# fine-tuned on ICD-10-CA/CCI sibling substitution. 396M parameters against bge-m3's 568M, and
+# It runs ContrastiveBMMB's A4 encoder: BioClinical ModernBERT large, contrastively
+# fine-tuned from the base model on the cohort's real records, with the hierarchy supervision
+# A3 used on synthetic ones. The weights are derived from patient records and stay on SDRE.
+# 396M parameters against bge-m3's 568M, and
 # 1024-d either way, so it is a dimensional drop-in. CLS-pooled, matching how it was trained --
 # `TEXT_POOLING` below must not drift from ContrastiveBMMB's `POOLING`, or the lookup table and
 # the encoder disagree about what a row means.
@@ -55,8 +57,8 @@ TOKENIZER_PAD_TOKEN = '[PAD]'
 # last is the fallback when none exist, which keeps the failure at `from_pretrained` -- where
 # the path is named -- rather than here.
 CONTRASTIVEBMMB_CANDIDATES = (
-    '/uhome/pr3/projects/p60290_2/ContrastiveBMMB/checkpoints/a3',
-    os.path.expanduser('~/Projects/ContrastiveBMMB/checkpoints/a3'),
+    '/uhome/pr3/projects/p60290_2/ContrastiveBMMB/checkpoints/a4',
+    os.path.expanduser('~/Projects/ContrastiveBMMB/checkpoints/a4'),
 )
 LLM_NAME = next((p for p in CONTRASTIVEBMMB_CANDIDATES if os.path.isdir(p)),
                 CONTRASTIVEBMMB_CANDIDATES[0])
@@ -85,7 +87,8 @@ TEXT_POOLING = 'cls'
 # being handed it. The file records the checkpoint and pooling it was fitted on, and the LLM
 # refuses a transform fitted on another encoder.
 #
-# None while LLM_NAME is A3, whose deployed table is unwhitened. The plan is A4 with its A4w
-# transform (ContrastiveBMMB results/real/A4w_whitening.pt, fitted on the real-record fit
-# slice); switching means changing LLM_NAME and this together and re-embedding the text table.
-TEXT_WHITENING = None
+# A4w: the transform run_arms.py fitted on A4 over the real-record fit slice, read from the
+# same ContrastiveBMMB checkout as LLM_NAME so the two cannot come from different places.
+# Changing either means changing both and re-embedding the text table.
+TEXT_WHITENING = os.path.join(os.path.dirname(os.path.dirname(LLM_NAME)),
+                              'results', 'real', 'A4w_whitening.pt')

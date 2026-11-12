@@ -39,7 +39,7 @@ def downstream():
 
 def _llm(path, pooling):
     llm = GradientTraceableLLM(path, max_length=LENGTH, pooling=pooling,
-                               use_gradient_checkpointing=False)
+                               use_gradient_checkpointing=False, whitening=None)
     llm.model.eval()
     return llm
 

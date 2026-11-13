@@ -1,5 +1,5 @@
 path,sha256,source,source_type
 ibd/variable_properties.yaml,499afd4ef30f48b728615446f2ac11e9e9c24610c3295b0015dbf29f438631d6,https://drive.google.com/file/d/1bvhTnfrrGwC5Bpg8aRDiNLhHLFjZ_NqH/view?usp=drive_link,download
-lookup_tables/text_embeddings.npy,8a61bef34abaec0b18acc6321d1497f1591fb02946e721156921fdad39ee79d5,python embed.py TransEHR2/configs/datasets/RMT23345.yaml --tables text,build
-lookup_tables/text_tokens.npy,66db4fbb5bddb95443ca1ad335efe2a74a4dfe57fab6e77e6aaaeb3e5fbf014d,python embed.py TransEHR2/configs/datasets/RMT23345.yaml --tables text,build
+lookup_tables/text_embeddings.npy,4003816ebaa1bce099657a5fb960e7723f5dd2b26ae8e1a1d294741fdf1861de,python embed.py TransEHR2/configs/datasets/RMT23345.yaml --tables text,build
+lookup_tables/text_tokens.npy,4c256198f11c6f056f9fc4d7c19b4d548577406800168424d7867e5c55bf1c15,python embed.py TransEHR2/configs/datasets/RMT23345.yaml --tables text,build
 lookup_tables/drug_embeddings.npy,de4b327e66ff49016232033b6b632ae0e173aa9cec50cc45e93a500a6db2b2cd,python embed.py TransEHR2/configs/datasets/RMT23345.yaml --tables drug,build

@@ -56,7 +56,7 @@ from TransEHR2.utils import Timer
 from TransEHR2.utils import describe_loss_spike
 from TransEHR2.utils import format_pretraining_performance_table
 from TransEHR2.utils import generate_record_masks, move_batch_to_device
-from TransEHR2.utils import print_peak_memory
+from TransEHR2.utils import print_peak_memory, seed_everything
 
 
 MetadataDict: TypeAlias = Dict[str, Any]
@@ -525,6 +525,47 @@ def pretrain_validate(
         model, loader, gen_loss_fn, disc_loss_fn, thp_loss_fn,
         thp_loss_mc_samples, record_mask_ratio, obs_unobs_sample_ratio,
         cmpnt_mask_ratio, device, None, desc, mem_test_mode)
+
+
+def pretrain_test(
+    model: torch.nn.Module,
+    loader: torch.utils.data.DataLoader,
+    device: torch.device,
+    seed: int,
+    disc_loss_weight: float = 0.5,
+    use_thp: bool = True,
+    thp_loss_nll_weight: float = 1e-3,
+    thp_loss_mc_samples: int = 100,
+    use_thp_pred_loss: bool = True,
+    thp_pred_loss_type_wt: float = 1.0,
+    thp_pred_loss_time_wt: float = 0.01,
+    record_mask_ratio: float = 0.25,
+    obs_unobs_sample_ratio: float = 4.0,
+    cmpnt_mask_ratio: float = 0.5,
+    mem_test_mode: bool = False,
+    ordinal_features: Optional[List[int]] = None
+) -> Dict[str, float]:
+    """The pretraining objective of ``model`` as it stands, over ``loader``.
+
+    For the tuning fold's test partition, scored once on the best epoch's
+    weights, which the caller loads first. The best epoch is chosen on the
+    validation loss, so that loss is optimistic; this one is not. The
+    masks are drawn after seeding with ``seed``, so cells scored with one
+    seed are measured against the same draws.
+    """
+    seed_everything(seed)
+    gen_loss_fn, disc_loss_fn, thp_loss_fn = _build_pretrain_losses(
+        device, disc_loss_weight, use_thp, thp_loss_nll_weight,
+        use_thp_pred_loss, thp_pred_loss_type_wt, thp_pred_loss_time_wt,
+        ordinal_features)
+    return pretrain_validate(
+        model=model.to(device), loader=loader,
+        gen_loss_fn=gen_loss_fn, disc_loss_fn=disc_loss_fn,
+        thp_loss_fn=thp_loss_fn, thp_loss_mc_samples=thp_loss_mc_samples,
+        record_mask_ratio=record_mask_ratio,
+        obs_unobs_sample_ratio=obs_unobs_sample_ratio,
+        cmpnt_mask_ratio=cmpnt_mask_ratio, device=device, desc="Test",
+        mem_test_mode=mem_test_mode)
 
 
 def _build_pretrain_losses(

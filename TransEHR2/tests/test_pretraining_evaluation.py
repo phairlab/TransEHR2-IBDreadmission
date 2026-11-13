@@ -120,3 +120,14 @@ def test_pretrain_only_is_an_option_on_the_entry_point(capsys):
         sys.argv = argv
 
     assert '--pretrain_only' in capsys.readouterr().out
+
+
+def test_tuning_ranks_the_test_partition_loss(tmp_path):
+    """Phase 1 ranks on ``test_losses``, not the validation loss its epoch
+    was chosen on (user, 2026-11-13)."""
+    from TransEHR2.hp_tuning.spec import SELECTION_CRITERIA
+    _, data = write(tmp_path, val_losses={'Optimization_Loss': 2.0},
+                    test_losses={'Optimization_Loss': 3.0})
+    block = SELECTION_CRITERIA['pretrain']['block']
+    assert block == 'test_losses'
+    assert data[block]['Optimization_Loss'] == 3.0

@@ -21,6 +21,7 @@ from TransEHR2.modules import (
 from TransEHR2.routines import (
     BRIER_SELECTION_CAUSE, cpu_state_dict, evaluate_finetuned_model,
     finetune_model, is_improvement, load_checkpoint, pretrain_model,
+    pretrain_test,
     save_checkpoint, save_encoder_weights
 )
 from TransEHR2.survival import (
@@ -330,6 +331,28 @@ def test_pretrain_objective_includes_the_thp_term_only_when_on(loaders,
         thp_loss_mc_samples=2, checkpoint_dir=None,
         resume_from_checkpoint=False)
     assert with_thp['THP_Loss'] != 0.0
+
+
+def test_pretrain_test_scores_the_model_against_seeded_masks(loaders):
+    """Phase 1 ranks cells on this, so one seed must give one set of masks.
+
+    Two calls with the same seed score the same weights identically; the
+    masks are drawn afresh, so a different seed generally does not. Each
+    call gets its own copy of the batches, as a DataLoader would give: the
+    forward pass writes into the batch it is handed.
+    """
+    import copy
+    model = _electra(use_thp=False)
+
+    def score(seed):
+        return pretrain_test(model=model, loader=copy.deepcopy(loaders[2]),
+                             device=DEVICE, seed=seed, use_thp=False)
+
+    first, again, other = score(7), score(7), score(8)
+    assert np.isfinite(first['Optimization_Loss'])
+    assert first == again
+    assert first != other
+    assert not model.training
 
 
 # ----------------------------------------------------------- checkpointing

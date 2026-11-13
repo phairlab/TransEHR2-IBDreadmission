@@ -37,7 +37,7 @@ import torch
 import yaml
 
 from torch.utils.tensorboard import SummaryWriter
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import _path  # noqa: F401  (repository root on sys.path)
 
@@ -55,7 +55,7 @@ from TransEHR2.modules import (
     MaskedTokenGenerator, TransformerHawkesProcess, ValueDataEncoder
 )
 from TransEHR2.routines import (
-    evaluate_finetuned_model, finetune_model, pretrain_model
+    evaluate_finetuned_model, finetune_model, pretrain_model, pretrain_test
 )
 from TransEHR2.survival import (
     DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES, TimeGrid, format_days
@@ -92,7 +92,8 @@ def write_pretraining_evaluation(
     fold_name: str,
     settings: Dict[str, Any],
     train_losses: Dict[str, float],
-    val_losses: Dict[str, float]
+    val_losses: Dict[str, float],
+    test_losses: Optional[Dict[str, float]] = None
 ) -> str:
     """Record the best epoch's pretraining losses beside the weights.
 
@@ -119,6 +120,7 @@ def write_pretraining_evaluation(
             'settings': convert_to_python_types(settings),
             'train_losses': convert_to_python_types(train_losses),
             'val_losses': convert_to_python_types(val_losses),
+            'test_losses': convert_to_python_types(test_losses or {}),
         }, f_out, sort_keys=False)
 
     print(f"Wrote pretraining losses to {path}")
@@ -605,6 +607,31 @@ def main():
             )
             timer.end_phase('pretrain')
 
+            # The best epoch's weights on the test partition. On the tuning
+            # fold, phase 1 ranks its cells on this rather than on the
+            # validation loss the epoch was chosen on. Seeded so that every
+            # cell is scored against the same masks.
+            best_pretrain_test = {}
+            if test_loader is not None:
+                electra.load_state_dict(torch.load(
+                    f'{model_save_dir}/pretrained.pt', map_location='cpu',
+                    weights_only=False))
+                best_pretrain_test = pretrain_test(
+                    model=electra, loader=test_loader, device=device,
+                    seed=PRETRAIN_SEED + fold_index,
+                    disc_loss_weight=DISC_LOSS_WEIGHT, use_thp=USE_THP,
+                    thp_loss_nll_weight=THP_LOSS_NLL_WEIGHT,
+                    thp_loss_mc_samples=THP_LOSS_MC_SAMPLES,
+                    use_thp_pred_loss=USE_THP_PRED_LOSS,
+                    thp_pred_loss_type_wt=THP_PRED_LOSS_TYPE_WT,
+                    thp_pred_loss_time_wt=THP_PRED_LOSS_TIME_WT,
+                    record_mask_ratio=RECORD_MASK_RATIO,
+                    obs_unobs_sample_ratio=OBS_UNOBS_SAMPLE_RATIO,
+                    cmpnt_mask_ratio=CMPNT_MASK_RATIO,
+                    mem_test_mode=args.mem_test_mode,
+                    ordinal_features=(ordinal_features if ordinal_features
+                                      else None))
+
             write_pretraining_evaluation(
                 pretrained_dir=model_save_dir,
                 experiment_name=EXPERIMENT_NAME,
@@ -625,6 +652,7 @@ def main():
                 },
                 train_losses=best_pretrain_train,
                 val_losses=best_pretrain_val,
+                test_losses=best_pretrain_test,
             )
 
             writer.close()

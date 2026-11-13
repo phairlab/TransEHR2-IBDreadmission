@@ -49,15 +49,20 @@ SELECTION_CRITERIA = {
     'pretrain': {
         'task': 'pretrain',
         'evaluation_file': 'evaluation_pretrained.yaml',
-        'block': 'val_losses',
+        # The tuning fold's test partition, for the reason given under 'readmission'.
+        'block': 'test_losses',
         'metric': 'Optimization_Loss',
         'direction': 'min',
         'needs_finetune': False,
     },
+    # Read from the tuning fold's test partition, not validation: the finetuning epoch is
+    # chosen on the validation score, so that score is optimistic and ranking cells on it
+    # would compound the selection. The tuning fold's test partition is in no reported
+    # result (user, 2026-11-13).
     'readmission': {
         'task': 'competing_risks',
         'evaluation_file': 'evaluation_competing_risks.yaml',
-        'block': 'validation_scores',
+        'block': 'test_scores',
         'metric': 'Readmission_Integrated_Brier',
         'direction': 'min',
         'needs_finetune': True,

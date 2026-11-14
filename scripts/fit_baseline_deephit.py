@@ -15,7 +15,7 @@ Per fold, under ``{MODEL_DIR}/{EXPERIMENT_NAME}/{fold}/competing_risks/``:
     finetuned_competing_risks.pt        the best epoch's weights
     evaluation/evaluation_competing_risks.yaml
                                         the settings and that epoch's train
-                                        and val scores
+                                        and val scores, and its test scores
 
 ``dump_baseline_deephit_predictions.py`` reads the first two. A fold whose
 weights exist is skipped.
@@ -23,7 +23,8 @@ weights exist is skipped.
 ``--lr_check`` is the plan's small learning-rate check, and the only tuning
 this model gets: one fit on the tuning fold per ``LR_CHECK_RATES`` value,
 each under ``{MODEL_DIR}/{EXPERIMENT_NAME}_lr_check/lr<rate>/``, with the
-best validation selection metric per rate in ``lr_check.yaml`` there. The
+selection metric per rate in ``lr_check.yaml`` there, read on the tuning
+fold's test partition at the epoch chosen on validation. The
 chosen rate goes into the config by hand.
 
 Usage:
@@ -43,7 +44,10 @@ from typing import Dict
 import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.cli import TASK, TUNING_FOLD, get_fold_names, resolve_device
-from TransEHR2.routines import SELECTION_METRICS, finetune_model
+from TransEHR2.losses import DeepHitLoss
+from TransEHR2.routines import (
+    SELECTION_METRICS, evaluate_finetuned_model, finetune_model
+)
 from TransEHR2.tabular import (
     ENCODING_FILE, LABELS_FILE, WEIGHTS_FILE, BaselineEncoding, build_model,
     config_grid, load_split, make_loader, partition_rows,
@@ -75,10 +79,12 @@ def fit_fold(cfg: Dict, data_dir: str, features: pd.DataFrame,
         features.loc[train_rows], cfg['LINEAR_FEATURES'],
         cfg['MEDIAN_FILL_FEATURES'], cfg['CATEGORICAL_FEATURES'])
     encoding.save(os.path.join(out_dir, ENCODING_FILE))
-    train, val = (load_split(data_dir, features, labels, encoding, fold_name,
-                             split) for split in ('train', 'val'))
-    print(f"{fold_name}: {len(train):,} train and {len(val):,} val episodes, "
-          f"{len(encoding.columns())} encoded columns")
+    train, val, test = (load_split(data_dir, features, labels, encoding,
+                                   fold_name, split)
+                        for split in ('train', 'val', 'test'))
+    print(f"{fold_name}: {len(train):,} train, {len(val):,} val and "
+          f"{len(test):,} test episodes, {len(encoding.columns())} encoded "
+          f"columns")
 
     torch.manual_seed(cfg['SEED'])
     model = build_model(len(encoding.columns()), grid, cfg)
@@ -98,6 +104,20 @@ def fit_fold(cfg: Dict, data_dir: str, features: pd.DataFrame,
         checkpoint_dir=f'./checkpoints/{experiment_name}/{fold_name}/finetuned')
     writer.close()
 
+    # The best epoch's weights on the test partition. On the tuning fold the
+    # learning-rate check ranks on these, not on the validation scores the
+    # epoch was chosen on (user, 2026-11-14).
+    model.load_state_dict(torch.load(weights_path, map_location='cpu',
+                                     weights_only=False))
+    test_scores = evaluate_finetuned_model(
+        model=model.to(device),
+        loader=make_loader(test, cfg['BATCH_SIZE']), grid=grid,
+        loss_fn=DeepHitLoss(
+            n_causes=grid.n_causes, n_bins=grid.n_bins,
+            sigma=cfg['DEEPHIT_SIGMA'], rank_weight=cfg['DEEPHIT_RANK_WEIGHT'],
+            cause_weights=cfg['DEEPHIT_CAUSE_WEIGHTS']).to(device),
+        device=device, prefix='test')
+
     os.makedirs(os.path.dirname(evaluation_path), exist_ok=True)
     with open(evaluation_path, 'w') as f_out:
         yaml.dump({
@@ -113,6 +133,7 @@ def fit_fold(cfg: Dict, data_dir: str, features: pd.DataFrame,
             'encoded_columns': encoding.columns(),
             'train_scores': convert_to_python_types(train_scores or {}),
             'validation_scores': convert_to_python_types(val_scores or {}),
+            'test_scores': convert_to_python_types(test_scores),
         }, f_out, default_flow_style=False, indent=2)
     return evaluation_path
 
@@ -150,6 +171,13 @@ def main(argv=None):
 
     if args.lr_check:
         name = f"{cfg['EXPERIMENT_NAME']}_lr_check"
+        # fit_fold skips a rate whose weights exist, so an earlier check's
+        # output would be read back as this one's.
+        earlier = os.path.join(cfg['MODEL_DIR'], name)
+        if os.path.exists(earlier):
+            raise FileExistsError(
+                f'{earlier} holds an earlier learning-rate check, which this '
+                f'one would reuse rather than refit. Move it aside first.')
         metric_key = SELECTION_METRICS[cfg['FINETUNE_SELECTION_METRIC']][0]
         results = {}
         for rate in cfg['LR_CHECK_RATES']:
@@ -158,15 +186,15 @@ def main(argv=None):
                                        TUNING_FOLD, f'{name}/lr{rate:g}',
                                        float(rate), device)
             with open(evaluation_path, 'r') as f_in:
-                scores = yaml.safe_load(f_in)['validation_scores']
+                scores = yaml.safe_load(f_in)['test_scores']
             results[float(rate)] = float(scores.get(metric_key, float('nan')))
         path = os.path.join(cfg['MODEL_DIR'], name, 'lr_check.yaml')
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, 'w') as f_out:
             yaml.safe_dump({'fold': TUNING_FOLD, 'metric': metric_key,
-                            'val_by_learning_rate': results}, f_out,
+                            'test_by_learning_rate': results}, f_out,
                            sort_keys=False)
-        print(f"\nBest val {metric_key} by learning rate: {results}")
+        print(f"\nBest-epoch test {metric_key} by learning rate: {results}")
         print(f"Wrote {path}")
         return
 

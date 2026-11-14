@@ -6,9 +6,10 @@
 #
 # The head, the loss and the finetuning schedule are TransEHR2's, unchanged,
 # so that the comparison with TransEHR2 isolates the EHR encoder. They equal
-# part1_transehr2.yaml's tuned values (synced by hand 2026-10-23, after the
-# post-major-fixes tuning rerun): phase 2's finetuning rate and half-life,
-# phase 4's head widths.
+# part1_transehr2.yaml's tuned values (synced by hand 2026-11-14, after the
+# tuning rerun on the rebuilt cohort): phase 2's finetuning half-life and
+# phase 4's head widths. The learning rate starts at TransEHR2's tuned one
+# and is then set from the fold0 learning-rate check below.
 
 EXPERIMENT_NAME: "part1_tabdh"
 
@@ -53,14 +54,14 @@ SEED: 20261018
 # is part of the objective, not only of the speed.
 BATCH_SIZE: 200
 
-FINETUNE_LEARNING_RATE: 0.002
+FINETUNE_LEARNING_RATE: 1.0e-05
 FINETUNE_TOTAL_EPOCH: 500
-FINETUNE_LR_HALF_LIFE: 480
+FINETUNE_LR_HALF_LIFE: 160
 FINETUNE_SELECTION_METRIC: "brier"
 
 # The small learning-rate check on fold0 (fit_baseline_deephit.py
 # --lr_check). The first value is the one above.
-LR_CHECK_RATES: [5.0e-05, 0.0002, 0.0006, 0.002]
+LR_CHECK_RATES: [1.0e-05, 5.0e-05, 0.0002, 0.0006, 0.002]
 
 # ---- Competing risks (DeepHit), as in TransEHR2 -----------------------------
 
@@ -73,7 +74,7 @@ DEEPHIT_SIGMA: 0.1
 DEEPHIT_CAUSE_WEIGHTS: null
 
 DEEPHIT_HEAD_D_SHARED: [256, 128]
-DEEPHIT_HEAD_D_CAUSE: [128, 64]
+DEEPHIT_HEAD_D_CAUSE: [64]
 DEEPHIT_HEAD_DROPOUT: 0.1
 
 # ---- Evaluation (evaluate_finetuned_predictions.py) -------------------------

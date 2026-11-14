@@ -230,6 +230,18 @@ def test_lr_check_fits_the_tuning_fold_per_rate(fitted):
              / f"{fitted['cfg']['EXPERIMENT_NAME']}_lr_check")
     result = yaml.safe_load((check / 'lr_check.yaml').read_text())
     assert result['fold'] == 'fold0'
-    assert sorted(result['val_by_learning_rate']) == [0.0002, 0.002]
+    # Ranked on the tuning fold's test partition (user, 2026-11-14).
+    assert sorted(result['test_by_learning_rate']) == [0.0002, 0.002]
     for rate in ('0.0002', '0.002'):
-        assert (check / f'lr{rate}' / 'fold0' / TASK / WEIGHTS_FILE).exists()
+        folder = check / f'lr{rate}' / 'fold0' / TASK
+        assert (folder / WEIGHTS_FILE).exists()
+        evaluation = yaml.safe_load(
+            (folder / 'evaluation' / f'evaluation_{TASK}.yaml').read_text())
+        assert (result['test_by_learning_rate'][float(rate)]
+                == evaluation['test_scores']['Readmission_Integrated_Brier'])
+    # A second check would read the first one's fits back, so it refuses.
+    with pytest.MonkeyPatch.context() as mp, pytest.raises(FileExistsError):
+        mp.chdir(fitted['root'])
+        fit_main([str(fitted['dataset_config']),
+                  str(fitted['experiment_config']), '--lr_check',
+                  '--device', 'cpu'])

@@ -27,9 +27,18 @@ grids or D-calibration settings is not one either model's quality explains.
 
 Writes ``{cause}_comparisons.csv`` and ``dcal_chi2.csv`` into ``--out_dir``.
 
+With ``--subset`` (CD, UC or IBDU) it compares the evaluations
+``evaluate_finetuned_predictions.py --subset`` writes, ``_<subset>`` before
+each ``EVALUATION_FILE``'s ``.yaml``. Their headers must also agree on the
+subset and on every fold's ``n_test`` and ``n_train``, so that every model
+was scored on the same patients. The corrected-t ratio is then the mean over
+folds of the subset's n_test / n_train in place of ``N_TRAIN_TEST_RATIO``
+(user, 2026-11-16): the models trained on the whole fold, and were tested on
+the subset. The BH families stay per cause, now within the subset.
+
 Usage:
     python scripts/compare_models.py --out_dir <dir> \\
-        [--model_dir ./models] \\
+        [--model_dir ./models] [--subset {CD,UC,IBDU}] \\
         [--config TransEHR2/configs/reports/part1_comparisons.yaml]
 """
 
@@ -59,6 +68,8 @@ HEADER_KEYS = ('time_grid_cuts_days', 'eval_horizons_days',
 # CR D-calibration settings under the header's ``cr_dcal``: D_k depends on
 # alpha and the chi-squared on its bin count, so neither compares across them.
 CR_DCAL_KEYS = ('alpha', 'chi2_bins')
+# Header fields a subset's evaluations must share as well.
+SUBSET_KEYS = ('subset', 'n_test', 'n_train')
 
 
 def horizon_label(tau: float) -> str:
@@ -77,14 +88,18 @@ def parse_arm(arm: str, models: Dict[str, str],
     return model, variant
 
 
-def load_evaluations(cfg: Dict,
-                     model_dir: str) -> Dict[Tuple[str, str], Dict]:
-    """Every (model, variant) evaluation the tables draw on."""
+def load_evaluations(cfg: Dict, model_dir: str,
+                     subset: str = None) -> Dict[Tuple[str, str], Dict]:
+    """Every (model, variant) evaluation the tables draw on, of ``subset``'s
+    patients when one is given."""
     evaluations = {}
     for model, experiment in cfg['MODELS'].items():
         for variant, split in cfg['VARIANTS'].items():
-            path = os.path.join(model_dir, experiment,
-                                cfg['EVALUATION_FILE'].format(split=split))
+            name = cfg['EVALUATION_FILE'].format(split=split)
+            if subset:
+                stem, ext = os.path.splitext(name)
+                name = f'{stem}_{subset}{ext}'
+            path = os.path.join(model_dir, experiment, name)
             if not os.path.isfile(path):
                 raise SystemExit(f'{model} {variant}: {path} does not exist')
             with open(path, 'r') as f_in:
@@ -92,19 +107,24 @@ def load_evaluations(cfg: Dict,
     return evaluations
 
 
-def check_headers(evaluations: Dict[Tuple[str, str], Dict]) -> Dict:
-    """The shared header, or SystemExit naming every disagreement."""
+def check_headers(evaluations: Dict[Tuple[str, str], Dict],
+                  subset: bool = False) -> Dict:
+    """The shared header, or SystemExit naming every disagreement.
+
+    With ``subset``, the subset and every fold's n_test and n_train are
+    compared too."""
+    keys = HEADER_KEYS + (SUBSET_KEYS if subset else ())
     problems = []
     reference = None
     for (model, variant), evaluation in evaluations.items():
         dcal = evaluation.get('cr_dcal') or {}
-        missing = ([key for key in HEADER_KEYS if key not in evaluation]
+        missing = ([key for key in keys if key not in evaluation]
                    + [f'cr_dcal.{key}' for key in CR_DCAL_KEYS
                       if key not in dcal])
         if missing:
             problems.append(f'{model} {variant}: header lacks {missing}')
             continue
-        header = {key: evaluation[key] for key in HEADER_KEYS}
+        header = {key: evaluation[key] for key in keys}
         header.update({f'cr_dcal.{key}': dcal[key] for key in CR_DCAL_KEYS})
         if reference is None:
             reference = (model, variant, header)
@@ -246,6 +266,9 @@ def main():
                         help='Root directory holding the experiments')
     parser.add_argument('--config', type=str, default=DEFAULT_CONFIG,
                         help='Comparison config [default: %(default)s]')
+    parser.add_argument('--subset', choices=('CD', 'UC', 'IBDU'),
+                        default=None,
+                        help='Compare the evaluations of this IBD type')
     args = parser.parse_args()
 
     with open(args.config, 'r') as f_in:
@@ -255,9 +278,18 @@ def main():
                          f'implemented')
     os.makedirs(args.out_dir, exist_ok=True)
 
-    evaluations = load_evaluations(cfg, args.model_dir)
-    header = check_headers(evaluations)
+    evaluations = load_evaluations(cfg, args.model_dir, args.subset)
+    header = check_headers(evaluations, subset=bool(args.subset))
     causes = list(header['modelled_causes'])
+    if args.subset:
+        if header['subset'] != args.subset:
+            raise SystemExit(f'the evaluations are of {header["subset"]}, '
+                             f'not {args.subset}')
+        ratio = float(np.mean(np.asarray(header['n_test'], dtype=float)
+                              / np.asarray(header['n_train'], dtype=float)))
+        cfg = {**cfg, 'N_TRAIN_TEST_RATIO': ratio}
+        print(f'{args.subset}: corrected-t ratio n_test / n_train = '
+              f'{ratio:.4f}, the mean over {len(header["folds"])} folds')
 
     for cause in causes:
         table = comparison_table(cfg, evaluations, cfg['MODELS'], cause,

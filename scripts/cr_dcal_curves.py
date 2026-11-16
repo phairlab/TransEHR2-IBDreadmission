@@ -16,13 +16,19 @@ against the D_k the evaluation wrote: a mismatch stops the run.
 Writes one CSV: experiment, variant (raw or recal), fold, cause, rho, b. Rows
 are on the config's CR_DCAL_N_RHO grid, the one D_k is computed on.
 
+With ``--subset`` (CD, UC or IBDU) the curves are over that IBD type's test
+episodes only, cut as ``evaluate_finetuned_predictions.py --subset`` cuts
+them, and checked against its ``{split}_evaluation_{subset}.yaml``.
+
 PRINTS AND WRITES AGGREGATES ONLY: curves over every test episode of a fold,
 no episode.
 
 Usage:
     python scripts/cr_dcal_curves.py --out <csv> \\
         --experiments part1_transehr2 part1_tabdh part1_csc \\
-        [--model_dir ./models] [--config_dir TransEHR2/configs/experiments]
+        [--model_dir ./models] [--config_dir TransEHR2/configs/experiments] \\
+        [--subset {CD,UC,IBDU} --labels <labels.csv> \\
+         --eligibility <ibd_eligibility.csv>]
 """
 
 import argparse
@@ -42,8 +48,8 @@ from TransEHR2.survival import (
 )
 
 from evaluate_finetuned_predictions import (
-    TASK, csc_reads, dcal_values, get_fold_names, load_config,
-    load_csc_curve, outcomes, read_predictions
+    IBD_TYPES, TASK, csc_reads, dcal_values, get_fold_names, ibd_types,
+    load_config, load_csc_curve, outcomes, read_predictions, restrict
 )
 
 
@@ -55,13 +61,17 @@ TOLERANCE = 1e-9
 
 
 def fold_curves(experiment_dir: str, fold_name: str, split: str, grid,
-                rhos: np.ndarray) -> Dict[str, np.ndarray]:
-    """``{cause: b(rho)}`` for one fold and split, or {} if no dump."""
+                rhos: np.ndarray, types: np.ndarray = None,
+                subset: str = None) -> Dict[str, np.ndarray]:
+    """``{cause: b(rho)}`` for one fold and split, or {} if no dump; over
+    ``subset``'s episodes when ``types`` is given."""
     data = read_predictions(os.path.join(
         experiment_dir, fold_name, TASK,
         f'{TASK}_{split}_finetuned_output.csv'), grid)
     if data is None:
         return {}
+    if types is not None:
+        data = restrict(data, types, subset, f'{fold_name} {split}')
     _, ci, ev, days = outcomes(data, grid)
     curve = load_csc_curve(experiment_dir, fold_name, split, data['idx'],
                            grid)
@@ -75,9 +85,11 @@ def fold_curves(experiment_dir: str, fold_name: str, split: str, grid,
 
 
 def check_against_evaluation(experiment_dir: str, split: str, folds: List,
-                             curves: Dict, grid, rhos, alpha) -> float:
+                             curves: Dict, grid, rhos, alpha,
+                             subset: str = None) -> float:
     """The largest gap between each curve's D_k and the evaluation's."""
-    path = os.path.join(experiment_dir, f'{split}_evaluation.yaml')
+    suffix = f'_{subset}' if subset else ''
+    path = os.path.join(experiment_dir, f'{split}_evaluation{suffix}.yaml')
     with open(path) as f_in:
         evaluation = yaml.safe_load(f_in)
     worst = 0.0
@@ -102,7 +114,17 @@ def main(argv=None) -> int:
                                              'experiments'),
                         help='Where <experiment>.yaml is, for the grid and '
                              'the CR_DCAL_* settings')
+    parser.add_argument('--subset', choices=IBD_TYPES, default=None,
+                        help='Curves over this IBD type\'s test episodes')
+    parser.add_argument('--labels', default=None,
+                        help='labels.csv (with --subset)')
+    parser.add_argument('--eligibility', default=None,
+                        help='ibd_eligibility.csv (with --subset)')
     args = parser.parse_args(argv)
+    if args.subset and not (args.labels and args.eligibility):
+        parser.error('--subset needs --labels and --eligibility')
+    types = (ibd_types(args.labels, args.eligibility) if args.subset
+             else None)
 
     frames = []
     for experiment in args.experiments:
@@ -119,7 +141,7 @@ def main(argv=None) -> int:
             curves, folds = {}, []
             for fold_name in get_fold_names(experiment_dir):
                 found = fold_curves(experiment_dir, fold_name, split, grid,
-                                    rhos)
+                                    rhos, types, args.subset)
                 if not found:
                     continue
                 folds.append(fold_name)
@@ -129,12 +151,15 @@ def main(argv=None) -> int:
                 print(f"{experiment} {variant}: no {split} dumps, skipping")
                 continue
             worst = check_against_evaluation(experiment_dir, split, folds,
-                                              curves, grid, rhos, alpha)
+                                              curves, grid, rhos, alpha,
+                                              args.subset)
             if worst > TOLERANCE:
+                suffix = f'_{args.subset}' if args.subset else ''
                 raise ValueError(
                     f'{experiment} {variant}: a curve gives a D_k {worst:.3g} '
-                    f'away from {split}_evaluation.yaml, so it is not the '
-                    f'curve that was scored; rerun the evaluation first')
+                    f'away from {split}_evaluation{suffix}.yaml, so it is '
+                    f'not the curve that was scored; rerun the evaluation '
+                    f'first')
             print(f"{experiment} {variant}: {len(folds)} folds, D_k matches "
                   f"the evaluation to {worst:.1e}")
             frames.extend(pd.DataFrame({

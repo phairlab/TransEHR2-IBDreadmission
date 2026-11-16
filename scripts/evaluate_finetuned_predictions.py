@@ -26,9 +26,23 @@ read it, and the recalibrated split reads it shifted by the fold's dense
 offsets and repaired once. The metrics read at the cuts read the dump,
 which is the same curve there.
 
+With ``--subset`` (CD, UC or IBDU), the same dumps are scored again on the
+test patients of that IBD type only: ``IBD_TYPE`` per patient from
+``ibd_eligibility.csv``, joined through ``labels.csv``, whose 0-based row is
+a dump's ``idx``. Nothing is refitted: ``test_recal_aj`` is the whole-cohort
+recalibrated dump, restricted like ``test``. Lee's censoring curve is fitted
+on the subset's own train rows (user, 2026-11-16). Only the two test splits
+are scored, into ``{split}_evaluation_{subset}.yaml``, whose header adds the
+subset and each fold's ``n_test`` (the subset's test rows) and ``n_train``
+(every train row), from which ``compare_models.py --subset`` takes its
+corrected-t ratio. Full-cohort experiments, tested on the held-out set, are
+refused: the subsets are of the 2-point cohort only.
+
 Usage:
     python scripts/evaluate_finetuned_predictions.py <experiment_name> \\
-        [--model_dir ./models] --experiment_config <yaml>
+        [--model_dir ./models] --experiment_config <yaml> \\
+        [--subset {CD,UC,IBDU} --labels <labels.csv> \\
+         --eligibility <ibd_eligibility.csv>]
 """
 
 import argparse
@@ -64,6 +78,10 @@ from TransEHR2.survival import (
 # has written it; a split with no dump in any fold is skipped.
 SPLITS = ('train', 'val', 'test', 'test_recal_aj')
 TASK = 'competing_risks'
+# What a subset run scores: the test patients, raw and recalibrated.
+SUBSET_SPLITS = ('test', 'test_recal_aj')
+# ibd_eligibility.csv's IBD_TYPE values.
+IBD_TYPES = ('CD', 'UC', 'IBDU')
 
 
 def get_fold_names(experiment_dir: str,
@@ -138,6 +156,42 @@ def read_predictions(path: str, grid: TimeGrid) -> Optional[Dict]:
         'event_type': frame['event_type'].to_numpy(),
         'p_survive': frame['p_survive'].to_numpy(),
     }
+
+
+def ibd_types(labels_path: str, eligibility_path: str) -> np.ndarray:
+    """``IBD_TYPE`` of every ``labels.csv`` row, so a dump's ``idx`` indexes
+    it; ``''`` where the patient has none."""
+    labels = pd.read_csv(labels_path, usecols=['PATID'], dtype=str,
+                         keep_default_na=False)
+    types = pd.read_csv(eligibility_path, usecols=['PATID', 'IBD_TYPE'],
+                        dtype=str, keep_default_na=False)
+    if types['PATID'].duplicated().any():
+        raise ValueError(f'{eligibility_path} repeats a PATID')
+    # A left merge keeps labels.csv's row order.
+    merged = labels.merge(types, on='PATID', how='left', validate='m:1')
+    return merged['IBD_TYPE'].fillna('').to_numpy()
+
+
+def restrict(data: Dict, types: np.ndarray, subset: str, where: str) -> Dict:
+    """``data`` cut to its rows of IBD type ``subset``.
+
+    Refuses a dump with an ``idx`` outside ``labels.csv`` or a patient whose
+    type is not one of ``IBD_TYPES``: either means the dump and the tables
+    it is joined to are not of the same build.
+    """
+    idx = np.asarray(data['idx'], dtype=np.int64)
+    if idx.size and (idx.min() < 0 or idx.max() >= types.size):
+        raise ValueError(f'{where}: idx outside labels.csv\'s '
+                         f'{types.size} rows')
+    found = types[idx]
+    unknown = ~np.isin(found, IBD_TYPES)
+    if unknown.any():
+        raise ValueError(f'{where}: {int(unknown.sum())} episode(s) with no '
+                         f'IBD_TYPE in {IBD_TYPES}')
+    keep = found == subset
+    if not keep.any():
+        raise ValueError(f'{where}: no {subset} episodes')
+    return {name: values[keep] for name, values in data.items()}
 
 
 def eval_horizons(cfg: Dict, grid: TimeGrid) -> List[float]:
@@ -406,7 +460,17 @@ def main():
              'MODELLED_CAUSES, BRIER_INTEGRATION_DAYS, EVAL_HORIZONS_DAYS '
              'and the CR_DCAL_* keys. A mismatch with the dumped columns is '
              'an error rather than a silent rescoring.')
+    parser.add_argument('--subset', choices=IBD_TYPES, default=None,
+                        help='Score the test splits on this IBD type only')
+    parser.add_argument('--labels', type=str, default=None,
+                        help='labels.csv, whose row is a dump\'s idx '
+                             '(with --subset)')
+    parser.add_argument('--eligibility', type=str, default=None,
+                        help='ibd_eligibility.csv, for IBD_TYPE '
+                             '(with --subset)')
     args = parser.parse_args()
+    if args.subset and not (args.labels and args.eligibility):
+        parser.error('--subset needs --labels and --eligibility')
 
     grid, cfg = load_config(args.experiment_config)
     horizons = eval_horizons(cfg, grid)
@@ -426,6 +490,14 @@ def main():
     fold_names = get_fold_names(experiment_dir)
     if not fold_names:
         raise FileNotFoundError(f'No fold directories under {experiment_dir}')
+    types = None
+    if args.subset:
+        if 'full' in fold_names:
+            raise SystemExit(
+                f'{args.experiment_name} is tested on the held-out set, '
+                f'which is not split by IBD type')
+        types = ibd_types(args.labels, args.eligibility)
+        print(f"Subset: {args.subset} test patients")
     print(f"Scoring {len(fold_names)} folds on a {grid.n_bins}-bin grid: "
           f"{', '.join(grid.labels())}")
     print(f"Integrated Brier score: discharge to "
@@ -437,9 +509,18 @@ def main():
         return os.path.join(experiment_dir, fold_name, TASK,
                             f'{TASK}_{split}')
 
-    def predictions(fold_name, split):
+    def all_predictions(fold_name, split):
         return read_predictions(
             f'{stem(fold_name, split)}_finetuned_output.csv', grid)
+
+    def predictions(fold_name, split):
+        """The dump, cut to the subset's rows under --subset."""
+        data = all_predictions(fold_name, split)
+        if data is None or types is None:
+            return data
+        return restrict(data, types, args.subset, f'{fold_name} {split}')
+
+    n_train = {}
 
     def csc_curve(fold_name, split, idx):
         return load_csc_curve(experiment_dir, fold_name, split, idx, grid)
@@ -456,9 +537,17 @@ def main():
                     f'weights of Lee\'s concordance are fitted on')
             _, _, train_ev, train_days = outcomes(train, grid)
             censoring[fold_name] = (train_days, train_ev)
+            if types is not None:
+                n_train[fold_name] = int(
+                    all_predictions(fold_name, 'train')['idx'].size)
         return censoring[fold_name]
 
-    def header(split, folds_present, is_csc):
+    def header(split, folds_present, is_csc, n_test):
+        subset = {} if types is None else {
+            'subset': args.subset,
+            'n_test': n_test,
+            'n_train': [n_train[f] for f in folds_present],
+        }
         return {
             'experiment': args.experiment_name,
             'split': split,
@@ -470,23 +559,27 @@ def main():
             'eval_horizons_days': horizons,
             'csc_curve': is_csc,
             'cr_dcal': dcal,
+            **subset,
         }
 
-    for split in SPLITS:
+    for split in (SPLITS if types is None else SUBSET_SPLITS):
         per_metric: Dict[str, List] = defaultdict(list)
-        folds_present, has_csc = [], []
+        folds_present, has_csc, n_test = [], [], []
 
         for fold_name in fold_names:
             data = predictions(fold_name, split)
             if data is None:
                 continue
             folds_present.append(fold_name)
+            n_test.append(int(data['idx'].size))
             curve = csc_curve(fold_name, split, data['idx'])
             has_csc.append(curve is not None)
             reads = (None if curve is None else
                      csc_reads(curve, outcomes(data, grid)[3], grid,
                                horizons))
-            fold_censoring = train_censoring(fold_name) if horizons else None
+            # A subset run needs the train rows for n_train either way.
+            fold_censoring = (train_censoring(fold_name)
+                              if horizons or types is not None else None)
             for name, value in score(data, grid, dcal, horizons,
                                      fold_censoring, reads).items():
                 per_metric[name].append(value)
@@ -501,9 +594,11 @@ def main():
                 f'{split}: CSC parameters sit beside the dump in some folds '
                 f'and not others ({dict(zip(folds_present, has_csc))})')
 
-        out_path = os.path.join(experiment_dir, f'{split}_evaluation.yaml')
+        suffix = f'_{args.subset}' if args.subset else ''
+        out_path = os.path.join(experiment_dir,
+                                f'{split}_evaluation{suffix}.yaml')
         write_evaluation(out_path,
-                         header(split, folds_present, has_csc[0]),
+                         header(split, folds_present, has_csc[0], n_test),
                          per_metric)
 
         mean_c = np.nanmean(per_metric['Mean_Cindex'])

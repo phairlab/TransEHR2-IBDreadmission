@@ -75,7 +75,9 @@ Design decisions this module commits to
   the arrays are in ``extracted/`` and only the row indices are in
   ``fold{i}/``. One set of mappings serves all three partitions,
   ``MixedDataset`` stays cohort-wide and fold-agnostic, and ``item['idx']``
-  stays a row of ``labels.csv``.
+  stays the episode's position in the extracted arrays -- in
+  ``extracted_rows.npy``, not a row of ``labels.csv``; the dump scripts
+  map it to one.
 * **The dataset is handed paths, not open memmaps.** A ``np.memmap``
   pickles by value, and these loaders start their workers with ``spawn``;
   ``datasets.py``'s module docstring records the measurement, the
@@ -1990,7 +1992,7 @@ def extract_data(
     n_episodes = reader.n_episodes
     lookup_feats = list(reader.text_feats) + list(reader.drug_feats)
 
-    # Fold rows are positions in labels.csv, so a fold that
+    # Fold rows are positions in extracted_rows.npy, so a fold that
     # indexes past this cohort is either a stale fold directory or a
     # truncated run. Checked before any work, because the failure used to
     # surface as an IndexError from standardize_feats *after* the whole
@@ -2310,9 +2312,11 @@ def prepare_dataloaders(
     memory mapping; ``MixedDataset`` itself stays cohort-wide and knows
     nothing about folds.
 
-    ``Subset`` also leaves ``item['idx']`` a row of ``labels.csv`` rather
-    than a partition-local position, so ``episode_ids`` and any XAI score
-    resolve against the canonical order without a second mapping.
+    ``Subset`` also leaves ``item['idx']`` the episode's position in the
+    extracted arrays rather than a partition-local one, so ``episode_ids``
+    and any XAI score resolve against those arrays without a second
+    mapping. It is a position in ``extracted_rows.npy``, not a row of
+    ``labels.csv``: ``extracted_rows[idx]`` is the row.
 
     Args:
         data_dir (str): ``DATA_DIR``, holding ``extracted/``
@@ -2367,8 +2371,9 @@ def prepare_dataloaders(
             raise ValueError(
                 f"{rows_path} indexes rows [{rows.min()}, {rows.max()}] "
                 f"but the extracted cohort has {len(dataset)} episode(s). "
-                f"Fold rows are positions in labels.csv; rebuild the folds "
-                f"against the current labels.csv, or re-extract."
+                f"Fold rows are positions in extracted_rows.npy; rebuild "
+                f"the folds and the selection together with split.py, or "
+                f"re-extract."
             )
         subset = Subset(dataset, rows.tolist())
 

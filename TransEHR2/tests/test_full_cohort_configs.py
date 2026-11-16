@@ -16,13 +16,16 @@ CONFIGS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 EXPERIMENTS = os.path.join(CONFIGS, 'experiments')
 
 # stem -> the keys allowed to differ, and what the full-cohort config holds.
+# MEDIAN_FILL_UNSEEN_MISSING (user, 2026-11-15): held-out patients missing a
+# value no training patient is missing get the training median.
+FILL = {'MEDIAN_FILL_UNSEEN_MISSING': True}
 CHANGES = {
     'transehr2': {},
-    'tabdh': {},
-    'csc': {'FOLDS': ['full']},
+    'tabdh': FILL,
+    'csc': {'FOLDS': ['full'], **FILL},
     'transehr2_norank': {'PRETRAINED_FROM': 'part1_full_cohort_transehr2'},
     'transehr2_csc': {'PRETRAINED_FROM': 'part1_full_cohort_transehr2'},
-    'tabdh_norank': {},
+    'tabdh_norank': FILL,
 }
 
 

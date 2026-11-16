@@ -245,3 +245,34 @@ def test_lr_check_fits_the_tuning_fold_per_rate(fitted):
         fit_main([str(fitted['dataset_config']),
                   str(fitted['experiment_config']), '--lr_check',
                   '--device', 'cpu'])
+
+
+def test_fill_unseen_missing_takes_the_train_median_and_nothing_else(
+        tmp_path, capsys):
+    """MEDIAN_FILL_UNSEEN_MISSING (user, 2026-11-15): a held-out patient
+    missing a median-fill value no train patient lacks gets the train
+    median, with no indicator. Everything else is still refused."""
+    complete = pd.DataFrame({'L': ['0', '2', '7'], 'AGE': ['30', '50', '90'],
+                             'SEX': ['F', 'M', 'F']})
+    encoding = BaselineEncoding.fit(complete, ['L', 'AGE'], ['AGE'], ['SEX'],
+                                    fill_unseen_missing=True)
+    assert encoding.columns() == ['L', 'AGE', 'SEX=F', 'SEX=M']
+    held_out = complete.assign(AGE=['', '50', '90'])
+    x = encoding.transform(held_out, 'test')
+    filled = encoding.transform(complete.assign(AGE=['50', '50', '90']),
+                                'test')
+    assert np.array_equal(x, filled)            # the median, 50
+    assert "'AGE': 1" in capsys.readouterr().out
+
+    with pytest.raises(ValueError, match="'L'"):
+        encoding.transform(complete.assign(L=['0', '', '7']), 'test')
+    with pytest.raises(ValueError, match='never did'):
+        encoding.transform(complete.assign(SEX=['F', '', 'M']), 'test')
+
+    # It survives the save the dump reads back, and defaults to off.
+    path = str(tmp_path / 'enc' / 'encoding.json')
+    encoding.save(path)
+    assert BaselineEncoding.load(path).fill_unseen_missing
+    off = BaselineEncoding.fit(complete, ['L', 'AGE'], ['AGE'], ['SEX'])
+    with pytest.raises(ValueError, match='AGE'):
+        off.transform(held_out, 'test')

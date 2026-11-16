@@ -77,7 +77,8 @@ def fit_fold(cfg: Dict, data_dir: str, features: pd.DataFrame,
     train_rows = partition_rows(data_dir, fold_name, 'train')
     encoding = BaselineEncoding.fit(
         features.loc[train_rows], cfg['LINEAR_FEATURES'],
-        cfg['MEDIAN_FILL_FEATURES'], cfg['CATEGORICAL_FEATURES'])
+        cfg['MEDIAN_FILL_FEATURES'], cfg['CATEGORICAL_FEATURES'],
+        fill_unseen_missing=cfg.get('MEDIAN_FILL_UNSEEN_MISSING', False))
     encoding.save(os.path.join(out_dir, ENCODING_FILE))
     train, val, test = (load_split(data_dir, features, labels, encoding,
                                    fold_name, split)

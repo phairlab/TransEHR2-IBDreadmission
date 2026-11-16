@@ -3,6 +3,10 @@
 #
 # part1_tabdh.yaml with these changes, and nothing else:
 #   - EXPERIMENT_NAME is part1_full_cohort_tabdh;
+#   - MEDIAN_FILL_UNSEEN_MISSING is true (user, 2026-11-15): a held-out
+#     patient missing a MEDIAN_FILL_FEATURES value that no training
+#     patient is missing (AGE, in the first run) gets the training median with no
+#     indicator, as a new patient would, rather than stopping the run.
 # It runs on the full partition (IBDdataprep's full_partition.py): train is
 # folds 1-5's test patients, val is fold0's (it chooses the epoch, stops
 # pretraining and fits the recalibration), test is the held-out set. The
@@ -46,6 +50,7 @@ LINEAR_FEATURES: ["AGE", "L", "A", "E", "CCI", "QUINTMAT", "QUINTSOC"]
 # yet; age with no REG row or birth year at all. L, A, E and CCI are
 # computed by lace.py and never empty, so a missing cell there is an error.
 MEDIAN_FILL_FEATURES: ["AGE", "QUINTMAT", "QUINTSOC"]
+MEDIAN_FILL_UNSEEN_MISSING: true
 
 # One-hot over the levels seen on the train partition, none dropped.
 # ZONE_NAME is left out (user, 2026-10-19): its missing level all but

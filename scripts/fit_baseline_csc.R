@@ -32,7 +32,10 @@
 #       level, observed values sorted, then "missing" where one occurs.
 # A missing indicator or level exists only if train has a missing value, and
 # a level exists only if train has it: a val or test row that needs one train
-# lacks has no coefficient, so the run stops rather than guess one.
+# lacks has no coefficient, so the run stops rather than guess one. The one
+# exception is MEDIAN_FILL_UNSEEN_MISSING: true (user, 2026-11-15, for the
+# held-out set), under which a MEDIAN_FILL_FEATURES value missing outside
+# train, but never in it, is filled with the train median and no indicator.
 #
 # The export follows TransEHR2/tests/fixtures/make_csc_reference.R:
 # predict(type = "lp", reference = "zero") and
@@ -85,6 +88,7 @@ categorical <- unlist(cfg$CATEGORICAL_FEATURES)
 stray <- setdiff(filled, linear)
 if (length(stray) > 0) stop("not LINEAR_FEATURES: ", toString(stray))
 unfilled <- setdiff(linear, filled)
+fill_unseen <- isTRUE(cfg$MEDIAN_FILL_UNSEEN_MISSING)
 data_dir <- read_yaml(options$dataset_config)$DATA_DIR
 
 exact <- function(x) sprintf("%.17g", x)
@@ -195,8 +199,14 @@ encode <- function(rows, encoding, split) {
   unfillable <- setdiff(filled[sapply(filled, function(f)
     anyNA(rows[[f]]))], encoding$indicated)
   if (length(unfillable) > 0) {
-    stop(split, ": ", toString(unfillable),
-         " missing, but never missing in train")
+    if (!fill_unseen) {
+      stop(split, ": ", toString(unfillable),
+           " missing, but never missing in train")
+    }
+    cat(sprintf("%s: %s missing but never in train; filled with the train ",
+                split, toString(paste(unfillable, sapply(unfillable,
+                  function(f) sum(is.na(rows[[f]])))))),
+        "median, no indicator\n", sep = "")
   }
   columns <- c(
     lapply(setNames(linear, linear), function(f) {

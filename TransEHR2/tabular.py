@@ -98,11 +98,16 @@ class BaselineEncoding:
     means: Dict[str, float]
     sds: Dict[str, float]
     levels: Dict[str, List[str]]
+    # MEDIAN_FILL_UNSEEN_MISSING: a MEDIAN_FILL_FEATURES term missing in val
+    # or test but never in train is filled with the train median, with no
+    # indicator, rather than refused (user, 2026-11-15, for the held-out
+    # set: new patients, for whom only the training statistics exist).
+    fill_unseen_missing: bool = False
 
     @classmethod
     def fit(cls, train: pd.DataFrame, linear: Sequence[str],
-            median_fill: Sequence[str],
-            categorical: Sequence[str]) -> 'BaselineEncoding':
+            median_fill: Sequence[str], categorical: Sequence[str],
+            fill_unseen_missing: bool = False) -> 'BaselineEncoding':
         """Fit on the train partition's rows of ``baseline_features.csv``."""
         stray = [f for f in median_fill if f not in linear]
         if stray:
@@ -122,7 +127,8 @@ class BaselineEncoding:
             sds={f: float(filled[f].std(ddof=0)) for f in linear},
             levels={f: sorted(set(train[f]) - {''})
                     + ([MISSING_LEVEL] if (train[f] == '').any() else [])
-                    for f in categorical})
+                    for f in categorical},
+            fill_unseen_missing=bool(fill_unseen_missing))
 
     def columns(self) -> List[str]:
         """The encoded columns, in the order :meth:`transform` writes them."""
@@ -134,9 +140,16 @@ class BaselineEncoding:
     def transform(self, frame: pd.DataFrame, split: str) -> np.ndarray:
         """``frame``'s rows encoded, (n, len(columns())) float32."""
         numeric = _numeric(frame, self.linear)
-        _refuse_missing(
-            numeric, [f for f in self.linear if f not in self.indicated],
-            split)
+        unseen = [f for f in self.median_fill if f not in self.indicated]
+        refused = [f for f in self.linear if f not in self.indicated
+                   and not (self.fill_unseen_missing and f in unseen)]
+        _refuse_missing(numeric, refused, split)
+        if self.fill_unseen_missing:
+            counts = {f: int(numeric[f].isna().sum()) for f in unseen}
+            counts = {f: n for f, n in counts.items() if n}
+            if counts:
+                print(f"{split}: {counts} missing but never in train; "
+                      f"filled with the train median, no indicator.")
         missing = numeric[self.indicated].isna().to_numpy(np.float64)
         filled = numeric.fillna(self.medians)
         blocks = [np.stack([(filled[f].to_numpy() - self.means[f])

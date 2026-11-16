@@ -44,7 +44,7 @@ from TransEHR2.utils import move_batch_to_device
 
 from dump_baseline_csc_predictions import write_fold_dumps
 from dump_transehr2_deephit_predictions import (
-    SPLITS, install_nan_hooks, parse_args, setup
+    SPLITS, install_nan_hooks, labels_rows, parse_args, setup
 )
 
 
@@ -173,6 +173,8 @@ def main():
         for split, loader in zip(SPLITS, loaders):
             print(f"  {split}: {len(loader.dataset):,} episodes")
             splits[split] = run_inference(model, loader, device)
+            splits[split]['idx'] = labels_rows(s['data_dir'],
+                                               splits[split]['idx'])
             save_lp(os.path.join(folder,
                                  LP_FILE.format(task=TASK, split=split)),
                     splits[split], grid)

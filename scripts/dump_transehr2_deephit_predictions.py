@@ -168,6 +168,19 @@ def run_inference(
             np.concatenate(pmfs, axis=0), np.concatenate(survives))
 
 
+def labels_rows(data_dir: str, positions: np.ndarray) -> np.ndarray:
+    """The ``labels.csv`` rows of episodes given as extracted positions.
+
+    A TransEHR2 batch's ``idx`` is the episode's position in the extracted
+    arrays, which hold only the ``extracted_rows.npy`` selection. The dumps
+    are keyed by ``labels.csv`` row, as the baselines' are, so that every
+    model's dump of an episode carries the same key and ``--subset`` can
+    index ``labels.csv`` with it. Until 2026-11-16 the TransEHR2 dumps wrote
+    the position.
+    """
+    return np.load(os.path.join(data_dir, 'extracted_rows.npy'))[positions]
+
+
 def save_predictions_csv(
     idx: np.ndarray,
     time_to_event: np.ndarray,
@@ -397,7 +410,8 @@ def main():
             idx, times, types, cif, pmf, p_survive = run_inference(
                 model, loader, grid, device)
             save_predictions_csv(
-                idx, times, types, cif, pmf, p_survive, grid,
+                labels_rows(DATA_DIR, idx), times, types, cif, pmf,
+                p_survive, grid,
                 f'{args.model_dir}/{args.experiment_name}/{fold_name}/'
                 f'{TASK}/{TASK}_{split}_finetuned_output.csv')
 

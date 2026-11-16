@@ -492,7 +492,10 @@ def main():
 
     for fold_name in fold_name_list:
         timer.start_fold(fold_name)
-        fold_index = int(''.join(ch for ch in fold_name if ch.isdigit()))
+        # fold{i} offsets the seeds by i; full (IBDdataprep's full_partition.py)
+        # has no number and takes the configured seeds as they stand.
+        digits = ''.join(ch for ch in fold_name if ch.isdigit())
+        fold_index = int(digits) if digits else 0
 
         dataloader_list = prepare_dataloaders(
             DATA_DIR,

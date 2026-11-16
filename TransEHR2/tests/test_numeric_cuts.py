@@ -272,3 +272,44 @@ def test_a_cohort_with_no_folds_is_an_error(tmp_path):
     result = _run(tmp_path)
     assert result.returncode == 1
     assert 'no fold' in result.stderr
+
+
+def _add_full(tmp_path, rows):
+    full = tmp_path / 'full'
+    full.mkdir()
+    np.save(full / 'full_train_rows.npy', np.asarray(rows))
+
+
+def test_full_gets_statistics_over_its_own_train_rows(tmp_path):
+    """IBDdataprep's full partition is found beside the folds."""
+    extracted = _extraction(tmp_path, [1.0] * 50 + [3.0] * 50)
+    _add_full(tmp_path, np.arange(50, 100))
+
+    result = _run(tmp_path, '--folds', 'full')
+    assert result.returncode == 0, result.stderr
+
+    stats = np.load(extracted / 'summary_statistics_full.npz')
+    assert stats['means'][0] == pytest.approx(3.0)
+    assert not (extracted / 'summary_statistics_fold0.npz').exists()
+
+
+def test_folds_leaves_every_other_fold_file_alone(tmp_path):
+    extracted = _extraction(tmp_path, [1.0] * 99 + [1e6])
+    _add_full(tmp_path, np.arange(100))
+    _run(tmp_path)
+    before = (extracted / 'summary_statistics_fold0.npz').read_bytes()
+
+    result = _run(tmp_path, '--cuts', _table(tmp_path, 'CRP,0.0,2.0\n'),
+                  '--folds', 'full')
+    assert result.returncode == 0, result.stderr
+    assert (extracted / 'summary_statistics_fold0.npz').read_bytes() == before
+    assert np.load(extracted / 'summary_statistics_full.npz')[
+        'cut_high'][0] == 2.0
+
+
+def test_a_named_fold_with_no_train_rows_is_an_error(tmp_path):
+    extracted = _extraction(tmp_path, [1.0, 2.0])
+    result = _run(tmp_path, '--folds', 'full')
+    assert result.returncode == 1
+    assert 'full' in result.stderr
+    assert not list(extracted.glob('summary_statistics_*'))

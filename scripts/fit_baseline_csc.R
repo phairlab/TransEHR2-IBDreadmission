@@ -1,6 +1,7 @@
 # Fit the Part 1 cause-specific Cox baseline and export its parameters.
 #
-# For each fold in FOLDS of the experiment config, fits riskRegression::CSC,
+# For each fold in FOLDS of the experiment config (an integer i for fold{i},
+# or a partition name such as full), fits riskRegression::CSC,
 # one Cox model per modelled cause, on the train partition, and writes under
 # {MODEL_DIR}/{EXPERIMENT_NAME}/fold{i}/competing_risks/ what
 # TransEHR2/csc.py rebuilds the cumulative incidences from:
@@ -100,10 +101,16 @@ features <- fread(file.path(data_dir, cfg$BASELINE_FEATURES_FILE),
                   na.strings = "")
 if (anyDuplicated(features$idx)) stop("baseline features repeat an idx")
 
+# A FOLDS entry's directory name: an integer i is fold{i}, and a name (full,
+# from IBDdataprep's full_partition.py) is used as it stands.
+fold_name <- function(fold) {
+  if (is.numeric(fold)) sprintf("fold%d", as.integer(fold)) else fold
+}
+
 # One partition of one fold: outcomes and raw features, in idx order.
 read_partition <- function(fold, split) {
-  path <- file.path(data_dir, sprintf("fold%d", fold),
-                    sprintf("fold%d_%s.csv", fold, split))
+  path <- file.path(data_dir, fold_name(fold),
+                    sprintf("%s_%s.csv", fold_name(fold), split))
   listed <- fread(path, select = c("PATID", "STAY_INDEX", "TIME_TO_EVENT",
                                    "EVENT_TYPE"),
                   colClasses = list(character = "PATID"))
@@ -226,7 +233,7 @@ outcome <- function(rows) {
 }
 
 fit_fold <- function(fold) {
-  cat(sprintf("\n== fold%d ==\n", fold))
+  cat(sprintf("\n== %s ==\n", fold_name(fold)))
   partitions <- lapply(setNames(SPLITS, SPLITS),
                        function(s) read_partition(fold, s))
   encoding <- fit_encoding(partitions$train)
@@ -245,7 +252,7 @@ fit_fold <- function(fold) {
   train <- cbind(outcome(partitions$train), designs$train)
   absent <- causes[!codes %in% train$event]
   if (length(absent) > 0) {
-    stop("fold", fold, ": no train events of ", toString(absent))
+    stop(fold_name(fold), ": no train events of ", toString(absent))
   }
   formula <- reformulate(names(designs$train),
                          response = "Hist(time, event)")
@@ -283,12 +290,12 @@ fit_fold <- function(fold) {
                       collapse = ", ")))
       }
     }
-    stop("fold", fold, ": coefficient(s) not estimable: ",
+    stop(fold_name(fold), ": coefficient(s) not estimable: ",
          toString(unestimable))
   }
 
   out_dir <- file.path(cfg$MODEL_DIR, cfg$EXPERIMENT_NAME,
-                       sprintf("fold%d", fold), TASK)
+                       fold_name(fold), TASK)
   dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
   jump <- sort(unique(train$time[train$event > 0]))

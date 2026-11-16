@@ -140,6 +140,11 @@ def comparison_row(metric: str, arm_a: str, arm_b: str, a: np.ndarray,
     try:
         test = corrected_resampled_ttest(a, b, ratio)
     except ValueError as err:
+        # One fold (the full-cohort models on the held-out set) has a
+        # difference but nothing to test it against.
+        # A CV comparison left with one usable fold stays blank as before.
+        if len(a) == len(b) == 1 and not np.isnan(a[0] - b[0]):
+            row['mean_difference'] = float(a[0] - b[0])
         row['note'] = str(err)
         return row
     row['mean_difference'] = test.mean_difference

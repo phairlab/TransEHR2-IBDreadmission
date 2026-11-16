@@ -106,17 +106,20 @@ def load_selection(data_dir: str) -> np.ndarray:
 
 
 def find_fold_train_rows(data_dir: str) -> dict:
-    """Collect ``fold{i}_train_rows.npy`` from each ``fold{i}/``.
+    """Collect ``fold{i}_train_rows.npy`` from each ``fold{i}/``, and
+    ``full_train_rows.npy`` from ``full/`` when it exists.
 
     One set of standardization statistics per fold, computed over that
     fold's *training* rows alone -- statistics over the whole cohort would
-    leak val and test into the scaling.
+    leak val and test into the scaling. ``full`` (IBDdataprep's
+    ``full_partition.py``) is a partition like a fold: its statistics are
+    its training rows', and they standardize its held-out test set too.
     """
     fold_train_rows = {}
     if not os.path.isdir(data_dir):
         return fold_train_rows
     for item in sorted(os.listdir(data_dir)):
-        if not re.fullmatch(r'fold\d+', item):
+        if not re.fullmatch(r'fold\d+|full', item):
             continue
         rows_path = os.path.join(data_dir, item, f'{item}_train_rows.npy')
         if os.path.exists(rows_path):

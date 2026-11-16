@@ -283,3 +283,22 @@ def test_a_header_without_a_compared_field_is_refused(tmp_path, monkeypatch):
                        match=r"header lacks \['eval_horizons_days', "
                              r"'cr_dcal\.chi2_bins'\]"):
         run(tmp_path, monkeypatch)
+
+
+def test_one_fold_keeps_the_difference_but_tests_nothing():
+    """The full-cohort models, scored once on the held-out set."""
+    from compare_models import comparison_row
+    row = comparison_row('m', 'A raw', 'B raw', np.array([0.7]),
+                         np.array([0.65]), RATIO, tested=True)
+    assert row['mean_a'] == 0.7 and row['mean_b'] == 0.65
+    assert row['mean_difference'] == pytest.approx(0.05)
+    assert all(np.isnan(row[k]) for k in ('t', 'df', 'p', 'se_a', 'se_b'))
+    assert 'At least 2 folds' in row['note']
+
+
+def test_a_cv_comparison_with_one_usable_fold_stays_blank():
+    from compare_models import comparison_row
+    a = np.array([0.7, np.nan, np.nan])
+    b = np.array([0.6, 0.6, 0.6])
+    row = comparison_row('m', 'A raw', 'B raw', a, b, RATIO, tested=True)
+    assert np.isnan(row['mean_difference'])

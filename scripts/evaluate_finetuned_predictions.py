@@ -73,12 +73,16 @@ def get_fold_names(experiment_dir: str,
     ``TUNING_FOLD`` is excluded by default. These are the numbers that get
     quoted, and the fold the hyperparameters were chosen on is not one of
     them. It only appears here at all if it was dumped deliberately.
+
+    ``full`` (IBDdataprep's ``full_partition.py``: the whole cohort, tested
+    on the held-out set) is found too, after any numbered fold. A full-cohort
+    experiment has only that one.
     """
     exclude = [TUNING_FOLD] if exclude is None else exclude
     folds = [d for d in os.listdir(experiment_dir)
-             if d not in exclude and re.match(r'fold\d+$', d)
+             if d not in exclude and re.match(r'(fold\d+|full)$', d)
              and os.path.isdir(os.path.join(experiment_dir, d))]
-    folds.sort(key=lambda d: int(d[4:]))
+    folds.sort(key=lambda d: (d == 'full', int(d[4:]) if d != 'full' else 0))
     return folds
 
 

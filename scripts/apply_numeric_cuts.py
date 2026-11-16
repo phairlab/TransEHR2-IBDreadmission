@@ -21,9 +21,14 @@ them together means neither can be applied without the other.
 Running this with no ``--cuts`` restores the statistics to what extraction
 wrote, which is how a cut table is withdrawn.
 
+``--folds`` limits it to the named folds and leaves every other fold's file
+as it is. That is how a partition added after extraction -- ``full``, from
+IBDdataprep's ``full_partition.py`` -- gets its statistics without touching
+the ones finished runs were trained under.
+
 Usage:
     python scripts/apply_numeric_cuts.py <data_dir> \\
-        --cuts <data_dir>/numeric_cuts.csv
+        --cuts <data_dir>/numeric_cuts.csv [--folds full]
 """
 
 from __future__ import annotations
@@ -75,6 +80,9 @@ def main(argv=None) -> int:
                         help='The table calibrate_outlier_filter.py '
                              '--emit_cuts wrote. Omit to restore the '
                              'statistics extraction wrote.')
+    parser.add_argument('--folds', nargs='+', default=None,
+                        help='Only these folds, e.g. full. Default: every '
+                             'fold*/ and full/ under data_dir.')
     args = parser.parse_args(argv)
 
     extracted_dir = os.path.join(args.data_dir, 'extracted')
@@ -98,6 +106,13 @@ def main(argv=None) -> int:
               f"Statistics are per fold, over that fold's training rows "
               f"alone.", file=sys.stderr)
         return 1
+    if args.folds:
+        missing = [f for f in args.folds if f not in fold_train_rows]
+        if missing:
+            print(f"ERROR: no train rows for {', '.join(missing)} under "
+                  f"{args.data_dir}. Nothing written.", file=sys.stderr)
+            return 1
+        fold_train_rows = {f: fold_train_rows[f] for f in args.folds}
 
     arrays = open_arrays(extracted_dir, len(names))
     for fold_name, rows in fold_train_rows.items():

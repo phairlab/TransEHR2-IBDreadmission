@@ -129,3 +129,14 @@ def test_recalibration_dumps_beside_and_scoring_reads_it_as_a_split(
             assert all(np.isfinite(results[name][key]))
     # The same routines, so the same keys: the two files compare key for key.
     assert set(results['test']) == set(results['test_recal_aj'])
+
+
+def test_the_fold_lister_finds_full_after_the_numbered_folds(tmp_path):
+    """full: IBDdataprep's whole-cohort partition, tested on the held-out
+    set. fold0 is still left out, and fold10 still sorts after fold2."""
+    from evaluate_finetuned_predictions import get_fold_names
+    for name in ('fold0', 'fold2', 'fold10', 'full', 'fullish', 'notes'):
+        (tmp_path / name).mkdir()
+    assert get_fold_names(str(tmp_path)) == ['fold2', 'fold10', 'full']
+    assert get_fold_names(str(tmp_path), exclude=[]) == [
+        'fold0', 'fold2', 'fold10', 'full']

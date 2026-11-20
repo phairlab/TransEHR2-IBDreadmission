@@ -82,6 +82,14 @@ TASK = 'competing_risks'
 SUBSET_SPLITS = ('test', 'test_recal_aj')
 # ibd_eligibility.csv's IBD_TYPE values.
 IBD_TYPES = ('CD', 'UC', 'IBDU')
+# The time convention of every metric read at a horizon (Lee's C, the IBS to
+# it, its null and IPA), recorded in each evaluation's header. The metrics
+# named "at" a cut (Cindex_at_, Brier_at_) are read at the grid's cuts, and
+# do not follow it.
+HORIZON_CONVENTION = (
+    'days since the index time; an event is by horizon d when its time is '
+    '<= d; F_k is read at d on the continuous curve (Hyman-interpolated '
+    'for a grid model, exact for a CSC)')
 
 
 def get_fold_names(experiment_dir: str,
@@ -557,6 +565,7 @@ def main():
             'modelled_causes': list(grid.cause_names),
             'brier_integration_days': grid.brier_integration_days,
             'eval_horizons_days': horizons,
+            'horizon_convention': HORIZON_CONVENTION,
             'csc_curve': is_csc,
             'cr_dcal': dcal,
             **subset,

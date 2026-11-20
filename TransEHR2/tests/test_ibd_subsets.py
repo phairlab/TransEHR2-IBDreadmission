@@ -30,6 +30,7 @@ SCORED = ('test', 'test_recal_aj')
 # Header fields that name the run rather than describe its patients.
 HEADER = {'experiment', 'split', 'task', 'folds', 'time_grid_cuts_days',
           'modelled_causes', 'brier_integration_days', 'eval_horizons_days',
+          'horizon_convention',
           'csc_curve', 'cr_dcal', 'subset', 'n_test', 'n_train'}
 
 

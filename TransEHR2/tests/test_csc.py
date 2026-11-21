@@ -380,13 +380,13 @@ def test_the_csc_scripts_end_to_end(tmp_path, monkeypatch):
         for name in ('test', 'test_recal_aj'):
             assert np.isfinite(results[name][key][0]), (name, key)
 
-    # The concordance read the exact curve at the horizon, not the grid.
+    # The concordance read the exact curve at the horizon, not the grid,
+    # weighted by the test split's own censoring curve.
     _, ci, ev, days = outcomes(dump, grid)
-    _, _, train_ev, train_days = outcomes(lp['train'], grid)
     at_30, _ = CSCCurve(lp['test']['lp'], baseline).read(np.array([30.0]))
     assert results['test']['Readmission_Cindex_Lee_at_30d'][0] == \
         pytest.approx(lee_weighted_concordance(
-            at_30[:, 0, 0], days, ci, ev, 0, 30.0, train_days, train_ev),
+            at_30[:, 0, 0], days, ci, ev, 0, 30.0, days, ev),
             rel=1e-12)
 
 
@@ -416,3 +416,24 @@ def test_csc_parameters_in_only_some_folds_are_refused(tmp_path,
     dump_baseline_csc_predictions.main()
     with pytest.raises(ValueError, match='some folds and not others'):
         evaluate_finetuned_predictions.main()
+
+
+def test_the_quantile_time_is_the_knot_reaching_q():
+    grid = TimeGrid(CUTS, CAUSES)
+    baseline, _, test = val_and_test(grid)
+    curve = CSCCurve(test['lp'], baseline, chunk=33)
+    horizon = float(grid.cuts[1])
+    total, _ = curve.read(np.array([horizon]))
+    previous = None
+    for q in (0.1, 0.25, 0.5):
+        estimated = curve.half_incidence_times(horizon, q)
+        target = q * total[:, :, 0]
+        assert np.all(estimated[np.isfinite(estimated)] <= horizon)
+        for k in range(len(CAUSES)):
+            _, at = curve.read(np.array([0.0]), estimated[:, k])
+            assert np.all(at[:, k] >= target[:, k])
+        if previous is not None:
+            assert np.all(estimated >= previous)
+        previous = estimated
+    np.testing.assert_array_equal(curve.half_incidence_times(horizon),
+                                  curve.half_incidence_times(horizon, 0.5))

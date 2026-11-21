@@ -815,8 +815,8 @@ def lee_weighted_concordance(
     is_event: np.ndarray,
     k: int,
     tau: float,
-    train_times_days: np.ndarray,
-    train_is_event: np.ndarray,
+    censoring_times_days: np.ndarray,
+    censoring_is_event: np.ndarray,
 ) -> float:
     r"""Lee et al.'s weighted concordance of cause ``k`` at horizon ``tau``.
 
@@ -833,24 +833,26 @@ def lee_weighted_concordance(
     whose recorded time is strictly later, whatever happened to it then. A
     tie in the score counts nothing, as the strict comparison has it.
 
-    ``G`` is the Kaplan-Meier of true censoring on the training partition,
-    where Lee's code fits it with every outcome but cause ``k`` as the
-    censoring event, so that a competing event would be weighted as if the
-    episode had left observation. It is read as Lee's code reads its
-    lifelines curve: at the first training time at or after ``T_i``, or at
-    the last one past them all. That is ``G(T_i)`` up to the gap between
-    ``T_i`` and the next training time. Where ``G`` reaches zero -- at the
-    grid's horizon, where every training episode still at risk is censored
-    -- the last nonzero value is carried forward, as Lee's code does, rather
-    than floored as :func:`censoring_survival` floors it.
+    ``G`` is the Kaplan-Meier of true censoring on the episodes
+    ``censoring_*`` gives -- the scored split itself in
+    ``evaluate_finetuned_predictions.py``, as for every IPCW metric there
+    (plan 2026-11-18, B3) -- where Lee's code fits it on the training data
+    with every outcome but cause ``k`` as the censoring event, so that a
+    competing event would be weighted as if the episode had left
+    observation. It is read as Lee's code reads its lifelines curve: at the
+    first of those times at or after ``T_i``, or at the last one past them
+    all, which is ``G(T_i)`` when ``T_i`` is among them. Where ``G`` reaches
+    zero -- at the grid's horizon, where every episode still at risk is
+    censored -- the last nonzero value is carried forward, as Lee's code
+    does, rather than floored as :func:`censoring_survival` floors it.
 
     Args:
         risk: (n,) the score, ``F_k(tau)``.
         times_days, cause_index, is_event, k: the scored episodes, as
             :func:`cause_specific_brier` takes them.
         tau: the horizon, in days.
-        train_times_days, train_is_event: the training partition's
-            outcomes, for ``G``.
+        censoring_times_days, censoring_is_event: the outcomes ``G`` is
+            fitted on, in days.
 
     Returns:
         The concordance, or NaN when no case has a control.
@@ -862,14 +864,14 @@ def lee_weighted_concordance(
     if cases.size == 0:
         return float('nan')
 
-    train_t = np.asarray(train_times_days, dtype=np.float64)
-    jump_times, surv = censoring_survival(train_t, train_is_event)
+    fit_t = np.asarray(censoring_times_days, dtype=np.float64)
+    jump_times, surv = censoring_survival(fit_t, censoring_is_event)
     # The floor stands for a zero, and the zeros are a suffix.
     positive = surv > 1e-8
     if positive.any():
         surv = np.where(positive, surv, surv[positive][-1])
-    # lifelines' timeline: every training time, and zero.
-    timeline = np.unique(np.concatenate([[0.0], train_t]))
+    # lifelines' timeline: every time G is fitted on, and zero.
+    timeline = np.unique(np.concatenate([[0.0], fit_t]))
     at = timeline[np.minimum(np.searchsorted(timeline, t[cases], side='left'),
                              timeline.size - 1)]
     weight = 1.0 / _censoring_at(jump_times, surv, at, left_limit=False) ** 2
@@ -1197,16 +1199,59 @@ def cr_dcal_chi2_from_values(
     return statistic, float(chi2.sf(statistic, df=n_bins))
 
 
+def incidence_quantile_time(cif_k: np.ndarray, grid: TimeGrid,
+                            q: float = 0.5,
+                            horizon_days: Optional[float] = None,
+                            n_halvings: int = 60) -> np.ndarray:
+    """Each patient's time by which a share ``q`` of their cause-``k``
+    incidence up to ``H`` has occurred, in days.
+
+    The first ``t`` in ``[0, H]`` at which ``F_k(t) / F_k(H) = q`` on the
+    curve :func:`interpolate_cif` draws, ``H`` the grid's horizon unless
+    ``horizon_days`` is given (plan 2026-11-18, B1). ``F_k(H)`` is read
+    through :func:`interpolate_cif` too, so at the horizon it is the last
+    cut's value. The curve is monotone and runs from 0 at discharge to
+    ``F_k(H)``, so the level is crossed exactly once, or along a flat
+    stretch whose start is the time returned. Found by bisection on
+    ``[0, H]``: sixty halvings leave an interval far below a minute.
+
+    Args:
+        cif_k: (n, n_bins) cumulative incidence of one cause at the cuts.
+        q: the share, in (0, 1).
+        horizon_days: ``H``, in (0, the grid's horizon].
+
+    Returns:
+        (n,) days in ``[0, H]``; NaN where ``F_k(H) = 0``.
+    """
+    if not 0.0 < q < 1.0:
+        raise ValueError(f'q must be in (0, 1); got {q}')
+    cif_k = np.asarray(cif_k, dtype=np.float64)
+    if horizon_days is None:
+        horizon = grid.horizon_days
+        at_horizon = cif_k[:, -1]
+    else:
+        horizon = float(horizon_days)
+        if not 0.0 < horizon <= grid.horizon_days:
+            raise ValueError(f'horizon_days must be in (0, '
+                             f'{grid.horizon_days}]; got {horizon}')
+        at_horizon = interpolate_cif(cif_k, grid, np.array([horizon]))[:, 0]
+    target = q * at_horizon
+    lo = np.zeros(cif_k.shape[0])
+    hi = np.full(cif_k.shape[0], horizon)
+    for _ in range(n_halvings):
+        mid = 0.5 * (lo + hi)
+        reached = interpolate_cif(cif_k, grid, mid, per_row=True) >= target
+        hi = np.where(reached, mid, hi)
+        lo = np.where(reached, lo, mid)
+    return np.where(target > 0.0, hi, np.nan)
+
+
 def half_incidence_time(cif_k: np.ndarray, grid: TimeGrid,
                         n_halvings: int = 60) -> np.ndarray:
-    """Each patient's estimated time of cause ``k``, in days.
-
-    The first ``t`` at which ``F_k(t) / F_k(tau) = 1/2`` on the curve
-    :func:`interpolate_cif` draws, ``tau`` the last cut (user, 2026-10-27).
-    The curve is monotone and runs from 0 at discharge to ``F_k(tau)`` at
-    the horizon, so the half-way level is crossed exactly once, or along a
-    flat stretch whose start is the time returned. Found by bisection on
-    ``[0, tau]``: sixty halvings leave an interval far below a minute.
+    """Each patient's estimated time of cause ``k``, in days: the first
+    ``t`` at which ``F_k(t) / F_k(tau) = 1/2``, ``tau`` the last cut (user,
+    2026-10-27). :func:`incidence_quantile_time` at ``q = 0.5`` and the
+    grid's horizon.
 
     Args:
         cif_k: (n, n_bins) cumulative incidence of one cause at the cuts.
@@ -1214,16 +1259,42 @@ def half_incidence_time(cif_k: np.ndarray, grid: TimeGrid,
     Returns:
         (n,) days in ``[0, tau]``; NaN where ``F_k(tau) = 0``.
     """
-    cif_k = np.asarray(cif_k, dtype=np.float64)
-    target = 0.5 * cif_k[:, -1]
-    lo = np.zeros(cif_k.shape[0])
-    hi = np.full(cif_k.shape[0], grid.horizon_days)
-    for _ in range(n_halvings):
-        mid = 0.5 * (lo + hi)
-        reached = interpolate_cif(cif_k, grid, mid, per_row=True) >= target
-        hi = np.where(reached, mid, hi)
-        lo = np.where(reached, lo, mid)
-    return np.where(target > 0.0, hi, np.nan)
+    return incidence_quantile_time(cif_k, grid, 0.5, None, n_halvings)
+
+
+def pinball_loss(estimated: np.ndarray, days: np.ndarray,
+                 cause_index: np.ndarray, is_event: np.ndarray, k: int,
+                 horizon_days: float, q: float) -> float:
+    r"""IPCW pinball (quantile) loss of the estimated time of cause ``k``
+    up to ``H`` (plan 2026-11-18, B2).
+
+    .. math::
+        L_q(y, \hat y) = q (y - \hat y) \text{ if } y \ge \hat y,
+        \quad (1 - q)(\hat y - y) \text{ otherwise}
+
+    Scored over the episodes observed to have cause ``k`` by ``H``
+    (``days <= H``) with a finite estimate, each weighted by ``1 / G(y-)``,
+    ``G`` the Kaplan-Meier of censoring fitted on the episodes given, read
+    just before ``y``. Returns the weighted mean, or NaN when nothing is
+    scored.
+
+    Args:
+        estimated: (n,) :func:`incidence_quantile_time` at ``q`` and ``H``.
+        days, cause_index, is_event, k: the scored episodes, as
+            :func:`cause_specific_brier` takes them.
+    """
+    t = np.asarray(days, dtype=np.float64)
+    ev = np.asarray(is_event, dtype=bool)
+    estimated = np.asarray(estimated, dtype=np.float64)
+    rows = (ev & (np.asarray(cause_index) == k) & (t <= horizon_days)
+            & np.isfinite(estimated))
+    if not rows.any():
+        return float('nan')
+    jump_times, surv = censoring_survival(t, ev)
+    weight = 1.0 / _censoring_at(jump_times, surv, t[rows], left_limit=True)
+    error = t[rows] - estimated[rows]
+    loss = np.where(error >= 0.0, q * error, (q - 1.0) * error)
+    return float(np.sum(weight * loss) / np.sum(weight))
 
 
 def time_errors(estimated: np.ndarray, days: np.ndarray,

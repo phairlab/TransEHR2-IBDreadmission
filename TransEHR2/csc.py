@@ -231,19 +231,23 @@ class CSCCurve:
                 self.n * self.hazard.shape[0] * self.offsets[0].size)
         return shared, rows_out
 
-    def half_incidence_times(self, horizon: float) -> np.ndarray:
-        """(n, n_causes) each estimated time, as ``half_incidence_time``.
+    def half_incidence_times(self, horizon: float,
+                             q: float = 0.5) -> np.ndarray:
+        """(n, n_causes) each estimated time, as ``half_incidence_time``,
+        or ``incidence_quantile_time`` with ``q``.
 
-        The first time ``F_k`` reaches half of ``F_k(horizon)``: on a step
+        The first time ``F_k`` reaches ``q`` of ``F_k(horizon)``: on a step
         curve, the knot where it steps to or past that level. NaN where
         ``F_k(horizon) = 0``.
         """
+        if not 0.0 < q < 1.0:
+            raise ValueError(f'q must be in (0, 1); got {q}')
         out = np.empty((self.n, self.hazard.shape[0]))
         for lo in range(0, self.n, self.chunk):
             rows = slice(lo, min(lo + self.chunk, self.n))
             knots, values, _ = self._knots(rows)
             end = np.searchsorted(knots, horizon, side='right')
-            target = 0.5 * values[:, :, end:end + 1]
+            target = q * values[:, :, end:end + 1]
             # values[..., 0] is the curve before the first knot, zero, so a
             # positive target is first reached at index j >= 1: knot j - 1.
             first = np.argmax(values[:, :, :end + 1] >= target, axis=2)

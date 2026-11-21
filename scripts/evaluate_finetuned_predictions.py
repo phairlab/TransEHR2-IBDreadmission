@@ -16,8 +16,14 @@ under the same keys, so ``test_recal_aj_evaluation.yaml`` reads against
 ``test_evaluation.yaml`` key for key; how each corrected dump was made is in
 that script's ``test_recal_aj_record.yaml``.
 
-The fixed-horizon concordance weights by a censoring curve fitted on the
-fold's train dump, which therefore has to exist.
+Every IPCW weight -- the Brier scores, Lee's concordance and the pinball
+loss -- comes from a censoring curve fitted on the scored split itself
+(plan 2026-11-18, B3): the test fold, val, the held-out set or a subset.
+
+The pinball loss scores the time by which a share ``PINBALL_Q`` (default
+0.25) of each patient's cause-``k`` incidence up to ``H`` has occurred,
+against the observed times of cause ``k`` by ``H``, at every evaluation
+horizon and the grid's horizon (plan 2026-11-18, B2).
 
 The cause-specific Cox baseline is scored on its exact curve, rebuilt from
 the parameters it leaves beside its dumps (``TransEHR2.csc``): the
@@ -30,8 +36,8 @@ With ``--subset`` (CD, UC or IBDU), the same dumps are scored again on the
 test patients of that IBD type only: ``IBD_TYPE`` per patient from
 ``ibd_eligibility.csv``, joined through ``labels.csv``, whose 0-based row is
 a dump's ``idx``. Nothing is refitted: ``test_recal_aj`` is the whole-cohort
-recalibrated dump, restricted like ``test``. Lee's censoring curve is fitted
-on the subset's own train rows (user, 2026-11-16). Only the two test splits
+recalibrated dump, restricted like ``test``. The censoring curves are fitted
+on the subset's own test rows, as above. Only the two test splits
 are scored, into ``{split}_evaluation_{subset}.yaml``, whose header adds the
 subset and each fold's ``n_test`` (the subset's test rows) and ``n_train``
 (every train row), from which ``compare_models.py --subset`` takes its
@@ -69,8 +75,9 @@ from TransEHR2.survival import (
     aalen_johansen, brier_times, cause_specific_brier,
     cause_specific_concordance, cr_d_calibration_from_values,
     cr_dcal_chi2_from_values, event_times_days, format_days,
-    half_incidence_time, integrated_brier, integrated_brier_to,
-    interpolate_cif, lee_weighted_concordance, metric_label, time_errors
+    half_incidence_time, incidence_quantile_time, integrated_brier,
+    integrated_brier_to, interpolate_cif, lee_weighted_concordance,
+    metric_label, pinball_loss, time_errors
 )
 
 
@@ -90,6 +97,10 @@ HORIZON_CONVENTION = (
     'days since the index time; an event is by horizon d when its time is '
     '<= d; F_k is read at d on the continuous curve (Hyman-interpolated '
     'for a grid model, exact for a CSC)')
+# Where every IPCW weight's censoring curve is fitted, in each header.
+CENSORING_SOURCE = 'Kaplan-Meier of censoring on the scored split itself'
+# The pinball loss's share of incidence, unless PINBALL_Q sets it.
+DEFAULT_PINBALL_Q = 0.25
 
 
 def get_fold_names(experiment_dir: str,
@@ -261,21 +272,31 @@ def write_evaluation(out_path: str, header: Dict,
                   sort_keys=False)
 
 
+def pinball_horizons(grid: TimeGrid, horizons: List[float]) -> List[float]:
+    """The horizons the pinball loss is scored to: the evaluation horizons
+    and the grid's horizon."""
+    return sorted(set(horizons) | {float(grid.horizon_days)})
+
+
 def csc_reads(curve: CSCCurve, days: np.ndarray, grid: TimeGrid,
-              horizons: List[float]) -> Dict:
+              horizons: List[float],
+              pinball_q: float = DEFAULT_PINBALL_Q) -> Dict:
     """Every read :func:`score` makes of a CSC curve, in one pass.
 
     ``F`` at each point of every Brier axis and at the last cut, as
     ``times`` and ``shared`` (n, n_causes, p), and at each patient's own
-    ``days`` as ``rows`` (n, n_causes); and each estimated time of event,
-    as ``half`` (n, n_causes).
+    ``days`` as ``rows`` (n, n_causes); each estimated time of event, as
+    ``half`` (n, n_causes); and ``quantile``, ``{H: (n, n_causes)}``, the
+    pinball loss's estimated times to each of :func:`pinball_horizons`.
     """
     times = np.unique(np.concatenate(
         [brier_times(grid), [grid.horizon_days]]
         + [brier_times(grid, tau) for tau in horizons]))
     shared, rows = curve.read(times, days)
     return {'times': times, 'shared': shared, 'rows': rows,
-            'half': curve.half_incidence_times(grid.horizon_days)}
+            'half': curve.half_incidence_times(grid.horizon_days),
+            'quantile': {h: curve.half_incidence_times(h, pinball_q)
+                         for h in pinball_horizons(grid, horizons)}}
 
 
 def dcal_values(data: Dict, grid: TimeGrid, k: int, days: np.ndarray,
@@ -334,8 +355,8 @@ def load_csc_curve(experiment_dir: str, fold_name: str, split: str,
 
 
 def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
-          censoring: Optional[Tuple[np.ndarray, np.ndarray]],
-          csc: Optional[Dict] = None) -> Dict[str, float]:
+          csc: Optional[Dict] = None,
+          pinball_q: float = DEFAULT_PINBALL_Q) -> Dict[str, float]:
     """Every metric one split of one fold contributes.
 
     Discrimination at each cut and over the grid, calibration by the
@@ -344,8 +365,8 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
     over forty deaths is a number, but not one to put a decimal place on.
 
     At each of ``horizons``, Lee's weighted concordance of ``F_k(tau)``,
-    with ``censoring`` -- the training partition's ``(days, is_event)`` --
-    for its weights; the integrated Brier score from discharge to ``tau``;
+    weighted by the censoring curve of these episodes; the integrated Brier
+    score from discharge to ``tau``;
     the same score of the split's own Aalen-Johansen curve, fitted and
     scored on these episodes; and IPA, one minus their ratio.
 
@@ -355,9 +376,15 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
     (overestimation) or before it (underestimation), each with its count
     (:func:`time_errors`), in days.
 
+    Per cause and each of :func:`pinball_horizons` ``H``, the IPCW pinball
+    loss (:func:`pinball_loss`) of the time by which a share ``pinball_q``
+    of the cause's incidence up to ``H`` has occurred, as
+    ``{cause}_Pinball_q{100 q}_to_{H}``, and the number of episodes it
+    scores, as ``{cause}_Pinball_N_to_{H}``.
+
     ``csc`` is :func:`csc_reads` of the CSC's exact curve. With it, those
     four, the integrated Brier score, CR D-calibration and the estimated
-    times read that curve; without it, they read the grid curve through
+    times, the pinball loss's included, read that curve; without it, they read the grid curve through
     ``interpolate_cif``.
 
     ``dcal`` holds the CR_DCAL_* settings: ``alpha``, ``n_rho``,
@@ -422,7 +449,7 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
                 aalen_johansen(days, ci, ev, k, axis)[None, :], days, ci, ev,
                 k, grid, tau, daily=True)
             out[f'{key}_Cindex_Lee_at_{label}'] = lee_weighted_concordance(
-                risk, days, ci, ev, k, tau, *censoring)
+                risk, days, ci, ev, k, tau, days, ev)
             out[f'{key}_IBS_to_{label}'] = ibs
             out[f'{key}_IBS_Null_to_{label}'] = null
             out[f'{key}_IPA_to_{label}'] = (1.0 - ibs / null if null > 0
@@ -440,6 +467,16 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
                      else csc['half'][:, k])
         for name, value in time_errors(estimated, days, ci, ev, k).items():
             out[f'{key}_{name}'] = value
+
+        for h in pinball_horizons(grid, horizons):
+            label = format_days(h).replace(' ', '')
+            estimated = (incidence_quantile_time(cif[:, k, :], grid,
+                                                 pinball_q, h)
+                         if csc is None else csc['quantile'][h][:, k])
+            out[f'{key}_Pinball_q{100 * pinball_q:g}_to_{label}'] = (
+                pinball_loss(estimated, days, ci, ev, k, h, pinball_q))
+            out[f'{key}_Pinball_N_to_{label}'] = int(np.sum(
+                ev & (ci == k) & (days <= h) & np.isfinite(estimated)))
 
     labels = [metric_label(c) for c in grid.cause_names]
     out['CR_DCal'] = float(sum(out[f'{key}_CR_DCal'] for key in labels))
@@ -465,8 +502,8 @@ def main():
     parser.add_argument(
         '--experiment_config', type=str, required=True,
         help='Experiment YAML, read for TIME_GRID_CUTS_DAYS, '
-             'MODELLED_CAUSES, BRIER_INTEGRATION_DAYS, EVAL_HORIZONS_DAYS '
-             'and the CR_DCAL_* keys. A mismatch with the dumped columns is '
+             'MODELLED_CAUSES, BRIER_INTEGRATION_DAYS, EVAL_HORIZONS_DAYS, '
+             'PINBALL_Q and the CR_DCAL_* keys. A mismatch with the dumped columns is '
              'an error rather than a silent rescoring.')
     parser.add_argument('--subset', choices=IBD_TYPES, default=None,
                         help='Score the test splits on this IBD type only')
@@ -482,6 +519,9 @@ def main():
 
     grid, cfg = load_config(args.experiment_config)
     horizons = eval_horizons(cfg, grid)
+    pinball_q = float(cfg.get('PINBALL_Q', DEFAULT_PINBALL_Q))
+    if not 0.0 < pinball_q < 1.0:
+        raise ValueError(f'PINBALL_Q must be in (0, 1); got {pinball_q}')
     dcal = {
         'alpha': float(cfg.get('CR_DCAL_ALPHA', DEFAULT_CR_DCAL_ALPHA)),
         'n_rho': int(cfg.get('CR_DCAL_N_RHO', DEFAULT_CR_DCAL_N_RHO)),
@@ -533,22 +573,15 @@ def main():
     def csc_curve(fold_name, split, idx):
         return load_csc_curve(experiment_dir, fold_name, split, idx, grid)
 
-    censoring = {}
-
-    def train_censoring(fold_name):
-        """The train partition's ``(days, is_event)``, for Lee's G."""
-        if fold_name not in censoring:
-            train = predictions(fold_name, 'train')
+    def count_train(fold_name):
+        """Every train row of the fold, for a subset's corrected-t ratio."""
+        if fold_name not in n_train:
+            train = all_predictions(fold_name, 'train')
             if train is None:
                 raise FileNotFoundError(
-                    f'{fold_name} has no train dump, which the censoring '
-                    f'weights of Lee\'s concordance are fitted on')
-            _, _, train_ev, train_days = outcomes(train, grid)
-            censoring[fold_name] = (train_days, train_ev)
-            if types is not None:
-                n_train[fold_name] = int(
-                    all_predictions(fold_name, 'train')['idx'].size)
-        return censoring[fold_name]
+                    f'{fold_name} has no train dump, whose size a subset\'s '
+                    f'corrected-t ratio needs')
+            n_train[fold_name] = int(train['idx'].size)
 
     def header(split, folds_present, is_csc, n_test):
         subset = {} if types is None else {
@@ -566,6 +599,8 @@ def main():
             'brier_integration_days': grid.brier_integration_days,
             'eval_horizons_days': horizons,
             'horizon_convention': HORIZON_CONVENTION,
+            'censoring_weights': CENSORING_SOURCE,
+            'pinball_q': pinball_q,
             'csc_curve': is_csc,
             'cr_dcal': dcal,
             **subset,
@@ -585,12 +620,11 @@ def main():
             has_csc.append(curve is not None)
             reads = (None if curve is None else
                      csc_reads(curve, outcomes(data, grid)[3], grid,
-                               horizons))
-            # A subset run needs the train rows for n_train either way.
-            fold_censoring = (train_censoring(fold_name)
-                              if horizons or types is not None else None)
-            for name, value in score(data, grid, dcal, horizons,
-                                     fold_censoring, reads).items():
+                               horizons, pinball_q))
+            if types is not None:
+                count_train(fold_name)
+            for name, value in score(data, grid, dcal, horizons, reads,
+                                     pinball_q).items():
                 per_metric[name].append(value)
 
         if not folds_present:

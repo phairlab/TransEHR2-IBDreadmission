@@ -74,7 +74,8 @@ COMPARISONS:
   - [TabDeepHit_noRank recal, CSC recal]
 
 # Metric keys in the evaluation YAMLs. {cause} is the metric label of each
-# modelled cause, {tau} each horizon as the evaluation spells it.
+# modelled cause, {tau} each horizon as the evaluation spells it, {cut} each
+# grid cut, and {horizon} the grid's horizon.
 TESTED_METRICS:
   - "{cause}_Cindex_Lee_at_{tau}"
   - "{cause}_IBS_to_{tau}"
@@ -90,6 +91,17 @@ REPORTED_METRICS:
   - "{cause}_Overestimation_N"
   - "{cause}_Underestimation_MAE"
   - "{cause}_Underestimation_N"
+  # Plan 2026-11-18, B4 (reported only, user 2026-11-20): Antolini's C over
+  # the whole curve and at each cut (the cuts are not the evaluation
+  # convention's horizons: internal use only), and the pinball loss of the
+  # time by which a quarter of the incidence to H has occurred, to each
+  # horizon and to the grid's. q25 is PINBALL_Q, 0.25, as the keys spell it.
+  - "{cause}_Cindex"
+  - "{cause}_Cindex_at_{cut}"
+  - "{cause}_Pinball_q25_to_{tau}"
+  - "{cause}_Pinball_q25_to_{horizon}"
+  - "{cause}_Pinball_N_to_{tau}"
+  - "{cause}_Pinball_N_to_{horizon}"
 
 # One BH family per cause table, covering every tested metric and comparison
 # in it. The only scope implemented.

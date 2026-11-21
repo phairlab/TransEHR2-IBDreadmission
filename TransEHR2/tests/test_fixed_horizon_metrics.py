@@ -145,11 +145,8 @@ def score_split(grid, n=800, seed=8):
     from evaluate_finetuned_predictions import outcomes, score
 
     data = simulate(grid, n=n, seed=seed)
-    train = simulate(grid, n=n, seed=seed + 1)
-    _, _, train_ev, train_days = outcomes(train, grid)
     dcal = {'alpha': 2.0, 'n_rho': 200, 'chi2_bins': 10, 'test_level': 0.05}
-    return data, score(data, grid, dcal, [30.0, 365.0],
-                       (train_days, train_ev))
+    return data, score(data, grid, dcal, [30.0, 365.0])
 
 
 def test_ibs_to_a_year_is_the_integrated_brier_to_a_year():

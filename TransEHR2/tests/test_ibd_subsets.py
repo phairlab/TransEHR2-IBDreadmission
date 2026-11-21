@@ -3,7 +3,7 @@
 The reference for every subset run is the plain run over dumps cut to the
 subset's rows beforehand: the two must agree metric for metric, so that a
 subset evaluation is exactly the whole-cohort routine on fewer patients, with
-Lee's censoring curve fitted on the subset's own train rows.
+every censoring curve fitted on the subset's own test rows.
 """
 
 import math
@@ -30,7 +30,7 @@ SCORED = ('test', 'test_recal_aj')
 # Header fields that name the run rather than describe its patients.
 HEADER = {'experiment', 'split', 'task', 'folds', 'time_grid_cuts_days',
           'modelled_causes', 'brier_integration_days', 'eval_horizons_days',
-          'horizon_convention',
+          'horizon_convention', 'censoring_weights', 'pinball_q',
           'csc_curve', 'cr_dcal', 'subset', 'n_test', 'n_train'}
 
 

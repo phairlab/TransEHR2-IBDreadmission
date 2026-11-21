@@ -25,6 +25,10 @@ bin count. Anything else is refused rather than compared: a paired test pairs
 folds by position, and a difference between two models scored on different
 grids or D-calibration settings is not one either model's quality explains.
 
+A metric template's ``{tau}`` expands over the evaluation horizons, ``{cut}``
+over the grid's cuts, and ``{horizon}`` to the grid's horizon, the last cut,
+each spelled as the evaluation keys spell it.
+
 Writes ``{cause}_comparisons.csv`` and ``dcal_chi2.csv`` into ``--out_dir``.
 
 With ``--subset`` (CD, UC or IBDU) it compares the evaluations
@@ -177,16 +181,24 @@ def comparison_row(metric: str, arm_a: str, arm_b: str, a: np.ndarray,
 
 
 def comparison_table(cfg: Dict, evaluations: Dict, models: Dict,
-                     cause: str, horizons: List[float]) -> pd.DataFrame:
+                     cause: str, horizons: List[float],
+                     cuts: List[float]) -> pd.DataFrame:
     """One cause's table, BH-adjusted as one family."""
     key = metric_label(cause)
-    taus = [horizon_label(t) for t in horizons]
+    spelled = {'tau': [horizon_label(t) for t in horizons],
+               'cut': [horizon_label(c) for c in cuts],
+               'horizon': [horizon_label(cuts[-1])]}
 
     def expand(templates):
         out = []
         for template in templates:
-            if '{tau}' in template:
-                out += [template.format(cause=key, tau=tau) for tau in taus]
+            found = [name for name in spelled if f'{{{name}}}' in template]
+            if len(found) > 1:
+                raise SystemExit(f'metric {template!r} has more than one of '
+                                 f'{{tau}}, {{cut}} and {{horizon}}')
+            if found:
+                out += [template.format(cause=key, **{found[0]: value})
+                        for value in spelled[found[0]]]
             else:
                 out.append(template.format(cause=key))
         return out
@@ -293,7 +305,8 @@ def main():
 
     for cause in causes:
         table = comparison_table(cfg, evaluations, cfg['MODELS'], cause,
-                                 header['eval_horizons_days'])
+                                 header['eval_horizons_days'],
+                                 header['time_grid_cuts_days'])
         path = os.path.join(args.out_dir, f'{cause}_comparisons.csv')
         table.to_csv(path, index=False)
         tested = table['p'].notna()

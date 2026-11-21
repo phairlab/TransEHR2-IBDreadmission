@@ -24,6 +24,8 @@ HORIZONS = [30, 90, 365, 1095, 1825]
 TAUS = ['30d', '90d', '1y', '3y', '5y']
 FOLDS = ['fold1', 'fold2', 'fold3', 'fold4', 'fold5']
 CUTS = [46.45, 178.67, 435.09, 898.92, 1736.54, 6454.83]
+# The cuts as the evaluation keys spell them.
+CUT_LABELS = ['46.45d', '178.67d', '1.2y', '2.5y', '4.8y', '17.7y']
 SPLITS = {'raw': 'test', 'recal': 'test_recal_aj'}
 EXPERIMENTS = {'TransEHR2': 'part1_transehr2', 'CSC': 'part1_csc',
                'TabDeepHit': 'part1_tabdh',
@@ -40,6 +42,11 @@ def metric_keys(cause):
     reported = [f'{key}_IPA_to_{t}' for t in TAUS] + [
         f'{key}_{side}estimation_{stat}' for side in ('Over', 'Under')
         for stat in ('MAE', 'N')]
+    # Plan 2026-11-18, B4: reported only (user, 2026-11-20).
+    reported += [f'{key}_Cindex'] + [f'{key}_Cindex_at_{c}' for c in
+                                     CUT_LABELS]
+    reported += [f'{key}_Pinball_{stat}_to_{t}' for stat in ('q25', 'N')
+                 for t in TAUS + [CUT_LABELS[-1]]]
     return tested, reported
 
 
@@ -174,7 +181,7 @@ def test_p_values_and_bh_match_the_definitions(tmp_path, monkeypatch,
         assert (rows['df'] == 4).all()
 
         untested = table[table['metric'].isin(reported)]
-        assert len(untested) == 9 * 24
+        assert len(untested) == len(reported) * 24
         assert untested[['t', 'p', 'p_bh']].isna().all().all()
 
 
@@ -302,3 +309,33 @@ def test_a_cv_comparison_with_one_usable_fold_stays_blank():
     b = np.array([0.6, 0.6, 0.6])
     row = comparison_row('m', 'A raw', 'B raw', a, b, RATIO, tested=True)
     assert np.isnan(row['mean_difference'])
+
+
+def test_cut_and_horizon_expand_over_the_header_cuts(tmp_path, monkeypatch):
+    fabricate(tmp_path / 'models', seed=3)
+    out_dir = run(tmp_path, monkeypatch)
+    metrics = set(pd.read_csv(out_dir / 'readmission_comparisons.csv')
+                  ['metric'])
+    assert {f'Readmission_Cindex_at_{c}' for c in CUT_LABELS} <= metrics
+    # {horizon} is the last cut only; {tau} the evaluation horizons.
+    pinball = {m for m in metrics if m.startswith('Readmission_Pinball_q25')}
+    assert pinball == {f'Readmission_Pinball_q25_to_{t}'
+                       for t in TAUS + [CUT_LABELS[-1]]}
+
+
+def test_the_new_metrics_stay_out_of_the_bh_family(tmp_path, monkeypatch):
+    fabricate(tmp_path / 'models', seed=4)
+    table = pd.read_csv(run(tmp_path, monkeypatch)
+                        / 'death_comparisons.csv')
+    new = table['metric'].str.contains('_Pinball_|_Cindex$|_Cindex_at_')
+    assert new.any()
+    assert table.loc[new, 'p'].isna().all()
+    assert table.loc[new, 'p_bh'].isna().all()
+
+
+def test_a_template_with_two_placeholders_is_refused():
+    from compare_models import comparison_table
+    cfg = {'N_TRAIN_TEST_RATIO': RATIO, 'COMPARISONS': [],
+           'TESTED_METRICS': ['{cause}_x_{tau}_{cut}']}
+    with pytest.raises(SystemExit, match='more than one'):
+        comparison_table(cfg, {}, {}, 'death', HORIZONS, CUTS)

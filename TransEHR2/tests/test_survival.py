@@ -30,9 +30,11 @@ from TransEHR2.survival import (
     cif_logit_target,
     event_times_days,
     half_incidence_time,
+    incidence_quantile_time,
     integrated_brier,
     interpolate_cif,
     interpolate_tail,
+    pinball_loss,
     pmf_from_logits,
     survival_from_pmf,
     survival_metrics,
@@ -855,3 +857,87 @@ def test_time_errors_by_hand():
     out = time_errors(estimated, days, cause_index, is_event, 1)
     assert out['Overestimation_N'] == 0 and np.isnan(out['Overestimation_MAE'])
     assert out['Underestimation_N'] == 1
+
+
+# ---------------------------------- quantile times and the pinball loss (B1, B2)
+
+def random_cif(grid, n=40, seed=1):
+    rng = np.random.default_rng(seed)
+    pmf, _ = deephit_distribution(
+        torch.as_tensor(rng.normal(size=(n, 2 * grid.n_bins))), 2,
+        grid.n_bins)
+    return cif_from_pmf(pmf).numpy()[:, 0, :]
+
+
+def test_the_median_to_the_grid_horizon_is_the_half_incidence_time():
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    cif_k = random_cif(grid)
+    np.testing.assert_array_equal(incidence_quantile_time(cif_k, grid),
+                                  half_incidence_time(cif_k, grid))
+    # Naming the horizon reads F_k there through the spline: the same.
+    np.testing.assert_allclose(
+        incidence_quantile_time(cif_k, grid, 0.5, grid.horizon_days),
+        half_incidence_time(cif_k, grid), rtol=0, atol=1e-9)
+
+
+@pytest.mark.parametrize('horizon', [7.0, 60.0, 365.0])
+def test_the_quantile_time_reaches_q_of_f_at_h_within_h(horizon):
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    cif_k = random_cif(grid, seed=2)
+    at_h = interpolate_cif(cif_k, grid, np.array([horizon]))[:, 0]
+    times = [incidence_quantile_time(cif_k, grid, q, horizon)
+             for q in (0.1, 0.25, 0.5, 0.9)]
+    for q, estimated in zip((0.1, 0.25, 0.5, 0.9), times):
+        assert np.all((estimated >= 0.0) & (estimated <= horizon))
+        np.testing.assert_allclose(
+            interpolate_cif(cif_k, grid, estimated, per_row=True),
+            q * at_h, rtol=0, atol=1e-12)
+    # Non-decreasing in q.
+    for earlier, later in zip(times, times[1:]):
+        assert np.all(later >= earlier)
+
+
+def test_no_incidence_by_h_has_no_quantile_time():
+    grid = TimeGrid(CUTS, TWO_CAUSES)
+    cif_k = np.array([[0.0, 0.1, 0.2], [0.05, 0.1, 0.2]])
+    # The first row has no incidence before 30 days; the second has some.
+    estimated = incidence_quantile_time(cif_k, grid, 0.25, 30.0)
+    assert np.isnan(estimated[0]) and np.isfinite(estimated[1])
+    with pytest.raises(ValueError, match='q'):
+        incidence_quantile_time(cif_k, grid, 1.0)
+    with pytest.raises(ValueError, match='horizon_days'):
+        incidence_quantile_time(cif_k, grid, 0.5, 400.0)
+
+
+def test_pinball_at_a_half_without_censoring_is_half_the_mae():
+    rng = np.random.default_rng(3)
+    days = rng.uniform(1.0, 100.0, 50)
+    estimated = rng.uniform(1.0, 100.0, 50)
+    cause_index = rng.integers(0, 2, 50)
+    is_event = np.ones(50, dtype=bool)
+    scored = (cause_index == 0) & (days <= 60.0)
+    got = pinball_loss(estimated, days, cause_index, is_event, 0, 60.0, 0.5)
+    assert got == pytest.approx(
+        0.5 * np.mean(np.abs(days[scored] - estimated[scored])), rel=1e-12)
+
+
+def test_pinball_by_hand_both_directions_with_censoring():
+    # Censored at 2 (one of five at risk) and at 6 (one of two).
+    days = np.array([2.0, 4.0, 5.0, 6.0, 8.0])
+    cause_index = np.array([-1, 0, 0, -1, 0])
+    is_event = np.array([False, True, True, False, True])
+    estimated = np.array([np.nan, 3.0, 9.0, np.nan, 1.0])
+    q = 0.25
+    # Scored to H = 7: the events at 4 (late by 1) and 5 (early by 4); the
+    # one at 8 is past H. G(4-) = G(5-) = 4/5, so the weights are equal.
+    losses = [q * 1.0, (1 - q) * 4.0]
+    got = pinball_loss(estimated, days, cause_index, is_event, 0, 7.0, q)
+    assert got == pytest.approx(np.mean(losses), rel=1e-12)
+    # To H = 8 the event at 8 joins, late by 7, at G(8-) = 4/5 * 1/2.
+    w = np.array([5 / 4, 5 / 4, 1 / (4 / 5 * 1 / 2)])
+    losses = np.array(losses + [q * 7.0])
+    got = pinball_loss(estimated, days, cause_index, is_event, 0, 8.0, q)
+    assert got == pytest.approx(np.sum(w * losses) / np.sum(w), rel=1e-12)
+    # Nothing scored: NaN.
+    assert np.isnan(pinball_loss(estimated, days, cause_index, is_event, 0,
+                                 3.0, q))

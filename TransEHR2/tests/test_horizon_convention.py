@@ -60,11 +60,9 @@ def test_the_scorer_reads_the_curve_at_the_horizon_not_at_a_cut():
 
     grid = TimeGrid(CUTS, CAUSES, brier_integration_days=30.0)
     data = simulate(grid, n=800, seed=21)
-    train = simulate(grid, n=800, seed=22)
-    _, _, train_ev, train_days = outcomes(train, grid)
     _, ci, ev, days = outcomes(data, grid)
     dcal = {'alpha': 2.0, 'n_rho': 200, 'chi2_bins': 10, 'test_level': 0.05}
-    out = score(data, grid, dcal, [7.0, 30.0], (train_days, train_ev))
+    out = score(data, grid, dcal, [7.0, 30.0])
 
     for k, key in enumerate(('Readmission', 'Death', 'Out_Migration')):
         at_7 = interpolate_cif(data['cif'][:, k, :], grid,
@@ -73,7 +71,7 @@ def test_the_scorer_reads_the_curve_at_the_horizon_not_at_a_cut():
         # value at the cut.
         assert np.all(at_7 < data['cif'][:, k, 0])
         assert out[f'{key}_Cindex_Lee_at_7d'] == lee_weighted_concordance(
-            at_7, days, ci, ev, k, 7.0, train_days, train_ev)
+            at_7, days, ci, ev, k, 7.0, days, ev)
         assert out[f'{key}_IBS_to_7d'] == integrated_brier_to(
             data['cif'][:, k, :], days, ci, ev, k, grid, 7.0)
 
@@ -104,3 +102,61 @@ def test_every_evaluation_records_the_convention(tmp_path, monkeypatch):
             header = yaml.safe_load(f_in)
         assert header['horizon_convention'] == HORIZON_CONVENTION
         assert header['eval_horizons_days'] == [7.0, 30.0]
+
+
+def test_the_pinball_keys_score_the_quantile_time_to_each_horizon():
+    from evaluate_finetuned_predictions import outcomes, score
+
+    from TransEHR2.survival import incidence_quantile_time, pinball_loss
+
+    grid = TimeGrid(CUTS, CAUSES, brier_integration_days=30.0)
+    data = simulate(grid, n=600, seed=23)
+    _, ci, ev, days = outcomes(data, grid)
+    dcal = {'alpha': 2.0, 'n_rho': 200, 'chi2_bins': 10, 'test_level': 0.05}
+    out = score(data, grid, dcal, [7.0, 30.0], pinball_q=0.25)
+    # The evaluation horizons, then the grid's.
+    for h, label in ((7.0, '7d'), (30.0, '30d'), (181.0, '181d')):
+        for k, key in enumerate(('Readmission', 'Death', 'Out_Migration')):
+            estimated = incidence_quantile_time(data['cif'][:, k, :], grid,
+                                                0.25, h)
+            assert out[f'{key}_Pinball_q25_to_{label}'] == pinball_loss(
+                estimated, days, ci, ev, k, h, 0.25)
+            assert out[f'{key}_Pinball_N_to_{label}'] == int(np.sum(
+                ev & (ci == k) & (days <= h) & np.isfinite(estimated)))
+
+
+def test_g_comes_from_the_scored_split_not_the_train_dump(tmp_path,
+                                                          monkeypatch):
+    import sys
+    import yaml
+    import evaluate_finetuned_predictions
+
+    from .test_evaluate_finetuned_predictions import write_split
+
+    grid = TimeGrid(CUTS, CAUSES, brier_integration_days=30.0)
+    config = tmp_path / 'exp.yaml'
+    config.write_text(yaml.dump({
+        'TIME_GRID_CUTS_DAYS': CUTS, 'MODELLED_CAUSES': CAUSES,
+        'BRIER_INTEGRATION_DAYS': 30, 'EVAL_HORIZONS_DAYS': [7, 30],
+        'PINBALL_Q': 0.3}))
+    test = simulate(grid, n=400, seed=31)
+    found = []
+    # Two train dumps with different censoring: the test scores must agree.
+    for train_seed in (32, 33):
+        root = tmp_path / str(train_seed)
+        fold = root / 'exp' / 'fold1' / 'competing_risks'
+        write_split(str(fold / 'competing_risks_train_finetuned_output.csv'),
+                    simulate(grid, n=400, seed=train_seed), grid)
+        write_split(str(fold / 'competing_risks_test_finetuned_output.csv'),
+                    test, grid)
+        monkeypatch.setattr(sys, 'argv', [
+            'evaluate_finetuned_predictions.py', 'exp', '--model_dir',
+            str(root), '--experiment_config', str(config)])
+        evaluate_finetuned_predictions.main()
+        with open(root / 'exp' / 'test_evaluation.yaml') as f_in:
+            found.append(yaml.safe_load(f_in))
+    assert found[0] == found[1]
+    assert found[0]['pinball_q'] == 0.3
+    assert found[0]['censoring_weights'] == (
+        evaluate_finetuned_predictions.CENSORING_SOURCE)
+    assert 'Readmission_Pinball_q30_to_7d' in found[0]

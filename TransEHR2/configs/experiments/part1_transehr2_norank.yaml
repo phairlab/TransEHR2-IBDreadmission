@@ -136,6 +136,10 @@ VALUE_LADDER_P_MIN: 0.00138889
 
 EVAL_HORIZONS_DAYS: [7, 30, 90, 180, 365, 1095, 1825]
 
+# The pinball loss's share of incidence to H (plan 2026-11-18; user,
+# 2026-11-20).
+PINBALL_Q: 0.25
+
 CR_DCAL_ALPHA: 2
 CR_DCAL_N_RHO: 1000
 CR_DCAL_CHI2_BINS: 10

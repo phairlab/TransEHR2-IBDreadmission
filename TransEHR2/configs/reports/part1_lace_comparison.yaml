@@ -1,0 +1,23 @@
+# Part 1 LACE vs CIF flagging comparison, read by
+# scripts/compare_lace_flags.py (plan 2026-11-18, Task C; decisions of
+# 2026-11-18 and 2026-11-20).
+
+# Horizons H in days. The outcome is the first event being one of
+# COMPOSITE_CAUSES by H (LACE's: van Walraven 2010, death or readmission).
+HORIZONS_DAYS: [7, 30, 90]
+COMPOSITE_CAUSES: ["readmission", "death"]
+
+# LACE flags at LACE >= cutoff: the AMA sheet's medium (7-13) and high
+# (14+) strata.
+LACE_CUTOFFS: [7, 14]
+
+# Threshold probabilities of the decision curves: START to STOP by STEP.
+NET_BENEFIT_THRESHOLDS: {START: 0.0, STOP: 0.5, STEP: 0.005}
+
+# The model's ROC curve is written on this many evenly spaced false-positive
+# rates, so no patient's predicted risk is written as a threshold.
+ROC_GRID_POINTS: 101
+
+# Populations scored: every index episode, and the DAD (inpatient) ones
+# (user, 2026-11-20). Each chooses its thresholds on its own val patients.
+POPULATIONS: {all: null, dad: DAD}

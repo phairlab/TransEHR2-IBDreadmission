@@ -941,3 +941,98 @@ def test_pinball_by_hand_both_directions_with_censoring():
     # Nothing scored: NaN.
     assert np.isnan(pinball_loss(estimated, days, cause_index, is_event, 0,
                                  3.0, q))
+
+
+# ------------------------------------- ranking-term changes (plan, Task A)
+
+def _old_ranking(cif, bin_index, cause_index, is_event, sigma):
+    """The ranking term before Task A, copied, for the regression test."""
+    total = cif.new_zeros(())
+    for k in range(cif.shape[1]):
+        risk = cif[:, k, :][:, bin_index].t()
+        own = risk.diagonal().unsqueeze(1)
+        cases = is_event & (cause_index == k)
+        acceptable = cases.unsqueeze(1) & (bin_index.unsqueeze(0)
+                                           > bin_index.unsqueeze(1))
+        n_pairs = acceptable.sum()
+        if n_pairs == 0:
+            continue
+        penalty = torch.exp(-(own - risk) / sigma)
+        total = total + (penalty * acceptable).sum() / n_pairs
+    return total
+
+
+def _batch(n=40, n_bins=5, seed=0, scale=1.0):
+    g = torch.Generator().manual_seed(seed)
+    logits = scale * torch.randn(n, 2 * n_bins, generator=g)
+    bin_index = torch.randint(0, n_bins, (n,), generator=g)
+    cause_index = torch.randint(-1, 2, (n,), generator=g)
+    return logits, bin_index, cause_index, cause_index >= 0
+
+
+def test_ranking_with_the_new_flags_off_is_the_old_term():
+    logits, bins, causes, events = _batch()
+    pmf, _ = deephit_distribution(logits, 2, 5)
+    cif = cif_from_pmf(pmf)
+    got = _loss(n_bins=5, sigma=0.1)._ranking(cif, bins, causes, events)
+    assert torch.equal(got, _old_ranking(cif, bins, causes, events, 0.1))
+
+
+def test_a_tiny_sigma_with_extreme_logits_stays_finite():
+    logits, bins, causes, events = _batch(scale=50.0)
+    logits.requires_grad_(True)
+    total, (_, ranking) = _loss(n_bins=5, sigma=0.001)(logits, bins, causes,
+                                                       events)
+    total.backward()
+    assert torch.isfinite(ranking) and torch.isfinite(total)
+    assert torch.isfinite(logits.grad).all()
+
+
+def test_the_guard_is_continuous_in_value_and_slope_at_the_cutoff():
+    loss = _loss(sigma=1.0, rank_exp_cutoff=2.0)
+    # One case (row 0, bin 0) and one control (bin 2): x = F_j - F_i.
+    bins = torch.tensor([0, 2])
+    causes = torch.tensor([0, -1])
+    events = torch.tensor([True, False])
+
+    def term(x):
+        cif = torch.zeros(2, 2, 3, dtype=torch.float64)
+        cif[1, 0, :] = x
+        return loss._ranking(cif, bins, causes, events)
+
+    for x0, expected in ((2.0 - 1e-9, math.exp(2.0)),
+                         (2.0 + 1e-9, math.exp(2.0))):
+        assert float(term(torch.tensor(x0, dtype=torch.float64))) == \
+            pytest.approx(expected, rel=1e-6)
+    for x0 in (2.0 - 1e-6, 2.0 + 1e-6):
+        x = torch.tensor(x0, dtype=torch.float64, requires_grad=True)
+        term(x).backward()
+        assert float(x.grad) == pytest.approx(math.exp(2.0), rel=1e-4)
+
+
+def test_scaling_by_sigma_multiplies_the_term_by_sigma():
+    logits, bins, causes, events = _batch(seed=3)
+    cif = cif_from_pmf(deephit_distribution(logits, 2, 5)[0])
+    plain = _loss(n_bins=5, sigma=0.03)._ranking(cif, bins, causes, events)
+    scaled = _loss(n_bins=5, sigma=0.03, rank_scale_by_sigma=True)._ranking(
+        cif, bins, causes, events)
+    assert torch.allclose(scaled, 0.03 * plain, rtol=1e-6)
+
+
+def test_a_case_past_the_last_ranked_bin_forms_no_pair():
+    cif = cif_from_pmf(deephit_distribution(torch.randn(3, 6), 2, 3)[0])
+    causes = torch.tensor([0, -1, -1])
+    events = torch.tensor([True, False, False])
+    # The case fails in bin 1 and two controls outlast it.
+    bins = torch.tensor([1, 2, 2])
+    assert _loss(rank_max_bin=1)._ranking(cif, bins, causes, events) > 0
+    assert _loss(rank_max_bin=0)._ranking(cif, bins, causes, events) == 0
+
+
+def test_rank_max_days_must_be_a_cut():
+    from TransEHR2.losses import rank_max_bin_for
+    grid = TimeGrid([8.0, 31.0, 91.0, 181.0], TWO_CAUSES, 30.0)
+    assert rank_max_bin_for(grid, 91) == 2
+    assert rank_max_bin_for(grid, None) is None
+    with pytest.raises(ValueError, match='DEEPHIT_RANK_MAX_DAYS'):
+        rank_max_bin_for(grid, 90)

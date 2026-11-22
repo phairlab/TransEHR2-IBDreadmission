@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn.functional as F
 
@@ -918,6 +919,26 @@ class TransformerHawkesLoss(torch.nn.Module):
         return overall_loss, (nll_loss, type_loss, time_loss)
     
 
+# The exponent past which DeepHit's ranking penalty continues linearly.
+RANK_EXP_CUTOFF = 30.0
+
+
+def rank_max_bin_for(grid, max_days: Optional[float]) -> Optional[int]:
+    """DEEPHIT_RANK_MAX_DAYS as the last bin whose cases form ranking pairs:
+    the bin ending at that cut, so 91 keeps cases with an event before day
+    91. None stays None. A value that is not one of the grid's cuts is
+    refused rather than rounded to one."""
+    if max_days is None:
+        return None
+    matches = [b for b, cut in enumerate(grid.cuts)
+               if float(cut) == float(max_days)]
+    if not matches:
+        raise ValueError(f'DEEPHIT_RANK_MAX_DAYS must be one of the grid\'s '
+                         f'cuts {list(map(float, grid.cuts))}; got '
+                         f'{max_days}')
+    return matches[0]
+
+
 class DeepHitLoss(torch.nn.Module):
     """DeepHit's objective for discrete-time competing risks.
 
@@ -945,7 +966,10 @@ class DeepHitLoss(torch.nn.Module):
         n_bins: int,
         sigma: float = 0.1,
         rank_weight: float = 1.0,
-        cause_weights: Optional[List[float]] = None
+        cause_weights: Optional[List[float]] = None,
+        rank_scale_by_sigma: bool = False,
+        rank_max_bin: Optional[int] = None,
+        rank_exp_cutoff: float = RANK_EXP_CUTOFF
     ):
         """
         Args:
@@ -960,12 +984,26 @@ class DeepHitLoss(torch.nn.Module):
                 the ranking term, in cause order. Defaults to 1.0 each.
                 Raising a rare cause's weight buys its ordering at the cost
                 of the other's; it does not change the likelihood.
+            rank_scale_by_sigma (bool): Multiply each cause's ranking term
+                by ``sigma``, so that its gradient near a zero gap does not
+                grow as 1/sigma and sigma stops setting the term's weight
+                (plan 2026-11-18, Task A). False reproduces earlier runs.
+            rank_max_bin (int, optional): Only cases failing in a bin at or
+                below this one (inclusive) form pairs; None, every case.
+                ``rank_max_bin_for`` turns DEEPHIT_RANK_MAX_DAYS into it.
+            rank_exp_cutoff (float): Past this exponent the penalty
+                continues linearly, ``e^c (1 + x - c)``, so a small sigma
+                cannot overflow. With sigma >= 1/c the exponent never
+                exceeds c (|dF| <= 1), so the guard never acts.
         """
         super().__init__()
         self.n_causes = n_causes
         self.n_bins = n_bins
         self.sigma = sigma
         self.rank_weight = rank_weight
+        self.rank_scale_by_sigma = rank_scale_by_sigma
+        self.rank_max_bin = rank_max_bin
+        self.rank_exp_cutoff = float(rank_exp_cutoff)
         if cause_weights is None:
             cause_weights = [1.0] * n_causes
         if len(cause_weights) != n_causes:
@@ -1023,16 +1061,26 @@ class DeepHitLoss(torch.nn.Module):
             own = risk.diagonal().unsqueeze(1)                 # (batch, 1)
 
             cases = is_event & (cause_index == k)              # (batch,)
+            if self.rank_max_bin is not None:
+                cases = cases & (bin_index <= self.rank_max_bin)
             outlasts = bin_index.unsqueeze(0) > bin_index.unsqueeze(1)
             acceptable = cases.unsqueeze(1) & outlasts
             n_pairs = acceptable.sum()
             if n_pairs == 0:
                 continue
 
-            penalty = torch.exp(-(own - risk) / self.sigma)
-            total = total + self.cause_weights[k] * (
-                (penalty * acceptable).sum() / n_pairs
-            )
+            # Linear past the cutoff, with the exponential's value and slope
+            # there. The minimum keeps an inf out of the branch torch.where
+            # does not take, whose gradient would otherwise still be NaN.
+            x = -(own - risk) / self.sigma
+            c = self.rank_exp_cutoff
+            penalty = torch.where(
+                x > c, math.exp(c) * (1.0 + x - c),
+                torch.exp(torch.minimum(x, x.new_tensor(c))))
+            term = (penalty * acceptable).sum() / n_pairs
+            if self.rank_scale_by_sigma:
+                term = term * self.sigma
+            total = total + self.cause_weights[k] * term
         return total
 
     def forward(

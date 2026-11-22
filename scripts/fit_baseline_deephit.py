@@ -44,7 +44,7 @@ from typing import Dict
 import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.cli import TASK, TUNING_FOLD, get_fold_names, resolve_device
-from TransEHR2.losses import DeepHitLoss
+from TransEHR2.losses import DeepHitLoss, rank_max_bin_for
 from TransEHR2.routines import (
     SELECTION_METRICS, evaluate_finetuned_model, finetune_model
 )
@@ -99,6 +99,9 @@ def fit_fold(cfg: Dict, data_dir: str, features: pd.DataFrame,
         writer=writer, learning_rate=learning_rate, device=device,
         rank_weight=cfg['DEEPHIT_RANK_WEIGHT'], sigma=cfg['DEEPHIT_SIGMA'],
         cause_weights=cfg['DEEPHIT_CAUSE_WEIGHTS'],
+        rank_scale_by_sigma=cfg.get('DEEPHIT_RANK_SCALE_BY_SIGMA', False),
+        rank_max_bin=rank_max_bin_for(grid,
+                                      cfg.get('DEEPHIT_RANK_MAX_DAYS')),
         selection_metric=cfg['FINETUNE_SELECTION_METRIC'],
         lr_half_life=cfg['FINETUNE_LR_HALF_LIFE'],
         total_epoch=cfg['FINETUNE_TOTAL_EPOCH'],
@@ -116,7 +119,10 @@ def fit_fold(cfg: Dict, data_dir: str, features: pd.DataFrame,
         loss_fn=DeepHitLoss(
             n_causes=grid.n_causes, n_bins=grid.n_bins,
             sigma=cfg['DEEPHIT_SIGMA'], rank_weight=cfg['DEEPHIT_RANK_WEIGHT'],
-            cause_weights=cfg['DEEPHIT_CAUSE_WEIGHTS']).to(device),
+            cause_weights=cfg['DEEPHIT_CAUSE_WEIGHTS'],
+            rank_scale_by_sigma=cfg.get('DEEPHIT_RANK_SCALE_BY_SIGMA', False),
+            rank_max_bin=rank_max_bin_for(
+                grid, cfg.get('DEEPHIT_RANK_MAX_DAYS'))).to(device),
         device=device, prefix='test')
 
     os.makedirs(os.path.dirname(evaluation_path), exist_ok=True)

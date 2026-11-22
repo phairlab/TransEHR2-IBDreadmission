@@ -48,7 +48,8 @@ from TransEHR2.data.preprocessing import (
     compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
     value_encoder_dims
 )
-from TransEHR2.losses import CoxPartialLikelihoodLoss, DeepHitLoss
+from TransEHR2.losses import (CoxPartialLikelihoodLoss, DeepHitLoss,
+                              rank_max_bin_for)
 from TransEHR2.models import ELECTRA, MixedClassifier
 from TransEHR2.modules import (
     DeepHitHead, EventDataEncoder, MaskedTokenDiscriminator,
@@ -135,6 +136,7 @@ POST_PRETRAINING_KEYS = frozenset({
     'FINETUNE_SELECTION_METRIC', 'FINETUNE_TOTAL_EPOCH',
     'DEEPHIT_CAUSE_WEIGHTS', 'DEEPHIT_HEAD_DROPOUT', 'DEEPHIT_HEAD_D_CAUSE',
     'DEEPHIT_HEAD_D_SHARED', 'DEEPHIT_RANK_WEIGHT', 'DEEPHIT_SIGMA',
+    'DEEPHIT_RANK_SCALE_BY_SIGMA', 'DEEPHIT_RANK_MAX_DAYS',
     'TIME_GRID_CUTS_DAYS', 'MODELLED_CAUSES', 'BRIER_INTEGRATION_DAYS',
     'PREDICTOR_AGGREGATION_METHOD', 'EVAL_HORIZONS_DAYS', 'CR_DCAL_ALPHA',
     'CR_DCAL_N_RHO', 'CR_DCAL_CHI2_BINS', 'CR_DCAL_TEST_LEVEL',
@@ -344,6 +346,11 @@ def main():
     DEEPHIT_RANK_WEIGHT = experiment_config.get('DEEPHIT_RANK_WEIGHT', 1.0)
     DEEPHIT_SIGMA = experiment_config.get('DEEPHIT_SIGMA', 0.1)
     DEEPHIT_CAUSE_WEIGHTS = experiment_config.get('DEEPHIT_CAUSE_WEIGHTS', None)
+    # Plan 2026-11-18, Task A; absent, the ranking term is as before.
+    DEEPHIT_RANK_SCALE_BY_SIGMA = experiment_config.get(
+        'DEEPHIT_RANK_SCALE_BY_SIGMA', False)
+    DEEPHIT_RANK_MAX_DAYS = experiment_config.get('DEEPHIT_RANK_MAX_DAYS',
+                                                  None)
     # The temporal encoding arm, and the ladder both arms span. The bounds
     # come from scripts/measure_ladder_bounds.py over the extracted
     # timestamps; 'rope' refuses to run without them.
@@ -371,6 +378,8 @@ def main():
     grid = TimeGrid(TIME_GRID_CUTS_DAYS, MODELLED_CAUSES,
                     BRIER_INTEGRATION_DAYS)
     print(f"Time grid: {grid.n_bins} bins, {', '.join(grid.labels())}")
+    # Refused here, not after hours of pretraining, if it is not a cut.
+    DEEPHIT_RANK_MAX_BIN = rank_max_bin_for(grid, DEEPHIT_RANK_MAX_DAYS)
     print(f"Integrated Brier score: discharge to "
           f"{format_days(grid.brier_integration_days)}, over a monotone "
           f"cubic interpolation of the cumulative incidence")
@@ -713,6 +722,8 @@ def main():
                 rank_weight=DEEPHIT_RANK_WEIGHT,
                 sigma=DEEPHIT_SIGMA,
                 cause_weights=DEEPHIT_CAUSE_WEIGHTS,
+                rank_scale_by_sigma=DEEPHIT_RANK_SCALE_BY_SIGMA,
+                rank_max_bin=DEEPHIT_RANK_MAX_BIN,
                 selection_metric=FINETUNE_SELECTION_METRIC,
                 lr_half_life=FINETUNE_LR_HALF_LIFE,
                 total_epoch=FINETUNE_TOTAL_EPOCH,
@@ -748,7 +759,9 @@ def main():
                      DeepHitLoss(
                          n_causes=grid.n_causes, n_bins=grid.n_bins,
                          sigma=DEEPHIT_SIGMA, rank_weight=DEEPHIT_RANK_WEIGHT,
-                         cause_weights=DEEPHIT_CAUSE_WEIGHTS).to(device)),
+                         cause_weights=DEEPHIT_CAUSE_WEIGHTS,
+                         rank_scale_by_sigma=DEEPHIT_RANK_SCALE_BY_SIGMA,
+                         rank_max_bin=DEEPHIT_RANK_MAX_BIN).to(device)),
             device=device,
             prefix='test',
             mem_test_mode=args.mem_test_mode

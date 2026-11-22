@@ -979,6 +979,8 @@ def finetune_model(
     rank_weight: float = 1.0,
     sigma: float = 0.1,
     cause_weights: Optional[List[float]] = None,
+    rank_scale_by_sigma: bool = False,
+    rank_max_bin: Optional[int] = None,
     selection_metric: str = 'brier',
     lr_half_life: Optional[float] = None,
     total_epoch: int = 100,
@@ -1002,6 +1004,8 @@ def finetune_model(
         rank_weight: Weight on DeepHit's ranking term.
         sigma: Scale of the ranking term's exponential.
         cause_weights: Per-cause weight inside the ranking term.
+        rank_scale_by_sigma: Multiply the ranking term by sigma.
+        rank_max_bin: Last bin whose cases form ranking pairs; None, all.
         selection_metric: 'brier', 'cindex' or 'loss'; which validation
             number picks the best epoch. See SELECTION_METRICS.
         lr_half_life: Epochs over which the learning rate halves. The scheduler steps every
@@ -1052,7 +1056,9 @@ def finetune_model(
     else:
         loss_fn = DeepHitLoss(
             n_causes=grid.n_causes, n_bins=grid.n_bins, sigma=sigma,
-            rank_weight=rank_weight, cause_weights=cause_weights).to(device)
+            rank_weight=rank_weight, cause_weights=cause_weights,
+            rank_scale_by_sigma=rank_scale_by_sigma,
+            rank_max_bin=rank_max_bin).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(
         optimizer, gamma=resolve_decay_factor(lr_half_life))

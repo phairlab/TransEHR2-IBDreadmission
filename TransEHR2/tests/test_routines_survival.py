@@ -540,7 +540,8 @@ def test_shipped_configs_say_whether_the_hawkes_process_runs(name, config):
     if name in ('part1_csc.yaml', 'part1_tabdh.yaml',
                 'part1_tabdh_norank.yaml', 'part1_full_cohort_csc.yaml',
                 'part1_full_cohort_tabdh.yaml',
-                'part1_full_cohort_tabdh_norank.yaml'):
+                'part1_full_cohort_tabdh_norank.yaml') or (
+                    name.startswith('part1_tabdh_sigma')):
         pytest.skip(f'{name} configures a baseline, which has no encoder')
     assert 'USE_THP' in config, f'{name} does not state USE_THP'
     assert isinstance(config['USE_THP'], bool)

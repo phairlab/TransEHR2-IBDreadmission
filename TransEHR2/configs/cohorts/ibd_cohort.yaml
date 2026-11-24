@@ -112,11 +112,72 @@ READMISSION_EXCLUSIONS:
 # ---------------------------------------------------------------------------
 # Label sets (user, 2026-11-22): alternative labellings built beside the
 # current labels, never over them. Each entry replaces the top-level keys it
-# names (only READMISSION_EXCLUSIONS so far) for
+# names (READMISSION_EXCLUSIONS), or adds EPISODE_OF_CARE, for
 #     build_labels.py --label-set <name> --labels data/labelsets/<name>/labels.csv
 # and IBDdataprep's label_set.py builds data/labelsets/<name>/ around it: the
 # same drawn episodes, folds and input arrays as data/, with this set's
 # targets (SLURM/slurm_label_set.sh runs both). The current labels are the
 # top-level rules above, untouched by any entry here.
 # ---------------------------------------------------------------------------
-LABEL_SETS: {}
+LABEL_SETS:
+  # Readmissions after an episode of care, AMB and DAD alike (settled
+  # 2026-11-23; development/relabel_episode_of_care_spec_2026-11-23.md, and
+  # IBDdataprep's episode_of_care.py, hold the rule). The readmission is the
+  # first eligible encounter admitted after the index's episode of care ends;
+  # this supersedes the 24 h floor. The clinical exclusions are the top-level
+  # READMISSION_EXCLUSIONS, applied to AMB as well: on its codes alone, with
+  # DXCODE1 as the most responsible diagnosis (type M), and never through a
+  # rule's dispositions, which are DAD codes. Built on the stays tree
+  # IBDdataprep's labelset_stays.py writes (SLURM/slurm_labelset_stays.sh).
+  post_index_episode_of_care_relabel:
+    EPISODE_OF_CARE:
+      # When a member X's links close, in hours, after the Episodes of Care
+      # section of CIHI's General Methodology Notes. An encounter admitted by
+      # W1 links unconditionally; one admitted by W2 links on a transfer
+      # pairing (INST to INSTFROM, INSTTO to INST, or INSTTO to INSTFROM) or a
+      # transfer disposition below. Every member's windows run from its
+      # discharge. A member whose discharge has no recorded time -- every AMB
+      # visit, and a DAD stay without DISTIME, both set to 23:59 local --
+      # takes the later of that and its ADMISSION windows, since 23:59 can
+      # fall after the receiving admission in a transfer.
+      WINDOW_HOURS:
+        DISCHARGE: {W1: 7, W2: 12}
+        ADMISSION: {W1: 12, W2: 17}
+      # X's discharge dispositions that link E by W2: X's codes, E's source
+      # ("to", any if absent) and the INST test ("same" or "different"; any
+      # if absent). Compared zero-padded to two digits. DAD 01's "another
+      # facility" is a synopsis rather than the official wording, and no
+      # pre-2018 code covers a same-facility transfer, so it takes any INST.
+      TRANSFER_DISPOSITIONS:
+        AMB:
+          - {codes: ["06", "07"], to: DAD, inst: same}
+          - {codes: ["08"], inst: different}
+          - {codes: ["09"], to: DAD, inst: different}
+          - {codes: ["12", "13", "14"], to: AMB, inst: same}
+        DAD:
+          - {codes: ["01", "10"], to: DAD}
+          - {codes: ["20"], to: AMB}
+      # A raw institution code the dictionary's RESIDENTIAL column does not
+      # settle (no exact match, and the codes sharing its last three digits
+      # disagree or none exists) is residential when it starts with one of
+      # these (86 is an auxiliary hospital, 87 a nursing home). A residential
+      # DAD stay is never a member of an episode of care (but as its index)
+      # and never a readmission.
+      RESIDENTIAL_PREFIXES: ["85", "86", "87"]
+      # Readmission eligibility, per encounter; an ineligible one is skipped.
+      # A DAD stay must also be non-residential, and either source must match
+      # no clinical exclusion.
+      ELIGIBLE:
+        DAD_ADMITCAT: [U]
+        # Urgent care and advanced ambulatory care (715140000, Community
+        # Advanced Ambulatory Care, among them); never O.
+        AMB_ABSTRACT_TYPE: [U, A]
+        # Emergency department visits at these MIS codes only: 713100000
+        # Emergency and 713102000 General Emergency.
+        AMB_ABSTRACT_TYPE_BY_MIS_CODE:
+          E: ["713100000", "713102000"]
+      # AMB dispositions that strike a visit from the readmissions: 10 and 71
+      # dead on arrival (before and from 2018), 73 MAID. DAD's MAID is the
+      # maid rule above. Ambiguous codes are left out: AMB 11 and DAD 07,
+      # "died, includes MAID" (pre-2018).
+      AMB_DISPOSITION_EXCLUSIONS: ["10", "71", "73"]

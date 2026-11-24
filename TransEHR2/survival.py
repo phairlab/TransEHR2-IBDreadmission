@@ -513,8 +513,13 @@ def antolini_concordance(
     cause ``k`` at ``T_i <= tau`` and ``j``'s recorded time is strictly
     later, whatever happened to it then. It is concordant when
     ``F_k(T_i | x_i) > F_k(T_i | x_j)``, both read at the *case's* time on the
-    continuous curve; ties count a half. Unweighted, as the binned version
-    is: a ``j`` censored before ``T_i`` is not a control.
+    continuous curve; ties count a half.
+
+    Pooling the pairs is Antolini et al.'s weighting: grouped by the case's
+    time ``t``, the ratio below is the AUC at each ``t`` weighted by its share
+    of the comparable pairs. There are no censoring weights, as in their
+    estimator and the binned version here: a ``j`` censored before ``T_i`` is
+    not a control.
 
     .. math::
         C_k(\tau) = \frac{\sum_{i,j} 1[\delta_i = k, T_i \le \tau,

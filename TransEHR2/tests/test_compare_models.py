@@ -47,6 +47,10 @@ def metric_keys(cause):
                                      CUT_LABELS]
     reported += [f'{key}_Pinball_{stat}_to_{t}' for stat in ('q25', 'N')
                  for t in TAUS + [CUT_LABELS[-1]]]
+    # The time ratios by side (user, 2026-11-24).
+    reported += [f'{key}_Ratio_{side}{stat}_to_{t}'
+                 for side in ('Before', 'After') for stat in ('', '_N')
+                 for t in TAUS + [CUT_LABELS[-1]]]
     # The sweep's main measure, reported only here (user, 2026-11-24).
     reported += [f'{key}_Cindex_Antolini_to_30d']
     return tested, reported
@@ -323,6 +327,9 @@ def test_cut_and_horizon_expand_over_the_header_cuts(tmp_path, monkeypatch):
     pinball = {m for m in metrics if m.startswith('Readmission_Pinball_q25')}
     assert pinball == {f'Readmission_Pinball_q25_to_{t}'
                        for t in TAUS + [CUT_LABELS[-1]]}
+    ratio = {m for m in metrics if m.startswith('Readmission_Ratio_After_to')}
+    assert ratio == {f'Readmission_Ratio_After_to_{t}'
+                     for t in TAUS + [CUT_LABELS[-1]]}
 
 
 def test_the_new_metrics_stay_out_of_the_bh_family(tmp_path, monkeypatch):
@@ -330,7 +337,7 @@ def test_the_new_metrics_stay_out_of_the_bh_family(tmp_path, monkeypatch):
     table = pd.read_csv(run(tmp_path, monkeypatch)
                         / 'death_comparisons.csv')
     new = table['metric'].str.contains(
-        '_Pinball_|_Cindex$|_Cindex_at_|_Cindex_Antolini_to_30d')
+        '_Pinball_|_Ratio_|_Cindex$|_Cindex_at_|_Cindex_Antolini_to_30d')
     assert new.any()
     assert table.loc[new, 'p'].isna().all()
     assert table.loc[new, 'p_bh'].isna().all()

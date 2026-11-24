@@ -77,7 +77,7 @@ from TransEHR2.survival import (
     cr_dcal_chi2_from_values, event_times_days, format_days,
     half_incidence_time, incidence_quantile_time, integrated_brier,
     integrated_brier_to, interpolate_cif, lee_weighted_concordance,
-    metric_label, pinball_loss, time_errors
+    metric_label, pinball_loss, time_errors, time_ratios
 )
 
 
@@ -387,6 +387,15 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
     ``{cause}_Pinball_q{100 q}_to_{H}``, and the number of episodes it
     scores, as ``{cause}_Pinball_N_to_{H}``.
 
+    Per cause and each of the same ``H``, from the estimated time the
+    over- and underestimation errors read, the mean ratio of the true to
+    the estimated time among the patients with the cause by ``H``, of
+    those whose event came before the estimate and of those whose event
+    came after it (:func:`time_ratios`; user, 2026-11-24), as
+    ``{cause}_Ratio_Before_to_{H}`` and ``{cause}_Ratio_After_to_{H}``,
+    with their counts, ``{cause}_Ratio_Before_N_to_{H}`` and
+    ``{cause}_Ratio_After_N_to_{H}``.
+
     ``csc`` is :func:`csc_reads` of the CSC's exact curve. With it, those
     five, the integrated Brier score, CR D-calibration and the estimated
     times, the pinball loss's included, read that curve; without it, they read the grid curve through
@@ -482,6 +491,14 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
                      else csc['half'][:, k])
         for name, value in time_errors(estimated, days, ci, ev, k).items():
             out[f'{key}_{name}'] = value
+        for h in pinball_horizons(grid, horizons):
+            label = format_days(h).replace(' ', '')
+            ratios = time_ratios(estimated, days, ci, ev, k, h)
+            for side in ('Before', 'After'):
+                out[f'{key}_Ratio_{side}_to_{label}'] = (
+                    ratios[f'{side}_Ratio'])
+                out[f'{key}_Ratio_{side}_N_to_{label}'] = (
+                    ratios[f'{side}_N'])
 
         for h in pinball_horizons(grid, horizons):
             label = format_days(h).replace(' ', '')

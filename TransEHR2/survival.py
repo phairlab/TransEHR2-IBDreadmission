@@ -1403,6 +1403,40 @@ def time_errors(estimated: np.ndarray, days: np.ndarray,
     return out
 
 
+def time_ratios(estimated: np.ndarray, days: np.ndarray,
+                cause_index: np.ndarray, is_event: np.ndarray, k: int,
+                horizon_days: float) -> Dict[str, float]:
+    r"""Mean ratio of the true to the estimated time of cause ``k``, by
+    side, among the patients with cause ``k`` by ``H`` (user, 2026-11-24):
+    another view of :func:`time_errors`, on the same estimate.
+
+    Over the patients observed to have cause ``k`` by ``H`` (``days <=
+    H``) with a finite estimate, less those whose estimate is 0, where
+    :math:`y / \hat y` is undefined. ``Before`` holds those whose event
+    came before the estimate (ratio < 1), ``After`` those whose event came
+    after it (ratio > 1); an event exactly on the estimate is in neither,
+    as in :func:`time_errors`. Each side's ratio is the unweighted
+    arithmetic mean, as :func:`time_errors`' errors are, and NaN when the
+    side is empty; its ``_N`` is the count.
+
+    Args:
+        estimated: (n,) :func:`half_incidence_time`, days.
+        days: (n,) observed times, days, as :func:`event_times_days`.
+    """
+    t = np.asarray(days, dtype=np.float64)
+    estimated = np.asarray(estimated, dtype=np.float64)
+    rows = (np.asarray(is_event, dtype=bool)
+            & (np.asarray(cause_index) == k) & (t <= horizon_days)
+            & np.isfinite(estimated) & (estimated > 0.0))
+    ratio = t[rows] / estimated[rows]
+    out = {}
+    for name, side in (('Before', ratio < 1.0), ('After', ratio > 1.0)):
+        n = int(side.sum())
+        out[f'{name}_Ratio'] = float(ratio[side].mean()) if n else float('nan')
+        out[f'{name}_N'] = n
+    return out
+
+
 def aj_recalibration_offsets(
     cif: np.ndarray,
     times_days: np.ndarray,

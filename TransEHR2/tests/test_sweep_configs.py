@@ -55,7 +55,10 @@ def test_a_step_compares_its_deephits_with_the_other_four(tag):
     # The sweep's main measure is tested there and only reported in the CV
     # comparison, for the anchor (user, 2026-11-24).
     assert step['TESTED_METRICS'] == [ANTOLINI] + cv['TESTED_METRICS']
-    assert [m for m in cv['REPORTED_METRICS'] if m != ANTOLINI] == \
+    # The time ratios are the CV and held-out figures' only (user,
+    # 2026-11-24): the steps' evaluations need no re-scoring for them.
+    assert [m for m in cv['REPORTED_METRICS']
+            if m != ANTOLINI and '_Ratio_' not in m] == \
         step['REPORTED_METRICS']
     assert ANTOLINI in cv['REPORTED_METRICS']
     rest = {'MODELS', 'TESTED_METRICS', 'REPORTED_METRICS'}

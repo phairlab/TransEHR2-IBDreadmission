@@ -160,3 +160,30 @@ def test_g_comes_from_the_scored_split_not_the_train_dump(tmp_path,
     assert found[0]['censoring_weights'] == (
         evaluate_finetuned_predictions.CENSORING_SOURCE)
     assert 'Readmission_Pinball_q30_to_7d' in found[0]
+    assert 'Readmission_Ratio_After_to_7d' in found[0]
+
+
+def test_the_ratio_keys_read_the_time_error_estimate_to_each_horizon():
+    """One estimate per patient, the one the time errors read, grouped by
+    each horizon (user, 2026-11-24)."""
+    from evaluate_finetuned_predictions import outcomes, score
+
+    from TransEHR2.survival import half_incidence_time, time_ratios
+
+    grid = TimeGrid(CUTS, CAUSES, brier_integration_days=30.0)
+    data = simulate(grid, n=600, seed=29)
+    _, ci, ev, days = outcomes(data, grid)
+    dcal = {'alpha': 2.0, 'n_rho': 200, 'chi2_bins': 10, 'test_level': 0.05}
+    out = score(data, grid, dcal, [7.0, 30.0], pinball_q=0.25)
+    for h, label in ((7.0, '7d'), (30.0, '30d'), (181.0, '181d')):
+        for k, key in enumerate(('Readmission', 'Death', 'Out_Migration')):
+            estimated = half_incidence_time(data['cif'][:, k, :], grid)
+            ratios = time_ratios(estimated, days, ci, ev, k, h)
+            for side in ('Before', 'After'):
+                np.testing.assert_equal(out[f'{key}_Ratio_{side}_to_{label}'],
+                                        ratios[f'{side}_Ratio'])
+                assert (out[f'{key}_Ratio_{side}_N_to_{label}']
+                        == ratios[f'{side}_N'])
+    # Not the pinball loss's q: no key spells it.
+    assert not any(k.startswith('Readmission_Ratio_') and '_q' in k
+                   for k in out)

@@ -106,6 +106,18 @@ REPORTED_METRICS:
   - "{cause}_Pinball_q25_to_{horizon}"
   - "{cause}_Pinball_N_to_{tau}"
   - "{cause}_Pinball_N_to_{horizon}"
+  # The mean ratio of the true to the estimated time (the time errors'
+  # estimate) of the patients with the cause by each horizon and by the
+  # grid's, before and after the estimate, and the count of each side
+  # (user, 2026-11-24).
+  - "{cause}_Ratio_Before_to_{tau}"
+  - "{cause}_Ratio_Before_to_{horizon}"
+  - "{cause}_Ratio_After_to_{tau}"
+  - "{cause}_Ratio_After_to_{horizon}"
+  - "{cause}_Ratio_Before_N_to_{tau}"
+  - "{cause}_Ratio_Before_N_to_{horizon}"
+  - "{cause}_Ratio_After_N_to_{tau}"
+  - "{cause}_Ratio_After_N_to_{horizon}"
 
 # One BH family per cause table, covering every tested metric and comparison
 # in it. The only scope implemented.

@@ -39,6 +39,7 @@ from TransEHR2.survival import (
     survival_from_pmf,
     survival_metrics,
     time_errors,
+    time_ratios,
 )
 
 
@@ -942,6 +943,39 @@ def test_pinball_by_hand_both_directions_with_censoring():
     assert np.isnan(pinball_loss(estimated, days, cause_index, is_event, 0,
                                  3.0, q))
 
+
+
+def test_time_ratios_by_hand():
+    # Censored at 2 and at 6; censoring does not weight the ratios.
+    days = np.array([2.0, 4.0, 5.0, 6.0, 8.0])
+    cause_index = np.array([-1, 0, 0, -1, 0])
+    is_event = np.array([False, True, True, False, True])
+    estimated = np.array([np.nan, 3.0, 9.0, np.nan, 1.0])
+    # To H = 7: the event at 4 after its estimate (4/3), the one at 5
+    # before it (5/9).
+    got = time_ratios(estimated, days, cause_index, is_event, 0, 7.0)
+    assert got == pytest.approx({'Before_Ratio': 5 / 9, 'Before_N': 1,
+                                 'After_Ratio': 4 / 3, 'After_N': 1},
+                                rel=1e-12)
+    # To H = 8 the event at 8 joins the after side (8 / 1), unweighted.
+    got = time_ratios(estimated, days, cause_index, is_event, 0, 8.0)
+    assert got['After_N'] == 2 and got['Before_N'] == 1
+    assert got['After_Ratio'] == pytest.approx((4 / 3 + 8.0) / 2, rel=1e-12)
+
+
+def test_time_ratios_leave_out_ties_zero_estimates_and_empty_sides():
+    days = np.array([4.0, 5.0, 6.0])
+    cause_index = np.zeros(3, dtype=int)
+    is_event = np.ones(3, dtype=bool)
+    # On the estimate, an estimate of 0, and one after its estimate.
+    estimated = np.array([4.0, 0.0, 3.0])
+    got = time_ratios(estimated, days, cause_index, is_event, 0, 10.0)
+    assert got['Before_N'] == 0 and np.isnan(got['Before_Ratio'])
+    assert got['After_N'] == 1 and got['After_Ratio'] == pytest.approx(2.0)
+    # Nothing scored.
+    got = time_ratios(estimated, days, cause_index, is_event, 1, 10.0)
+    assert got['Before_N'] == got['After_N'] == 0
+    assert np.isnan(got['Before_Ratio']) and np.isnan(got['After_Ratio'])
 
 # ------------------------------------- ranking-term changes (plan, Task A)
 

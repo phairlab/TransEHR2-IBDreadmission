@@ -26,7 +26,8 @@ import yaml
 
 import _path  # noqa: F401  (repository root on sys.path)
 
-from TransEHR2.cli import TASK, TUNING_FOLD, get_fold_names, resolve_device
+from TransEHR2.cli import (TASK, TUNING_FOLD, check_label_set,
+                           get_fold_names, resolve_device)
 from TransEHR2.tabular import (
     ENCODING_FILE, LABELS_FILE, WEIGHTS_FILE, BaselineEncoding, build_model,
     config_grid, load_split, make_loader, read_baseline_features
@@ -66,6 +67,7 @@ def main(argv=None):
         data_dir = yaml.safe_load(f_in)['DATA_DIR']
     with open(args.experiment_config, 'r') as f_in:
         cfg = yaml.safe_load(f_in)
+    check_label_set(data_dir, cfg)
     batch_size = args.batch_size or cfg['BATCH_SIZE']
     grid = config_grid(cfg)
 

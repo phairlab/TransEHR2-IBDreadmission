@@ -42,7 +42,7 @@ from typing import Any, Dict, Optional
 import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.cli import (
-    TASK, TUNING_FOLD, get_fold_names, resolve_device
+    TASK, TUNING_FOLD, check_label_set, get_fold_names, resolve_device
 )
 from TransEHR2.data.preprocessing import (
     compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
@@ -140,6 +140,7 @@ POST_PRETRAINING_KEYS = frozenset({
     'TIME_GRID_CUTS_DAYS', 'MODELLED_CAUSES', 'BRIER_INTEGRATION_DAYS',
     'PREDICTOR_AGGREGATION_METHOD', 'EVAL_HORIZONS_DAYS', 'CR_DCAL_ALPHA',
     'CR_DCAL_N_RHO', 'CR_DCAL_CHI2_BINS', 'CR_DCAL_TEST_LEVEL',
+    'LABEL_SET',
 })
 
 # What a pretrained fold leaves that finetuning or a later reader uses.
@@ -257,6 +258,7 @@ def main():
 
     with open(args.experiment_config, 'r') as f_in:
         experiment_config = yaml.safe_load(f_in)
+    check_label_set(DATA_DIR, experiment_config)
     EXPERIMENT_NAME = experiment_config['EXPERIMENT_NAME']
     BATCH_SIZE = experiment_config['BATCH_SIZE']
     PREDICT_INDICATORS = experiment_config['PREDICT_INDICATORS']

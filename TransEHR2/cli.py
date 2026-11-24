@@ -27,6 +27,32 @@ TASK = 'competing_risks'
 # line overrides that, which is how the sweep itself reaches fold0.
 TUNING_FOLD = 'fold0'
 
+# A label set's DATA_DIR (IBDdataprep's label_set.py, user 2026-11-22) holds
+# a file of this name naming the set; the current DATA_DIR has none.
+LABEL_SET_FILE = 'LABEL_SET'
+
+
+def check_label_set(data_dir: str, experiment_config: dict) -> None:
+    """Refuse to run unless ``data_dir`` holds the experiment's labels.
+
+    The experiment's ``LABEL_SET`` (absent for the current labels) must name
+    the set ``data_dir`` was built for, so a dataset config left at its
+    default cannot train or score a label set's experiment on the current
+    labels, nor the reverse.
+    """
+    path = os.path.join(data_dir, LABEL_SET_FILE)
+    held = None
+    if os.path.exists(path):
+        with open(path) as f_in:
+            held = f_in.read().strip()
+    wanted = experiment_config.get('LABEL_SET')
+    if held != wanted:
+        raise ValueError(
+            f"{experiment_config.get('EXPERIMENT_NAME')} has LABEL_SET "
+            f"{wanted!r} but DATA_DIR {data_dir} holds "
+            f"{'the current labels' if held is None else repr(held)}; "
+            f"point the dataset config at the matching DATA_DIR")
+
 
 def get_fold_names(data_dir: str,
                    exclude: Optional[List[str]] = None) -> List[str]:

@@ -34,6 +34,7 @@ import yaml
 
 import _path  # noqa: F401  (repository root on sys.path)
 
+from TransEHR2.cli import check_label_set
 from TransEHR2.survival import (DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES,
                                 TimeGrid, metric_label,
                                 marginal_reference_metrics)
@@ -69,6 +70,7 @@ def main(argv=None) -> int:
 
     with open(args.experiment_config) as f_in:
         cfg = yaml.safe_load(f_in)
+    check_label_set(data_dir, cfg)
     grid = TimeGrid(cfg['TIME_GRID_CUTS_DAYS'],
                     cfg.get('MODELLED_CAUSES', list(DEFAULT_CAUSES)),
                     cfg.get('BRIER_INTEGRATION_DAYS',

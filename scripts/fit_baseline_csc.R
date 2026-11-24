@@ -91,6 +91,21 @@ unfilled <- setdiff(linear, filled)
 fill_unseen <- isTRUE(cfg$MEDIAN_FILL_UNSEEN_MISSING)
 data_dir <- read_yaml(options$dataset_config)$DATA_DIR
 
+# The experiment's LABEL_SET (absent for the current labels) must name the
+# set DATA_DIR holds, as TransEHR2.cli.check_label_set requires of the Python
+# entry points (user, 2026-11-22).
+label_set_file <- file.path(data_dir, "LABEL_SET")
+held <- if (file.exists(label_set_file)) {
+  trimws(readLines(label_set_file, n = 1L, warn = FALSE))
+} else NA_character_
+wanted <- if (is.null(cfg$LABEL_SET)) NA_character_ else cfg$LABEL_SET
+if (!identical(held, wanted)) {
+  stop(cfg$EXPERIMENT_NAME, " has LABEL_SET ", wanted, " but DATA_DIR ",
+       data_dir, " holds ",
+       if (is.na(held)) "the current labels" else held,
+       "; point the dataset config at the matching DATA_DIR")
+}
+
 exact <- function(x) sprintf("%.17g", x)
 
 labels <- fread(file.path(data_dir, "labels.csv"),

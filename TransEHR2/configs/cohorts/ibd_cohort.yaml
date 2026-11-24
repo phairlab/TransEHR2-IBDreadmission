@@ -108,3 +108,15 @@ READMISSION_EXCLUSIONS:
     codes: [Z37]
   maid:
     dispositions: ["73"]
+
+# ---------------------------------------------------------------------------
+# Label sets (user, 2026-11-22): alternative labellings built beside the
+# current labels, never over them. Each entry replaces the top-level keys it
+# names (only READMISSION_EXCLUSIONS so far) for
+#     build_labels.py --label-set <name> --labels data/labelsets/<name>/labels.csv
+# and IBDdataprep's label_set.py builds data/labelsets/<name>/ around it: the
+# same drawn episodes, folds and input arrays as data/, with this set's
+# targets (SLURM/slurm_label_set.sh runs both). The current labels are the
+# top-level rules above, untouched by any entry here.
+# ---------------------------------------------------------------------------
+LABEL_SETS: {}

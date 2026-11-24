@@ -45,7 +45,7 @@ from typing import Dict, List, Tuple
 import _path  # noqa: F401  (repository root on sys.path)
 
 from TransEHR2.cli import (
-    TASK, TUNING_FOLD, get_fold_names, resolve_device
+    TASK, TUNING_FOLD, check_label_set, get_fold_names, resolve_device
 )
 from TransEHR2.data.preprocessing import (
     compute_static_feat_dims, lookup_feat_widths, prepare_dataloaders,
@@ -263,6 +263,7 @@ def setup(args: argparse.Namespace) -> Dict:
 
     with open(args.experiment_config, 'r') as f_in:
         experiment_config = yaml.safe_load(f_in)
+    check_label_set(DATA_DIR, experiment_config)
     BATCH_SIZE = args.batch_size or experiment_config['BATCH_SIZE']
     DISCRIMINATOR_ENCODER_D_MODEL = experiment_config['DISCRIMINATOR_ENCODER_D_MODEL']
     DISCRIMINATOR_ENCODER_N_HEADS = experiment_config['DISCRIMINATOR_ENCODER_N_HEADS']

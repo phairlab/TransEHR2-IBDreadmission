@@ -43,7 +43,8 @@ from typing import Dict
 
 import _path  # noqa: F401  (repository root on sys.path)
 
-from TransEHR2.cli import TASK, TUNING_FOLD, get_fold_names, resolve_device
+from TransEHR2.cli import (TASK, TUNING_FOLD, check_label_set,
+                           get_fold_names, resolve_device)
 from TransEHR2.losses import DeepHitLoss, rank_max_bin_for
 from TransEHR2.routines import (
     SELECTION_METRICS, evaluate_finetuned_model, finetune_model
@@ -170,6 +171,7 @@ def main(argv=None):
         data_dir = yaml.safe_load(f_in)['DATA_DIR']
     with open(args.experiment_config, 'r') as f_in:
         cfg = yaml.safe_load(f_in)
+    check_label_set(data_dir, cfg)
 
     features = read_baseline_features(
         os.path.join(data_dir, cfg['BASELINE_FEATURES_FILE']))

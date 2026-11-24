@@ -389,6 +389,16 @@ def test_the_csc_scripts_end_to_end(tmp_path, monkeypatch):
             at_30[:, 0, 0], days, ci, ev, 0, 30.0, days, ev),
             rel=1e-12)
 
+    # Antolini's reads the exact curve at each case's own time.
+    from TransEHR2.survival import antolini_concordance
+    curve = CSCCurve(lp['test']['lp'], baseline)
+    expected = antolini_concordance(
+        lambda times: curve.read(times)[0][:, 0, :], days, ci, ev, 0,
+        [30.0])[30.0]
+    assert np.isfinite(expected)
+    assert results['test']['Readmission_Cindex_Antolini_to_30d'][0] == \
+        pytest.approx(expected, rel=1e-12)
+
 
 def test_csc_parameters_in_only_some_folds_are_refused(tmp_path,
                                                        monkeypatch):

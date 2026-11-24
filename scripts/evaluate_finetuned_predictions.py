@@ -72,7 +72,7 @@ from TransEHR2.survival import (
     DEFAULT_BRIER_INTEGRATION_DAYS, DEFAULT_CAUSES, DEFAULT_CR_DCAL_ALPHA,
     DEFAULT_CR_DCAL_CHI2_BINS, DEFAULT_CR_DCAL_N_RHO,
     DEFAULT_CR_DCAL_TEST_LEVEL, DEFAULT_EVAL_HORIZONS_DAYS, RECAL_FLOOR, TimeGrid, _cr_dcal_values,
-    aalen_johansen, brier_times, cause_specific_brier,
+    aalen_johansen, antolini_concordance, brier_times, cause_specific_brier,
     cause_specific_concordance, cr_d_calibration_from_values,
     cr_dcal_chi2_from_values, event_times_days, format_days,
     half_incidence_time, incidence_quantile_time, integrated_brier,
@@ -288,12 +288,14 @@ def csc_reads(curve: CSCCurve, days: np.ndarray, grid: TimeGrid,
     ``days`` as ``rows`` (n, n_causes); each estimated time of event, as
     ``half`` (n, n_causes); and ``quantile``, ``{H: (n, n_causes)}``, the
     pinball loss's estimated times to each of :func:`pinball_horizons`.
+    ``curve`` itself, for the reads at each case's own time that Antolini's
+    concordance makes a chunk at a time.
     """
     times = np.unique(np.concatenate(
         [brier_times(grid), [grid.horizon_days]]
         + [brier_times(grid, tau) for tau in horizons]))
     shared, rows = curve.read(times, days)
-    return {'times': times, 'shared': shared, 'rows': rows,
+    return {'curve': curve, 'times': times, 'shared': shared, 'rows': rows,
             'half': curve.half_incidence_times(grid.horizon_days),
             'quantile': {h: curve.half_incidence_times(h, pinball_q)
                          for h in pinball_horizons(grid, horizons)}}
@@ -365,7 +367,10 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
     over forty deaths is a number, but not one to put a decimal place on.
 
     At each of ``horizons``, Lee's weighted concordance of ``F_k(tau)``,
-    weighted by the censoring curve of these episodes; the integrated Brier
+    weighted by the censoring curve of these episodes; Antolini's
+    concordance of the cases by ``tau``, each pair read at the case's own
+    time on the continuous curve (:func:`antolini_concordance`, as
+    ``{cause}_Cindex_Antolini_to_{tau}``; user, 2026-11-24); the integrated Brier
     score from discharge to ``tau``;
     the same score of the split's own Aalen-Johansen curve, fitted and
     scored on these episodes; and IPA, one minus their ratio.
@@ -383,7 +388,7 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
     scores, as ``{cause}_Pinball_N_to_{H}``.
 
     ``csc`` is :func:`csc_reads` of the CSC's exact curve. With it, those
-    four, the integrated Brier score, CR D-calibration and the estimated
+    five, the integrated Brier score, CR D-calibration and the estimated
     times, the pinball loss's included, read that curve; without it, they read the grid curve through
     ``interpolate_cif``.
 
@@ -454,6 +459,16 @@ def score(data: Dict, grid: TimeGrid, dcal: Dict, horizons: List[float],
             out[f'{key}_IBS_Null_to_{label}'] = null
             out[f'{key}_IPA_to_{label}'] = (1.0 - ibs / null if null > 0
                                             else float('nan'))
+
+        def curve_at(times, k=k):
+            if csc is None:
+                return interpolate_cif(cif[:, k, :], grid, times)
+            return csc['curve'].read(times)[0][:, k, :]
+
+        for tau, value in antolini_concordance(curve_at, days, ci, ev, k,
+                                               horizons).items():
+            label = format_days(tau).replace(' ', '')
+            out[f'{key}_Cindex_Antolini_to_{label}'] = value
 
         values = (*dcal_values(data, grid, k, days, csc), ci, ev, k)
         out[f'{key}_CR_DCal'] = cr_d_calibration_from_values(

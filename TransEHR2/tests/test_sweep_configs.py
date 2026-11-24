@@ -13,6 +13,7 @@ REPORTS = os.path.join(CONFIGS, 'reports')
 SIGMAS = {'1e-3': 0.001, '3e-3': 0.003, '1e-2': 0.01, '3e-2': 0.03,
           '1e-1': 0.1}
 SWEPT = {'TransEHR2': 'transehr2', 'TabDeepHit': 'tabdh'}
+ANTOLINI = '{cause}_Cindex_Antolini_to_30d'
 
 
 def load(path):
@@ -51,8 +52,15 @@ def test_a_step_compares_its_deephits_with_the_other_four(tag):
     cv = load(os.path.join(REPORTS, 'part1_comparisons.yaml'))
     step = load(os.path.join(REPORTS, f'part1_sweep_sigma{tag}_comparisons'
                                       f'.yaml'))
-    assert {k: v for k, v in cv.items() if k != 'MODELS'} == {
-        k: v for k, v in step.items() if k != 'MODELS'}
+    # The sweep's main measure is tested there and only reported in the CV
+    # comparison, for the anchor (user, 2026-11-24).
+    assert step['TESTED_METRICS'] == [ANTOLINI] + cv['TESTED_METRICS']
+    assert [m for m in cv['REPORTED_METRICS'] if m != ANTOLINI] == \
+        step['REPORTED_METRICS']
+    assert ANTOLINI in cv['REPORTED_METRICS']
+    rest = {'MODELS', 'TESTED_METRICS', 'REPORTED_METRICS'}
+    assert {k: v for k, v in cv.items() if k not in rest} == {
+        k: v for k, v in step.items() if k not in rest}
     expected = dict(cv['MODELS'])
     expected.update({model: f'part1_{base}_sigma{tag}'
                      for model, base in SWEPT.items()})

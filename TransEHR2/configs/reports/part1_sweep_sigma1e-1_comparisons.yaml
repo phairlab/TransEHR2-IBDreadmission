@@ -71,6 +71,9 @@ COMPARISONS:
 # modelled cause, {tau} each horizon as the evaluation spells it, {cut} each
 # grid cut, and {horizon} the grid's horizon.
 TESTED_METRICS:
+  # The sweep's main measure (user, 2026-11-24): Antolini's C of the cases
+  # by 30 days, read at each case's own time on the continuous curve.
+  - "{cause}_Cindex_Antolini_to_30d"
   - "{cause}_Cindex_Lee_at_{tau}"
   - "{cause}_IBS_to_{tau}"
   - "{cause}_CR_DCal"

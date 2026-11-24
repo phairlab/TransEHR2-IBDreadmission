@@ -497,6 +497,78 @@ def cause_specific_concordance(
     return concordant / n_pairs if n_pairs else float("nan")
 
 
+def antolini_concordance(
+    curve_at: Callable[[np.ndarray], np.ndarray],
+    times_days: np.ndarray,
+    cause_index: np.ndarray,
+    is_event: np.ndarray,
+    k: int,
+    horizons: Sequence[float],
+    chunk: int = 128,
+) -> Dict[float, float]:
+    r"""Antolini's concordance of cause ``k`` on ``[0, tau]``, for each tau.
+
+    The continuous-time reading of :func:`cause_specific_concordance`
+    (user, 2026-11-24). A pair ``(i, j)`` is comparable when ``i`` failed of
+    cause ``k`` at ``T_i <= tau`` and ``j``'s recorded time is strictly
+    later, whatever happened to it then. It is concordant when
+    ``F_k(T_i | x_i) > F_k(T_i | x_j)``, both read at the *case's* time on the
+    continuous curve; ties count a half. Unweighted, as the binned version
+    is: a ``j`` censored before ``T_i`` is not a control.
+
+    .. math::
+        C_k(\tau) = \frac{\sum_{i,j} 1[\delta_i = k, T_i \le \tau,
+        T_i < T_j] \, Q_{ij}}{\sum_{i,j} 1[\delta_i = k, T_i \le \tau,
+        T_i < T_j]}
+
+    Unlike the binned version, two cases in one bin are compared. Every
+    horizon is a sum over the same per-case counts, so one pass serves
+    them all.
+
+    Args:
+        curve_at: ``times`` (p,) to ``F_k`` at them, (n, p).
+        times_days, cause_index, is_event, k: the scored episodes, as
+            :func:`cause_specific_brier` takes them.
+        horizons: each ``tau``, in days.
+        chunk: case times read per call of ``curve_at``.
+
+    Returns:
+        ``{tau: C}``, NaN where no case by ``tau`` has a control.
+    """
+    t = np.asarray(times_days, dtype=np.float64)
+    horizons = [float(tau) for tau in horizons]
+    cases = np.flatnonzero(np.asarray(is_event, dtype=bool)
+                           & (np.asarray(cause_index) == k)
+                           & (t <= max(horizons, default=-np.inf)))
+    case_times, case_at = np.unique(t[cases], return_inverse=True)
+    order = np.sort(t)
+    concordant = np.zeros(cases.size, dtype=np.float64)
+    controls = np.zeros(cases.size, dtype=np.float64)
+
+    for lo in range(0, case_times.size, chunk):
+        read = case_times[lo:lo + chunk]
+        values = np.asarray(curve_at(read), dtype=np.float64)
+        for offset, u in enumerate(read):
+            mine = np.flatnonzero(case_at == lo + offset)
+            later = t > u
+            ctrl = np.sort(values[later, offset])
+            risk = values[cases[mine], offset]
+            # Controls strictly below the case, plus half of those level.
+            below = np.searchsorted(ctrl, risk, side="left")
+            level = np.searchsorted(ctrl, risk, side="right") - below
+            concordant[mine] = below + 0.5 * level
+            controls[mine] = order.size - np.searchsorted(order, u,
+                                                          side="right")
+
+    out = {}
+    for tau in horizons:
+        by = t[cases] <= tau
+        pairs = controls[by].sum()
+        out[tau] = (float(concordant[by].sum() / pairs) if pairs
+                    else float("nan"))
+    return out
+
+
 def event_times_days(time_to_event: np.ndarray,
                     grid: TimeGrid) -> np.ndarray:
     """Event times in days, truncated at the horizon.

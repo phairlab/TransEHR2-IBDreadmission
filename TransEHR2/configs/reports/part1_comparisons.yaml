@@ -87,6 +87,10 @@ REPORTED_METRICS:
   # horizon and to the grid's. q25 is PINBALL_Q, 0.25, as the keys spell it.
   - "{cause}_Cindex"
   - "{cause}_Cindex_at_{cut}"
+  # Antolini's C of the cases by 30 days on the continuous curve: the
+  # sweep's main measure, tested there (user, 2026-11-24). Reported here
+  # for the sweep's anchor, the no-ranking-term models.
+  - "{cause}_Cindex_Antolini_to_30d"
   - "{cause}_Pinball_q25_to_{tau}"
   - "{cause}_Pinball_q25_to_{horizon}"
   - "{cause}_Pinball_N_to_{tau}"

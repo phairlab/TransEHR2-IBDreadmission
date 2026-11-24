@@ -11,13 +11,18 @@
 #
 # Seeds are pinned so that trials differ by the grid and nothing else. The
 # cost is that a margin between cells carries no error bar.
+#
+# Fixed rather than tuned (user, 2026-11-24): CMPNT_MASK_RATIO 0.5,
+# RECORD_MASK_RATIO 0.25, one encoder block in the generator and the
+# discriminator, and the DeepHit head [256, 128] shared, [64] per cause.
+# Phases 3 (masking and depth) and 4 (head widths) were dropped; phases 1
+# and 2 carry these values through unchanged.
 BATCH_SIZE: 200
 BRIER_INTEGRATION_DAYS: 30
-CMPNT_MASK_RATIO: 0.25
+CMPNT_MASK_RATIO: 0.5
 DEEPHIT_CAUSE_WEIGHTS: null
 DEEPHIT_HEAD_DROPOUT: 0.1
 DEEPHIT_HEAD_D_CAUSE:
-- 128
 - 64
 DEEPHIT_HEAD_D_SHARED:
 - 256
@@ -65,7 +70,7 @@ PRETRAIN_LEARNING_RATE: 0.002
 PRETRAIN_LR_HALF_LIFE: 329
 PRETRAIN_SEED: 0
 PRETRAIN_TOTAL_EPOCH: 200
-RECORD_MASK_RATIO: 0.15
+RECORD_MASK_RATIO: 0.25
 THP_ENCODER_DROPOUT: 0.1
 THP_ENCODER_D_INNER: 256
 THP_ENCODER_D_K: 128

@@ -6,8 +6,9 @@
 #
 # Both axes select on the pretraining loss, so no trial in this phase is
 # finetuned. Learning rate and decay leave the objective intact, which is
-# what makes that loss comparable across cells; the masking ratios in
-# phase 3 do not, which is why those move downstream.
+# what makes that loss comparable across cells. The masking ratios would
+# not, and they are fixed in phase1_base.yaml rather than tuned (user,
+# 2026-11-24), so phases 1 and 2 are the whole campaign.
 
 SPEC_NAME: phase1
 DESIGN: factorial

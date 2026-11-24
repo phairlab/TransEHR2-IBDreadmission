@@ -35,6 +35,8 @@
 #     (0.017637, cells 0.017637-0.017662).
 #   - phase 3: CMPNT_MASK_RATIO 0.5, RECORD_MASK_RATIO 0.15, 1 encoder block
 #     (0.017656, cells 0.017656-0.017809).
+#     RECORD_MASK_RATIO is now 0.25, fixed when phases 3 and 4 were
+#     dropped (user, 2026-11-24), so the body differs there.
 #   - phase 4: DEEPHIT_HEAD_D_SHARED [256, 128], DEEPHIT_HEAD_D_CAUSE [64]
 #     (0.017608, cells 0.017608-0.017656).
 #   - Both learning rates are the smallest value of their grid.
@@ -103,7 +105,7 @@ PRETRAIN_LEARNING_RATE: 0.0002
 PRETRAIN_LR_HALF_LIFE: null
 PRETRAIN_SEED: 0
 PRETRAIN_TOTAL_EPOCH: 200
-RECORD_MASK_RATIO: 0.15
+RECORD_MASK_RATIO: 0.25
 THP_ENCODER_DROPOUT: 0.1
 THP_ENCODER_D_INNER: 256
 THP_ENCODER_D_K: 128

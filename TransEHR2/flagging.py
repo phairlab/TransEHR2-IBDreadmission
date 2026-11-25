@@ -141,6 +141,14 @@ def decision_curve(score: np.ndarray, positive: np.ndarray,
                      for p in np.asarray(p_t, dtype=np.float64)])
 
 
+def percentile_rank(reference: np.ndarray, score: np.ndarray) -> np.ndarray:
+    """Each ``score``'s percentile rank among ``reference``: the fraction of
+    ``reference`` strictly below it."""
+    ref = np.sort(np.asarray(reference, dtype=np.float64))
+    return np.searchsorted(ref, score, side='left') / ref.size
+
+
+
 def matched_rate_threshold(score: np.ndarray,
                            fraction: float) -> Optional[float]:
     """Rule (a): the threshold at which ``score >= threshold`` flags

@@ -87,6 +87,16 @@ def test_treat_all_and_treat_none():
                              p_t), 0.0)
 
 
+def test_percentile_rank_is_the_fraction_of_reference_below():
+    reference = np.random.default_rng(8).random(1000)
+    score = np.array([-1.0, 0.25, 0.5, 2.0])
+    np.testing.assert_allclose(
+        flagging.percentile_rank(reference, score),
+        np.mean(reference[None, :] < score[:, None], axis=1))
+    q = flagging.percentile_rank(reference, reference)
+    assert np.mean(q >= 0.8) == pytest.approx(0.2)
+
+
 def test_sensitivity_at_matches_rates():
     days = np.array([1.0, 3.0, 4.0, 9.0, 12.0, 40.0, 41.0])
     cause = np.array([READMIT, -1, DEATH, READMIT, OUT, -1, READMIT])
@@ -197,6 +207,9 @@ def test_the_script_writes_both_populations(experiment, monkeypatch):
     decision = pd.read_csv(out / 'exp_lace_decision.csv')
     none = decision[decision['policy'] == 'Treat_none']
     assert (none['net_benefit'] == 0).all()
+    for policy in ('Model_q50', 'Model_q60', 'Model_q70', 'Model_q80',
+                   'Model_q90'):
+        assert (decision['policy'] == policy).sum() == len(none)
 
 
 def test_rule_a_matches_lace_flag_rate_on_val(experiment, monkeypatch):

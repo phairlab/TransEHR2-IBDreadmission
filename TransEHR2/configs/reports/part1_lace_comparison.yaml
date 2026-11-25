@@ -11,6 +11,12 @@ COMPOSITE_CAUSES: ["readmission", "death"]
 # (14+) strata.
 LACE_CUTOFFS: [7, 14]
 
+# The model as fixed policies on its rank (user, 2026-11-25): flag q(F) >=
+# each level, q the percentile rank of F among the fold's val patients, so
+# 0.5 flags about the top half and 0.9 the top tenth. Each gets a decision
+# curve beside the F >= p_t one.
+MODEL_QUANTILE_FLAGS: [0.5, 0.6, 0.7, 0.8, 0.9]
+
 # Threshold probabilities of the decision curves: START to STOP by STEP.
 NET_BENEFIT_THRESHOLDS: {START: 0.0, STOP: 0.5, STEP: 0.005}
 

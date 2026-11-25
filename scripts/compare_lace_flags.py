@@ -18,8 +18,11 @@ For one experiment, fold by fold, at each horizon ``H`` of
   on ``val`` reaches LACE's.
 * **Metrics on test**: each policy's IPCW sensitivity, specificity, PPV and
   flag rate; each score's IPCW ROC curve and AUC; the decision curves of
-  the model, LACE >= each cutoff as a fixed policy, treat-all and
-  treat-none.
+  the model flagging ``F >= p_t``; the model flagging ``q(F) >= level``
+  as a fixed policy for each level of ``MODEL_QUANTILE_FLAGS`` (``q`` the
+  percentile rank of F among the fold's ``val`` patients, so ``q(F) >=
+  0.8`` flags about the top 20%); LACE >= each cutoff as a fixed policy;
+  treat-all and treat-none.
 
 A full-cohort experiment's one fold, ``full``, has fold0's test patients as
 its val and the held-out set as its test, so the same run scores the
@@ -76,6 +79,11 @@ DEFAULT_CONFIG = os.path.join(
 
 def horizon_label(h: float) -> str:
     return format_days(float(h)).replace(' ', '')
+
+
+def quantile_policy(level: float) -> str:
+    """``Model_q80`` for the policy flagging ``q(F) >= 0.8``."""
+    return f'Model_q{round(100 * float(level)):g}'
 
 
 def composite_risk(data: Dict, grid, causes: List[int], horizon: float,
@@ -203,6 +211,10 @@ def score_fold(val: Dict, test: Dict, causes: List[int], cfg: Dict,
         for cut in cfg['LACE_CUTOFFS']:
             curves[f'LACE_ge{cut}'] = flagging.net_benefit(
                 test['lace'] >= cut, t_pos, t_w, p_t)
+        rank = flagging.percentile_rank(v_risk, t_risk)
+        for level in cfg['MODEL_QUANTILE_FLAGS']:
+            curves[quantile_policy(level)] = flagging.net_benefit(
+                rank >= level, t_pos, t_w, p_t)
         for policy, values in curves.items():
             for p, value in zip(p_t, values):
                 decision.append({'horizon': label, 'policy': policy,
@@ -290,6 +302,8 @@ def main(argv=None) -> int:
             'horizons_days': horizons,
             'composite_causes': list(cfg['COMPOSITE_CAUSES']),
             'lace_cutoffs': list(cfg['LACE_CUTOFFS']),
+            'model_quantile_flags': [float(q) for q in
+                                     cfg['MODEL_QUANTILE_FLAGS']],
             'lace': 'AMA sheet (lace.py lace_ama.csv)',
             'model_score': 'sum of F_k(H) over the composite causes, raw '
                            'predictions',
